@@ -27,9 +27,11 @@ fn block_size_code(n: u16) -> (u8, Option<(u32, u32)>) {
     }
 }
 
-/// Frame header sample rate code; 0 refers to STREAMINFO.
-fn sample_rate_code(rate: u32) -> u8 {
-    match rate {
+/// Frame header sample rate code, with the value stored after the header for codes 12–14 (kHz,
+/// Hz, tens of Hz); 0 refers to STREAMINFO and is left for rates none of those can name, which
+/// are outside the streamable subset (§7). Rates outside the table all took 0 before.
+fn sample_rate_code(rate: u32) -> (u8, Option<(u32, u32)>) {
+    let code = match rate {
         88_200 => 1,
         176_400 => 2,
         192_000 => 3,
@@ -41,8 +43,12 @@ fn sample_rate_code(rate: u32) -> u8 {
         44_100 => 9,
         48_000 => 10,
         96_000 => 11,
+        r if r % 1000 == 0 && r / 1000 <= 0xFF => return (12, Some((r / 1000, 8))),
+        r if r <= 0xFFFF => return (13, Some((r, 16))),
+        r if r % 10 == 0 && r / 10 <= 0xFFFF => return (14, Some((r / 10, 16))),
         _ => 0,
-    }
+    };
+    (code, None)
 }
 
 /// Frame header sample size code; 0 refers to STREAMINFO.
@@ -114,23 +120,37 @@ fn write_residual(w: &mut BitWriter, residual: &Residual, r: &[i64], block: usiz
 }
 
 fn write_subframe(w: &mut BitWriter, x: &[i32], sub: &Subframe, bps: u8) {
+    if let Subframe::Wasted { bits, coded } = sub {
+        let shifted: Vec<i32> = x.iter().map(|&v| v >> bits).collect();
+        return write_coded(w, &shifted, coded, bps.saturating_sub(*bits), *bits);
+    }
+    write_coded(w, x, sub, bps, 0);
+}
+
+/// Subframe header (§9.2.1) and body of samples already without their `wasted` low bits.
+fn write_coded(w: &mut BitWriter, x: &[i32], sub: &Subframe, bps: u8, wasted: u8) {
     let b = u32::from(bps);
     let sample = |w: &mut BitWriter, v: i32| w.write_bits(v as u32, b);
-    w.write_bit(false);
+    // the flag, then the count minus 1 in unary
+    let header = |w: &mut BitWriter, kind: u32| {
+        w.write_bit(false);
+        w.write_bits(kind, 6);
+        w.write_bit(wasted > 0);
+        if wasted > 0 {
+            w.write_bits(1, u32::from(wasted));
+        }
+    };
     match sub {
         Subframe::Constant(v) => {
-            w.write_bits(0, 6);
-            w.write_bit(false);
+            header(w, 0);
             sample(w, *v);
         }
         Subframe::Verbatim => {
-            w.write_bits(1, 6);
-            w.write_bit(false);
+            header(w, 1);
             x.iter().for_each(|&v| sample(w, v));
         }
         Subframe::Fixed { order, residual } => {
-            w.write_bits(0b001000 | u32::from(*order), 6);
-            w.write_bit(false);
+            header(w, 0b001000 | u32::from(*order));
             let o = usize::from(*order);
             x.iter().take(o).for_each(|&v| sample(w, v));
             let r = crate::predict::fixed_residual(x, o).unwrap_or_default();
@@ -138,8 +158,7 @@ fn write_subframe(w: &mut BitWriter, x: &[i32], sub: &Subframe, bps: u8) {
         }
         Subframe::Lpc { coefs, precision, shift, residual } => {
             let o = coefs.len();
-            w.write_bits(0b100000 | (o as u32 - 1), 6);
-            w.write_bit(false);
+            header(w, 0b100000 | (o as u32).saturating_sub(1));
             x.iter().take(o).for_each(|&v| sample(w, v));
             w.write_bits(u32::from(*precision) - 1, 4);
             w.write_bits(u32::from(*shift), 5);
@@ -147,6 +166,8 @@ fn write_subframe(w: &mut BitWriter, x: &[i32], sub: &Subframe, bps: u8) {
             let r = crate::predict::lpc_residual(x, coefs, *shift).unwrap_or_default();
             write_residual(w, residual, &r, x.len(), o);
         }
+        // `choose` does not nest them
+        Subframe::Wasted { coded, .. } => write_coded(w, x, coded, bps, wasted),
     }
 }
 
@@ -160,9 +181,11 @@ pub fn write(spec: &FrameSpec) -> Vec<u8> {
         Some(Stereo::MidSide) => 10,
         _ => spec.channels.len().saturating_sub(1) as u8,
     };
-    let mut h = vec![0xFF, 0xF8, bs_code << 4 | sample_rate_code(spec.sample_rate), channel_code << 4 | sample_size_code(spec.bps) << 1];
+    let (sr_code, sr_extra) = sample_rate_code(spec.sample_rate);
+    let mut h = vec![0xFF, 0xF8, bs_code << 4 | sr_code, channel_code << 4 | sample_size_code(spec.bps) << 1];
     coded_number(spec.number, &mut h);
-    if let Some((v, n)) = bs_extra {
+    // the uncommon block size, then the uncommon sample rate (§9.1.6, §9.1.7)
+    for (v, n) in [bs_extra, sr_extra].into_iter().flatten() {
         if n == 8 {
             h.push(v as u8);
         } else {
@@ -201,5 +224,32 @@ mod tests {
         assert_eq!(code(0x1_0000), [0xF0, 0x90, 0x80, 0x80]);
         assert_eq!(code(0x7FFF_FFFF), [0xFD, 0xBF, 0xBF, 0xBF, 0xBF, 0xBF]);
         assert_eq!(code(0xF_FFFF_FFFF), [0xFE, 0xBF, 0xBF, 0xBF, 0xBF, 0xBF, 0xBF]);
+    }
+
+    /// A frame at a rate outside the table names it after the header (code 13: Hz, 16 bits), so
+    /// the stream stays in the streamable subset; it said "see STREAMINFO" (code 0).
+    #[test]
+    fn a_frame_header_names_an_uncommon_rate() {
+        let x = [5i32; 16];
+        let channels = [(&x[..], Subframe::Constant(5), 16u8)];
+        let frame = write(&FrameSpec { number: 0, sample_rate: 11_025, bps: 16, stereo: None, channels: &channels });
+        // block size code 0110 (8 bits after the header), rate code 13, then the frame number,
+        // the block size less one and the rate
+        assert_eq!(frame[2], 0b0110_1101);
+        assert_eq!(frame[4..8], [0, 15, 0x2B, 0x11]);
+        assert_eq!(frame[8], crc8(&frame[..8]));
+    }
+
+    #[test]
+    fn sample_rates_outside_the_table_are_named_in_the_header() {
+        assert_eq!(sample_rate_code(48_000), (10, None));
+        assert_eq!(sample_rate_code(64_000), (12, Some((64, 8))));
+        assert_eq!(sample_rate_code(11_025), (13, Some((11_025, 16))));
+        assert_eq!(sample_rate_code(37_800), (13, Some((37_800, 16))));
+        assert_eq!(sample_rate_code(352_800), (14, Some((35_280, 16))));
+        assert_eq!(sample_rate_code(655_350), (14, Some((65_535, 16))));
+        // neither whole kHz, at most 65535 Hz, nor whole tens of Hz
+        assert_eq!(sample_rate_code(100_001), (0, None));
+        assert_eq!(sample_rate_code(1_048_575), (0, None));
     }
 }

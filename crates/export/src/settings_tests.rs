@@ -771,6 +771,54 @@ fn flac_settings_round_trip_and_summary() {
     assert!(flac < pcm, "{flac} < {pcm}");
 }
 
+/// What the FLAC encoder writes reads back exactly through FilmCraft's own reader: subframes with
+/// wasted bits (16-bit audio at 24 or 32 bits, which no longer costs the padding), residuals near
+/// the 32-bit limit, and sample rates outside the frame header's table (named in the header now).
+#[test]
+fn flac_wasted_bits_large_residuals_and_uncommon_rates_read_back() {
+    let tone = |n: usize, bits: u32, shift: u32, hz: f64, rate: u32| -> Vec<i32> {
+        let max = f64::from((1u32 << (bits - shift - 1)) - 1);
+        (0..n).map(|i| (((i as f64 * hz * std::f64::consts::TAU / f64::from(rate)).sin() * 0.7 * max).round() as i32) << shift).collect()
+    };
+    let size = |planar: &[Vec<i32>], rate: u32, bps: u8| {
+        let mut enc = filmcraft_flac::Encoder::new(filmcraft_flac::EncoderConfig::new(rate, planar.len() as u8, bps)).unwrap();
+        let mut file = enc.header();
+        let refs: Vec<&[i32]> = planar.iter().map(Vec::as_slice).collect();
+        file.extend(enc.encode(&refs).unwrap());
+        file.extend(enc.finish());
+        let at = filmcraft_flac::STREAMINFO_OFFSET as usize;
+        file[at..at + 34].copy_from_slice(&enc.streaminfo());
+        file
+    };
+    let n = 20_000;
+    for (rate, bps, shift) in [(48_000, 24u8, 8u32), (48_000, 32, 16), (44_100, 16, 3), (11_025, 16, 0), (37_800, 24, 0), (64_000, 16, 0), (352_800, 24, 0)] {
+        let planar = vec![tone(n, u32::from(bps), shift, 440.0, rate), tone(n, u32::from(bps), shift, 660.0, rate)];
+        let file = size(&planar, rate, bps);
+        let at = format!("{rate} Hz, {bps} bits, {shift} wasted");
+        let back = filmcraft_codecs::open_bytes("t.flac", file.clone().into()).unwrap_or_else(|e| panic!("{at}: {e}")).audio(0, n, rate).unwrap();
+        let scale = f64::from(1u32 << (bps - 1));
+        for (c, (got, want)) in back.channels.iter().zip(&planar).enumerate() {
+            assert_eq!(got.len(), n, "{at}");
+            let worst = got.iter().zip(want).map(|(&g, &w)| (f64::from(g) * scale - f64::from(w)).abs() / scale).fold(0.0, f64::max);
+            assert!(worst < 1e-6, "{at}, channel {c}: off by {worst}");
+        }
+        if shift > 0 {
+            // the padding is not stored: about the size of the same audio without it
+            let unpadded: Vec<Vec<i32>> = planar.iter().map(|c| c.iter().map(|&v| v >> shift).collect()).collect();
+            let base = size(&unpadded, rate, bps - shift as u8).len();
+            assert!(file.len() < base * 11 / 10, "{at}: {} bytes against {base}", file.len());
+        }
+    }
+    // a full-scale click at 32 bits needs a residual near the limit: still read back
+    let mut click = vec![0i32; 4096];
+    click[2048] = i32::MAX;
+    let file = size(std::slice::from_ref(&click), 48_000, 32);
+    // predicted, not stored verbatim (four bytes a sample)
+    assert!(file.len() < 4096 * 4 / 2, "{} bytes", file.len());
+    let back = filmcraft_codecs::open_bytes("click.flac", file.into()).unwrap().audio(0, 4096, 48_000).unwrap();
+    assert!((back.channels[0][2048] - 1.0).abs() < 1e-6 && back.channels[0].iter().filter(|&&s| s != 0.0).count() == 1);
+}
+
 #[test]
 fn invalid_export_allocations_are_rejected_before_rendering() {
     let (project, sequence, _) = matte([1.0, 0.0, 0.0, 1.0], 64, 36, None);

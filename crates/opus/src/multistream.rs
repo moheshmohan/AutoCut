@@ -87,6 +87,25 @@ impl Decoder {
 
     /// Decodes one packet (`None` = lost packet, concealed) into planar channels.
     pub fn decode(&mut self, packet: Option<&[u8]>) -> Result<Vec<Vec<f32>>> {
+        self.decode_or_conceal(packet, None)
+    }
+
+    /// Conceals one lost or undecodable packet. With its bytes at hand and a TOC and framing that
+    /// parse, the concealment is as long as the packet; otherwise as long as the last packet
+    /// (20 ms before any). A damaged packet was concealed at the previous packet's length, which
+    /// moved the audio after it when the two differ.
+    pub fn conceal(&mut self, packet: Option<&[u8]>) -> Result<Vec<Vec<f32>>> {
+        let dur = packet.and_then(|d| self.packet_duration(d));
+        self.decode_or_conceal(None, dur)
+    }
+
+    /// Samples per channel, at the output rate, in a packet whose framing parses.
+    fn packet_duration(&self, data: &[u8]) -> Option<usize> {
+        let p = if self.streams.len() > 1 { Packet::parse_self_delimited(data).ok()?.0 } else { Packet::parse(data).ok()? };
+        Some(p.toc.frame_samples(self.rate).saturating_mul(p.frames.len())).filter(|&n| n > 0)
+    }
+
+    fn decode_or_conceal(&mut self, packet: Option<&[u8]>, conceal_len: Option<usize>) -> Result<Vec<Vec<f32>>> {
         let n = self.streams.len();
         for b in &mut self.scratch {
             b.clear();
@@ -117,10 +136,10 @@ impl Decoder {
                 }
             }
             _ => {
-                let dur = match self.streams[0].last_packet_duration() {
+                let dur = conceal_len.unwrap_or(match self.streams[0].last_packet_duration() {
                     0 => self.rate as usize / 50,
                     d => d,
-                };
+                });
                 for s in 0..n {
                     self.streams[s].conceal(dur, &mut self.scratch[s])?;
                 }
@@ -169,4 +188,41 @@ fn reframe(p: &Packet) -> Vec<u8> {
         v.extend_from_slice(f);
     }
     v
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A damaged packet is concealed at its own length, from its TOC and framing, not at the last
+    /// packet's: the audio after it stays in place.
+    #[test]
+    fn a_damaged_packet_is_concealed_at_its_own_length() {
+        // two uncoupled mono streams
+        let head = OpusHead {
+            channels: 2,
+            pre_skip: 0,
+            input_sample_rate: 48_000,
+            output_gain: 0,
+            mapping_family: 1,
+            streams: 2,
+            coupled_streams: 0,
+            mapping: vec![0, 1],
+        };
+        let mut d = Decoder::from_head(head, 48_000).unwrap();
+        // 20 ms CELT frames (TOC config 19), empty: each stream conceals 20 ms
+        let full = [0x98, 0x00, 0x98];
+        assert_eq!(d.decode(Some(&full)).unwrap()[0].len(), 960);
+        // 10 ms (config 18) in the first stream, and the second stream cut off
+        let damaged = [0x90, 0x00];
+        assert!(d.decode(Some(&damaged)).is_err());
+        assert_eq!(d.conceal(Some(&damaged)).unwrap()[0].len(), 480);
+        // framing that does not parse, or no bytes: as long as the last packet
+        assert_eq!(d.conceal(Some(&[0x93])).unwrap()[0].len(), 480);
+        assert_eq!(d.conceal(None).unwrap()[0].len(), 480);
+        // a single stream reads its packet as a regular one
+        let mut mono = Decoder::simple(48_000, 1).unwrap();
+        assert_eq!(mono.decode(Some(&[0x98])).unwrap()[0].len(), 960);
+        assert_eq!(mono.conceal(Some(&[0x88])).unwrap()[0].len(), 240);
+    }
 }

@@ -2,8 +2,9 @@
 //! predictors, linear prediction from the windowed autocorrelation (Levinson–Durbin), and
 //! partitioned Rice codes. Everything here only measures and chooses; [`crate::frame`] writes.
 
-/// Residuals larger than this are not Rice coded (a 5-bit parameter tops out at 30).
-const MAX_RESIDUAL: i64 = (1 << 30) - 1;
+/// Residuals must fit a 32-bit integer, leaving out its most negative value (RFC 9639 §9.2.7.3).
+/// The limit was half that, so at 32 bits a transient forced its whole block to verbatim.
+const MAX_RESIDUAL: i64 = i32::MAX as i64;
 
 /// A residual coded with partitioned Rice codes.
 #[derive(Clone, Debug, PartialEq)]
@@ -27,8 +28,21 @@ impl Residual {
 pub enum Subframe {
     Constant(i32),
     Verbatim,
-    Fixed { order: u8, residual: Residual },
-    Lpc { coefs: Vec<i32>, precision: u8, shift: u8, residual: Residual },
+    Fixed {
+        order: u8,
+        residual: Residual,
+    },
+    Lpc {
+        coefs: Vec<i32>,
+        precision: u8,
+        shift: u8,
+        residual: Residual,
+    },
+    /// `coded` is of the samples without their `bits` zero low bits, at that many bits fewer (§9.2.2).
+    Wasted {
+        bits: u8,
+        coded: Box<Subframe>,
+    },
 }
 
 /// Folded residual: 0, -1, 1, -2, 2 … → 0, 1, 2, 3, 4 ….
@@ -246,6 +260,17 @@ pub fn choose(x: &[i32], bps: u8, effort: Effort) -> (Subframe, u64) {
     if x.iter().all(|&v| v == first) {
         return (Subframe::Constant(first), head + b);
     }
+    // Low bits that are zero in every sample (16-bit audio exported at 24 or 32 bits) are not
+    // coded. Not constant, so not all zero: at least one bit per sample stays.
+    let wasted = x.iter().fold(0, |bits, &v| bits | v).trailing_zeros();
+    if let Ok(w) = u8::try_from(wasted)
+        && w > 0
+        && let Some(fewer) = bps.checked_sub(w).filter(|&b| b > 0)
+    {
+        let shifted: Vec<i32> = x.iter().map(|&v| v >> w).collect();
+        let (coded, bits) = choose(&shifted, fewer, effort);
+        return (Subframe::Wasted { bits: w, coded: Box::new(coded) }, bits + u64::from(w));
+    }
     let mut best = (Subframe::Verbatim, head + n as u64 * b);
     let mut consider = |sub: Subframe, bits: u64| {
         if bits < best.1 {
@@ -321,6 +346,44 @@ mod tests {
         // a loud 32-bit signal: the prediction is 2^31 and the residual only -1
         assert!(lpc_residual(&[1 << 30, 1 << 30, i32::MAX], &[1, 1], 0).is_none());
         assert!(lpc_residual(&[i32::MIN, i32::MIN, i32::MIN], &[1, 1], 1).is_some());
+    }
+
+    #[test]
+    fn residuals_may_reach_the_limit_of_a_32_bit_integer() {
+        assert!(fixed_residual(&[i32::MAX, -i32::MAX], 0).is_some());
+        assert!(fixed_residual(&[0, i32::MAX], 1).is_some());
+        // the most negative value is out of range (§9.2.7.3)
+        assert!(fixed_residual(&[i32::MIN], 0).is_none());
+        assert!(fixed_residual(&[0, 1 << 30, -(1 << 30)], 1).is_none());
+        assert!(lpc_residual(&[0, i32::MAX], &[1], 0).is_some());
+    }
+
+    /// Two tones and a little noise, from a fixed seed.
+    fn tones(n: usize) -> Vec<i32> {
+        let mut seed = 1u32;
+        (0..n)
+            .map(|i| {
+                seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                let t = i as f64;
+                ((t * 0.031).sin() * 9000.0 + (t * 0.17).sin() * 3000.0) as i32 + (seed >> 26) as i32 - 32
+            })
+            .collect()
+    }
+
+    #[test]
+    fn wasted_bits_are_not_coded() {
+        let x = tones(4096);
+        let padded: Vec<i32> = x.iter().map(|&s| s << 8).collect();
+        let effort = Effort::level(5);
+        let (sub, bits) = choose(&x, 16, effort);
+        // the same coding, plus the 8 bits that say how many are wasted
+        assert_eq!(choose(&padded, 24, effort), (Subframe::Wasted { bits: 8, coded: Box::new(sub) }, bits + 8));
+        // at most what leaves one bit per sample, and nothing for silence, a constant keeps its bits
+        let lowest = [0, -(1 << 23)];
+        assert!(matches!(choose(&lowest, 24, effort).0, Subframe::Wasted { bits: 23, .. }));
+        assert_eq!(choose(&[256; 10], 24, effort).0, Subframe::Constant(256));
+        // samples past their depth (the encoder refuses them) leave no bits to code: not wasted
+        assert!(!matches!(choose(&[0, 1 << 20], 16, effort).0, Subframe::Wasted { .. }));
     }
 
     #[test]

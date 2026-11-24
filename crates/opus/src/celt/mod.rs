@@ -40,6 +40,8 @@ pub struct CeltDecoder {
     pub rng: u32,
     loss_count: u32,
     skip_plc: bool,
+    /// Pitch lag the concealment found on the first lost frame, reused for the losses after it.
+    plc_pitch: usize,
     postfilter_period: i32,
     postfilter_period_old: i32,
     postfilter_gain: f32,
@@ -74,6 +76,7 @@ impl CeltDecoder {
             rng: 0,
             loss_count: 0,
             skip_plc: true,
+            plc_pitch: PLC_PITCH_LAG_MIN,
             postfilter_period: 0,
             postfilter_period_old: 0,
             postfilter_gain: 0.0,
@@ -100,6 +103,7 @@ impl CeltDecoder {
         self.rng = 0;
         self.loss_count = 0;
         self.skip_plc = true;
+        self.plc_pitch = PLC_PITCH_LAG_MIN;
         self.postfilter_period = 0;
         self.postfilter_period_old = 0;
         self.postfilter_gain = 0.0;
@@ -484,6 +488,9 @@ impl CeltDecoder {
                 }
             }
             self.rng = seed;
+            // As libopus: after noise, the history holds no pitch to extend until two good frames
+            // in a row have been decoded.
+            self.skip_plc = true;
             for ch in 0..cc {
                 let mem = &mut self.decode_mem[ch * ml..(ch + 1) * ml];
                 mem.copy_within(n..DECODE_BUFFER_SIZE + OVERLAP / 2, 0);
@@ -503,10 +510,11 @@ impl CeltDecoder {
                     *v += self.decode_mem[ch * ml + base + i];
                 }
             }
-            let period = if self.loss_count == 0 { find_pitch(&mono) } else { self.postfilter_period_old.max(PLC_PITCH_LAG_MIN as i32) as usize };
+            // The post-filter state is left alone: the next good frame cross-fades from it. It held
+            // the concealment's pitch before, so that frame's post-filter faded from a wrong period.
+            let period = if self.loss_count == 0 { find_pitch(&mono) } else { self.plc_pitch };
             let period = period.clamp(PLC_PITCH_LAG_MIN, PLC_PITCH_LAG_MAX);
-            // Remember the period for subsequent losses in the (otherwise unused) old period slot.
-            self.postfilter_period_old = period as i32;
+            self.plc_pitch = period;
             let fade = 0.8f32.powi(self.loss_count as i32 + 1);
             let mut ext = vec![0f32; n + OVERLAP];
             for ch in 0..cc {
@@ -634,5 +642,55 @@ fn comb_filter(buf: &mut [f32], off: usize, t0: i32, t1: i32, n: usize, g0: f32,
     for i in overlap..n {
         let p = off + i;
         buf[p] = buf[p] + g10 * buf[p - t] + g11 * (buf[p + 1 - t] + buf[p - t - 1]) + g12 * (buf[p + 2 - t] + buf[p - t - 2]);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn concealment_leaves_the_post_filter_state_for_the_next_good_frame() {
+        let mut d = CeltDecoder::new(48000, 1);
+        d.skip_plc = false;
+        // A decoded history with a clear pitch, so the concealment takes the pitch-based path.
+        let ml = d.mem_len();
+        for (i, v) in d.decode_mem[..ml].iter_mut().enumerate() {
+            *v = (i as f32 * std::f32::consts::TAU / 240.0).sin() * 1000.0;
+        }
+        d.postfilter_period = 300;
+        d.postfilter_period_old = 300;
+        d.postfilter_gain = 0.5;
+        d.postfilter_gain_old = 0.5;
+        for _ in 0..3 {
+            d.decode_lost(960, 3);
+        }
+        assert_eq!((d.postfilter_period, d.postfilter_period_old), (300, 300));
+        assert_eq!(d.plc_pitch % 240, 0, "the lag is a period of the history");
+    }
+
+    #[test]
+    fn noise_concealment_waits_for_two_good_frames_before_pitch_concealment() {
+        // Only the noise-based concealment draws from `rng`, so a changed `rng` tells the paths apart.
+        fn loss_is_noise(d: &mut CeltDecoder) -> bool {
+            let rng = d.rng;
+            d.decode(None, 960, &mut [0.0; 960], false, None).unwrap();
+            d.rng != rng
+        }
+        let good = [0x55u8; 40];
+        let mut d = CeltDecoder::new(48000, 1);
+        for _ in 0..2 {
+            d.decode(Some(&good), 960, &mut [0.0; 960], false, None).unwrap();
+        }
+        for _ in 0..5 {
+            assert!(!loss_is_noise(&mut d), "the first losses extend the pitch");
+        }
+        assert!(loss_is_noise(&mut d), "the sixth loss in a row is noise");
+        d.decode(Some(&good), 960, &mut [0.0; 960], false, None).unwrap();
+        assert!(loss_is_noise(&mut d), "one good frame after noise does not re-enable pitch concealment");
+        for _ in 0..2 {
+            d.decode(Some(&good), 960, &mut [0.0; 960], false, None).unwrap();
+        }
+        assert!(!loss_is_noise(&mut d), "two good frames in a row do");
     }
 }

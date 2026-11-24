@@ -204,10 +204,11 @@ impl PacketDecoder {
                 return Ok(out);
             }
             Inner::Opus { dec, order } => {
-                // A corrupt packet is concealed like a lost one (keeps timing and decoder state).
+                // A corrupt packet is concealed like a lost one (keeps timing and decoder state), at
+                // its own length when its framing parses.
                 let out = match dec.decode(Some(data)) {
                     Ok(o) => o,
-                    Err(_) => dec.decode(None).map_err(|e| CodecError::Decode(e.to_string()))?,
+                    Err(_) => dec.conceal(Some(data)).map_err(|e| CodecError::Decode(e.to_string()))?,
                 };
                 let out = reorder(out, *order);
                 self.channels = out.len();
@@ -998,6 +999,14 @@ impl AudioFileSource {
         let mut dec =
             symphonia::default::get_codecs().make(&track.codec_params, &DecoderOptions::default()).map_err(|e| CodecError::Unsupported(e.to_string()))?;
         let mut samples: Vec<Vec<f32>> = Vec::new();
+        // FLAC: symphonia's demuxer drops a frame whose checksum fails and resyncs on the next one,
+        // and a frame that does not decode is skipped below, so the file decoded short and all later
+        // audio came out early. The jump in the timestamps (native FLAC counts frames from 0) is the
+        // audio that was lost; it becomes silence.
+        let params = &track.codec_params;
+        let counts_frames = params.time_base.is_none_or(|tb| tb.numer == 1 && tb.denom == rate);
+        let mut flac_next = (params.codec == CODEC_TYPE_FLAC && counts_frames).then_some(0u64);
+        let declared = params.n_frames.filter(|&n| n > 0);
         while let Ok(pkt) = format.next_packet() {
             if pkt.track_id() != track.id {
                 continue;
@@ -1007,6 +1016,17 @@ impl AudioFileSource {
             let ch = spec.channels.count().max(1);
             if samples.is_empty() {
                 samples = vec![Vec::new(); ch];
+            }
+            if let Some(next) = flac_next {
+                let lost = flac_gap(next, pkt.ts(), declared, samples.first().map_or(0, Vec::len), samples.len());
+                if lost > 0 {
+                    log::warn!("{name}: {lost} FLAC frames lost to damage at frame {next}; they play as silence");
+                    for c in &mut samples {
+                        c.resize(c.len() + lost, 0.0);
+                    }
+                }
+                let dur = if pkt.dur() > 0 { pkt.dur() } else { buf.frames() as u64 };
+                flac_next = Some(pkt.ts().saturating_add(dur));
             }
             let mut sb = SampleBuffer::<f32>::new(buf.capacity() as u64, spec);
             sb.copy_interleaved_ref(buf);
@@ -1039,6 +1059,28 @@ impl AudioFileSource {
         };
         Ok((info, rate, samples))
     }
+}
+
+/// Most frames of silence a jump in a FLAC file's timestamps stands for when the file declares no
+/// length: more than any packet holds is not believed.
+const MAX_FLAC_GAP_FRAMES: u64 = 1 << 20;
+
+/// Most samples (all channels together) a FLAC file decodes to with its lost frames filled in;
+/// past it a gap stays out, as it did before (4 GiB of f32, as [`MAX_ADTS_SAMPLES`]).
+const MAX_FLAC_GAP_TOTAL: u64 = 1 << 30;
+
+/// Frames of silence before a FLAC packet stamped at `ts` when the previous one ended at `next`:
+/// the frames the demuxer dropped. Never past the `declared` length (the file says how long it
+/// is), without one at most [`MAX_FLAC_GAP_FRAMES`], and never so many that `decoded` frames of
+/// `channels` grow past [`MAX_FLAC_GAP_TOTAL`] samples. 0 for no gap.
+fn flac_gap(next: u64, ts: u64, declared: Option<u64>, decoded: usize, channels: usize) -> usize {
+    let lost = ts.saturating_sub(next);
+    let room = declared.map_or(MAX_FLAC_GAP_FRAMES, |n| n.saturating_sub(next));
+    let total = (decoded as u64).saturating_add(lost).saturating_mul(channels.max(1) as u64);
+    if lost > room || total > MAX_FLAC_GAP_TOTAL {
+        return 0;
+    }
+    usize::try_from(lost).unwrap_or(0)
 }
 
 /// The length of an ID3v2 tag at the start of `bytes` (0 without one): a 10-byte header, a
@@ -1638,6 +1680,117 @@ mod gapless_tests {
         let src = AudioFileSource::decode("tagged.mp3", Arc::from(tagged_mp3())).unwrap();
         let pcm = audio_cache().get(&src.key).expect("open inserted the PCM into the audio cache");
         assert_eq!(pcm[0].len(), AUDIO_FRAMES * 1152 - (576 + 529));
+    }
+}
+
+/// A damaged FLAC keeps its length and timing: the frames that were lost are silence.
+#[cfg(test)]
+mod flac_damage_tests {
+    use super::*;
+
+    /// Frames each FLAC frame holds.
+    const BLOCK: usize = 4096;
+    /// FLAC frames in the test file.
+    const FRAMES: usize = 10;
+
+    fn crc(data: &[u8], bits: u32, poly: u32) -> u32 {
+        let mut c = 0u32;
+        for &b in data {
+            c ^= u32::from(b) << (bits - 8);
+            for _ in 0..8 {
+                c = if c & (1 << (bits - 1)) != 0 { (c << 1) ^ poly } else { c << 1 };
+            }
+        }
+        c & ((1 << bits) - 1)
+    }
+
+    fn tone() -> Vec<i16> {
+        (0..BLOCK * FRAMES).map(|i| (8000.0 * (i as f64 * 0.05).sin()).round() as i16).collect()
+    }
+
+    /// A 48 kHz mono 16-bit FLAC of `tone()` in verbatim subframes (RFC 9639), declaring
+    /// `declared` frames in STREAMINFO (0: unknown). Frame `k` is numbered `number(k)` (below 128,
+    /// one byte), and the frames in `damaged` get a sample byte flipped, so their CRC-16 fails.
+    fn flac(declared: u64, number: impl Fn(usize) -> usize, damaged: &[usize]) -> Vec<u8> {
+        let mut out = b"fLaC".to_vec();
+        out.extend_from_slice(&[0x80, 0, 0, 34]);
+        // block sizes 4096, frame sizes unknown, 48 kHz, mono, 16 bits, `declared` samples, no MD5
+        out.extend_from_slice(&[0x10, 0x00, 0x10, 0x00, 0, 0, 0, 0, 0, 0]);
+        let packed = (48_000u64 << 44) | (15u64 << 36) | (declared & 0xF_FFFF_FFFF);
+        out.extend_from_slice(&packed.to_be_bytes());
+        out.extend_from_slice(&[0; 16]);
+        let samples = tone();
+        for k in 0..FRAMES {
+            let n = number(k);
+            assert!(n < 128);
+            // fixed blocking, 4096 frames, 48 kHz, mono, 16 bits, the frame number
+            let mut frame = vec![0xFF, 0xF8, 0xCA, 0x08, n as u8];
+            frame.push(crc(&frame, 8, 0x07) as u8);
+            frame.push(0x02); // verbatim subframe, no wasted bits
+            for s in &samples[k * BLOCK..(k + 1) * BLOCK] {
+                frame.extend_from_slice(&s.to_be_bytes());
+            }
+            let sum = crc(&frame, 16, 0x8005) as u16;
+            frame.extend_from_slice(&sum.to_be_bytes());
+            if damaged.contains(&k) {
+                frame[100] ^= 0x5A;
+            }
+            out.extend_from_slice(&frame);
+        }
+        out
+    }
+
+    fn decode(bytes: Vec<u8>) -> Vec<f32> {
+        let (_, rate, mut planes) = AudioFileSource::decode_file("t.flac", &Arc::from(bytes)).unwrap();
+        assert_eq!((rate, planes.len()), (48_000, 1));
+        planes.swap_remove(0)
+    }
+
+    /// `got` is the tone with exactly the frames in `lost` silent.
+    fn assert_tone_with_silence(got: &[f32], lost: std::ops::Range<usize>) {
+        let src = tone();
+        assert_eq!(got.len(), src.len());
+        for (i, (a, &b)) in got.iter().zip(&src).enumerate() {
+            let want = if lost.contains(&i) { 0.0 } else { f32::from(b) / 32768.0 };
+            assert!((a - want).abs() < 1e-6, "frame {i}: {a} vs {want}");
+        }
+    }
+
+    #[test]
+    fn an_intact_flac_decodes_whole() {
+        assert_tone_with_silence(&decode(flac((BLOCK * FRAMES) as u64, |k| k, &[])), 0..0);
+    }
+
+    /// The demuxer drops a frame whose checksum fails; the audio after it came out one block early
+    /// and the file decoded one block short.
+    #[test]
+    fn a_corrupt_flac_frame_becomes_silence_in_place() {
+        assert_tone_with_silence(&decode(flac((BLOCK * FRAMES) as u64, |k| k, &[4])), 4 * BLOCK..5 * BLOCK);
+        // a run of them is one gap
+        assert_tone_with_silence(&decode(flac((BLOCK * FRAMES) as u64, |k| k, &[3, 4, 5])), 3 * BLOCK..6 * BLOCK);
+        // and so is a lost first frame
+        assert_tone_with_silence(&decode(flac((BLOCK * FRAMES) as u64, |k| k, &[0])), 0..BLOCK);
+    }
+
+    /// A timestamp that jumps past the declared length is not padded: the file says how long it is.
+    /// With no declared length, a jump of up to 2^20 frames is lost audio; a longer one is not
+    /// believed.
+    #[test]
+    fn a_jump_is_silence_only_within_the_length() {
+        let src = tone();
+        let jump = |shift: usize| move |k: usize| if k < 5 { k } else { k + shift };
+        let got = decode(flac((BLOCK * FRAMES) as u64, jump(30), &[]));
+        assert!(got.len() <= src.len(), "{} frames", got.len());
+        // 100 frames of 4096 (409 600) are missing before frame 5
+        let got = decode(flac(0, jump(100), &[]));
+        assert_eq!(got.len(), src.len() + 100 * BLOCK);
+        assert!(got[5 * BLOCK..105 * BLOCK].iter().all(|&s| s == 0.0));
+        assert!((got[105 * BLOCK + 10] - f32::from(src[5 * BLOCK + 10]) / 32768.0).abs() < 1e-6);
+        assert_eq!(flac_gap(5 * BLOCK as u64, 5 * BLOCK as u64 + MAX_FLAC_GAP_FRAMES + 1, None, 5 * BLOCK, 1), 0);
+        assert_eq!(flac_gap(0, 100, Some(50), 0, 1), 0);
+        assert_eq!(flac_gap(0, 100, Some(500), 0, 1), 100);
+        // a declared length cannot make the decode grow without bound
+        assert_eq!(flac_gap(0, 1 << 34, Some(1 << 35), 0, 2), 0);
     }
 }
 
