@@ -6,7 +6,14 @@
 //! Events' `click at` acts on the accessibility tree, and Chrome's web content ignores it —
 //! verified live, the picker never selected a tile. Clicks and wheel scrolls are real
 //! CoreGraphics events posted from JXA (`osascript -l JavaScript`, its ObjC bridge), so
-//! they move the pointer like a person would. Only integers ever reach those scripts.
+//! they move the pointer like a person would. Only integers (and the app's name, quoted) ever
+//! reach those scripts.
+//!
+//! Keystrokes and posted clicks both go to whatever is in front, not to the app named — a
+//! `tell process` block does not aim `keystroke` (seen live: a picker search typed into another
+//! app's message box when the user switched apps mid-pick). So every input script first checks,
+//! in the same script, that the target app is still the front app, and does nothing but fail
+//! when it is not ([`NOT_IN_FRONT`]); the agent stops rather than take focus back.
 
 use std::time::Duration;
 
@@ -91,6 +98,15 @@ fn front_url_script(app: &str) -> Option<String> {
     }
 }
 
+/// What an input script fails with when the target app is not the front app.
+pub const NOT_IN_FRONT: &str = "is not in front";
+
+/// The AppleScript line (inside `tell application "System Events"`) that fails unless `app`
+/// (escaped already) is the front app.
+fn front_check(app: &str) -> String {
+    format!("if (name of first application process whose frontmost is true) is not \"{app}\" then error \"{app} {NOT_IN_FRONT}\"")
+}
+
 /// macOS hands: `osascript` + `System Events` scoped to one application process.
 pub struct MacActor {
     app: String,
@@ -104,15 +120,25 @@ impl MacActor {
 
     /// Post CoreGraphics events from JXA. Event types: 5 mouse moved, 1 left down, 2 left
     /// up; tap 0 = HID; scroll unit 1 = lines (`CGEventCreateScrollWheelEvent2`, macOS 13+).
+    /// Every script here first checks that the target app is in front (see the module notes).
     fn jxa(&self, body: &str) -> Result<String, ScreenError> {
-        let script = format!("ObjC.import(\"CoreGraphics\");\n{body}\n\"ok\"");
-        self.shell.run("osascript", &["-l", "JavaScript", "-e", &script]).map_err(|e| ScreenError::Input(self.app.clone(), e.to_string()))
+        let app = serde_json::to_string(&self.app).map_err(|e| ScreenError::Other(e.to_string()))?;
+        let script = format!(
+            "var front = Application(\"System Events\").processes.whose({{frontmost: true}}).name();\nif (front.length < 1 || front[0] !== {app}) throw new Error({app} + \" {NOT_IN_FRONT}\");\nObjC.import(\"CoreGraphics\");\n{body}\n\"ok\""
+        );
+        self.shell.run("osascript", &["-l", "JavaScript", "-e", &script]).map_err(|e| self.input_error(&e))
     }
 
     fn script(&self, body: &str) -> Result<String, ScreenError> {
         let app = capture::escape_applescript(&self.app)?;
-        let full = format!("tell application \"System Events\"\ntell process \"{app}\"\n{body}\nend tell\nend tell");
-        self.shell.run("osascript", &["-e", &full]).map_err(|e| ScreenError::Input(self.app.clone(), e.to_string()))
+        let full = format!("tell application \"System Events\"\n{}\ntell process \"{app}\"\n{body}\nend tell\nend tell", front_check(&app));
+        self.shell.run("osascript", &["-e", &full]).map_err(|e| self.input_error(&e))
+    }
+
+    /// An input script's failure: [`ScreenError::NotInFront`] when the app had left the front.
+    fn input_error(&self, e: &ScreenError) -> ScreenError {
+        let text = e.to_string();
+        if text.contains(NOT_IN_FRONT) { ScreenError::NotInFront(self.app.clone()) } else { ScreenError::Input(self.app.clone(), text) }
     }
 
     /// A wheel scroll of `lines` (negative: up) with the pointer at the screen point `(x, y)`,
@@ -170,9 +196,15 @@ impl Act for MacActor {
         // Chrome reads the live modifier state, not a click event's flags (verified live: a
         // Shift-flagged CGEvent click selected one tile, not the range). So hold Shift
         // system-wide around a real click — and always let go of it.
+        let app = capture::escape_applescript(&self.app)?;
         let shift = |down: bool| {
-            let s = format!("tell application \"System Events\" to key {} shift", if down { "down" } else { "up" });
-            self.shell.run("osascript", &["-e", &s]).map(|_| ()).map_err(|e| ScreenError::Input(self.app.clone(), e.to_string()))
+            // Shift is held only with the app in front; it is always let go of
+            let s = if down {
+                format!("tell application \"System Events\"\n{}\nkey down shift\nend tell", front_check(&app))
+            } else {
+                "tell application \"System Events\" to key up shift".to_string()
+            };
+            self.shell.run("osascript", &["-e", &s]).map(|_| ()).map_err(|e| self.input_error(&e))
         };
         shift(true)?;
         let clicked = self
@@ -355,6 +387,56 @@ mod tests {
         assert!(actor.click_png(&cap_2x(), 9999, 10).is_err());
         assert!(actor.click_png(&cap_2x(), 10, 9999).is_err());
         assert!(recorded(&shared).is_empty(), "nothing may reach the OS");
+    }
+
+    #[test]
+    fn every_input_script_first_checks_the_app_is_in_front() {
+        let (shared, sh) = FakeShell::new(false);
+        let mut actor = MacActor::new("Google Chrome", Box::new(sh));
+        let cap = cap_2x();
+        actor.click_png(&cap, 300, 500).unwrap();
+        actor.right_click_png(&cap, 300, 500).unwrap();
+        actor.shift_click_png(&cap, 300, 500).unwrap();
+        actor.type_text("cake").unwrap();
+        actor.key_return().unwrap();
+        actor.key_escape().unwrap();
+        actor.key_code(124).unwrap();
+        actor.clear_text(3).unwrap();
+        actor.scroll(2).unwrap();
+        actor.scroll_at(10, 40, 2).unwrap();
+        actor.close_tab().unwrap();
+        let scripts = shared.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+        let input: Vec<&String> = scripts.iter().filter(|s| !s.contains("of front window") && !s.ends_with("key up shift")).collect();
+        assert_eq!(input.len(), 12, "{scripts:#?}");
+        for s in input {
+            let guard = s.find(NOT_IN_FRONT).unwrap_or(usize::MAX);
+            let acts = ["keystroke", "key code", "key down", "CGEventPost"].iter().filter_map(|a| s.find(a)).min().unwrap_or(0);
+            assert!(guard < acts, "the check comes before any input: {s}");
+            assert!(s.contains("frontmost"), "{s}");
+        }
+        let jxa = scripts.iter().find(|s| s.contains("CGEventPost")).unwrap();
+        assert!(jxa.contains("front[0] !== \"Google Chrome\""), "the name is quoted as a JS string: {jxa}");
+    }
+
+    #[test]
+    fn an_app_out_of_front_stops_the_run_instead_of_typing_elsewhere() {
+        /// System Events answering as osascript does when the check fails.
+        struct Elsewhere;
+        impl Shell for Elsewhere {
+            fn run(&self, _program: &str, _args: &[&str]) -> Result<String, ScreenError> {
+                Err(ScreenError::Other("execution error: Google Chrome is not in front (-2700)".into()))
+            }
+        }
+        let mut actor = MacActor::new("Google Chrome", Box::new(Elsewhere));
+        for r in [actor.type_text("April 30 2023"), actor.key_return(), actor.click_png(&cap_2x(), 300, 500)] {
+            let e = r.unwrap_err();
+            assert!(matches!(e, ScreenError::NotInFront(ref app) if app == "Google Chrome"), "{e:?}");
+            assert!(e.to_string().contains("no longer the front app"), "{e}");
+        }
+        // other failures stay what they were
+        let (_, sh) = FakeShell::new(true);
+        let mut actor = MacActor::new("Google Chrome", Box::new(sh));
+        assert!(matches!(actor.type_text("x"), Err(ScreenError::Input(..))));
     }
 
     #[test]

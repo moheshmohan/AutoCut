@@ -806,3 +806,8 @@ fn live_read_a_few_items() {
     let r = read_album(&mut v, &eyes, &req, &mut |l| eprintln!("{l}"), &mut |_| true).unwrap();
     eprintln!("{}", serde_json::to_string_pretty(&r).unwrap_or_default());
 }
+
+#[test]
+fn chrome_leaving_the_front_ends_the_run() {
+    assert!(fatal(&ScreenError::NotInFront("Google Chrome".into())));
+}

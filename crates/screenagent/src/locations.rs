@@ -653,7 +653,7 @@ pub struct Report {
 
 /// Errors that end a run (a lost grant, the model gone): every other one only skips an item.
 fn fatal(e: &ScreenError) -> bool {
-    matches!(e, ScreenError::Model(..) | ScreenError::Capture(..) | ScreenError::Input(..) | ScreenError::Unsupported(_))
+    matches!(e, ScreenError::Model(..) | ScreenError::Capture(..) | ScreenError::Input(..) | ScreenError::NotInFront(_) | ScreenError::Unsupported(_))
 }
 
 /// Wait up to `limit` for the tab's address to differ from `from`; the new address.

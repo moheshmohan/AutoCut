@@ -682,7 +682,7 @@ fn pick_tiles<A: Act, G: Ground>(
 /// Errors that end a whole session (no grants, no model, no window): a search that merely
 /// failed does not.
 fn fatal(e: &ScreenError) -> bool {
-    matches!(e, ScreenError::Capture(..) | ScreenError::Input(..) | ScreenError::Model(..) | ScreenError::Unsupported(..))
+    matches!(e, ScreenError::Capture(..) | ScreenError::Input(..) | ScreenError::NotInFront(_) | ScreenError::Model(..) | ScreenError::Unsupported(..))
 }
 
 /// The outcome of a search from the header's count before and after it.
@@ -4144,5 +4144,10 @@ mod tests {
         let p = plan_for(Request { items: many, ..Request::default() });
         assert_eq!(p.items.len(), crate::items::MAX_ITEMS);
         assert!(p.timeout <= MAX_SESSION_TIME && p.max_actions > 0);
+    }
+
+    #[test]
+    fn the_browser_leaving_the_front_ends_the_whole_run() {
+        assert!(fatal(&ScreenError::NotInFront("Google Chrome".into())), "no more searches once keys could go elsewhere");
     }
 }

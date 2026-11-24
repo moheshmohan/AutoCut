@@ -55,6 +55,10 @@ pub enum ScreenError {
         "cannot send input to {0}: {1} — grant Accessibility to the app running this command (System Settings ▸ Privacy & Security ▸ Accessibility), then run it again"
     )]
     Input(String, String),
+    #[error(
+        "stopped: {0} is no longer the front app, so nothing more is clicked or typed (keys would go to whatever is in front) — keep {0} in front while the agent picks, then run it again"
+    )]
+    NotInFront(String),
     #[error("the vision model is unreachable: {0} — is `ollama serve` running, and is the model pulled (`ollama pull {1}`)?")]
     Model(String, String),
     #[error("the vision model's reply was unusable: {0}")]

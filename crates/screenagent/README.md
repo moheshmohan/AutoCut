@@ -26,12 +26,16 @@ capture (screencapture -R)  →  ground (Qwen2.5-VL via Ollama)  →  act (osasc
   screenshot, downscaled for the model. The pixel-per-point scale is derived from the real
   image, so Retina displays and downscaling are handled arithmetically, not by guesswork.
 - `act.rs` — input synthesis through `osascript`. Keys (typing, Return, Escape) go through
-  System Events scoped to the one target process. Clicks and wheel scrolls are real
+  System Events, which sends them to whatever app is in front, whatever process the script
+  names. So every key and click script first checks, in the same script, that the target app
+  is still the front app. If it isn't, the script does nothing and the run stops with
+  `ScreenError::NotInFront`: the agent never takes focus back and never types elsewhere (seen
+  live: a picker search landed in another app's message box). Clicks and wheel scrolls are real
   CoreGraphics pointer events posted from JXA (`osascript -l JavaScript`): System Events'
   `click at` acts on the accessibility tree and Chrome's web content ignores it, so it
   never selected a tile. Real events move the pointer, as a person's would. Every click is
   clamped into the window rectangle; AppleScript strings are escaped and control characters
-  refused, and only integers reach the JXA scripts, so nothing model-generated becomes
+  refused, and only integers (and the app's name, quoted as a JS string) reach the JXA scripts, so nothing model-generated becomes
   script.
 - `ground.rs` — the model call. Qwen2.5-VL grounds in absolute pixels,
   `{"bbox_2d": [x1, y1, x2, y2]}`, of the image *it* saw: its runtime snaps images to
