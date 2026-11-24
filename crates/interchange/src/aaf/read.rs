@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 
 use filmcraft_time::{FrameRate, Tick};
 
-use super::ids::{cls, ddef, def, pid};
+use super::ids::{self, cls, ddef, def, pid};
 use super::store::{self, Auid, Obj, Value, rational_of, utf16_of};
 use crate::comp::{CClip, CItem, CKind, CMarker, CTrack, CTransition, Composition, Document, Gain, Source, units_to_ticks};
 use crate::{Error, Report, Result};
@@ -76,6 +76,10 @@ struct R<'a> {
     nests: HashMap<MobId, usize>,
     /// The compositions being read, outermost first.
     open: Vec<MobId>,
+    /// Written by FilmCraft before AV83 (or by upstream FilmCraft): source clip starts count edit
+    /// units of the composition slot, not of the slot they refer to, and relative locators are
+    /// raw paths, not URLs.
+    legacy: bool,
 }
 
 /// Compositions nested deeper than this are read as gaps.
@@ -97,11 +101,15 @@ pub(crate) fn read(bytes: &[u8], report: &mut Report) -> Result<Document> {
             essence.insert(id, d);
         }
     }
-    let mut r = R { report, mobs, essence, doc: Document::default(), sources: HashMap::new(), nests: HashMap::new(), open: Vec::new() };
     // Top-level compositions: those no other composition uses, among the ones tagged top-level
     // when any are. (Premiere Pro tags a nested sequence's composition top-level too; it is still
     // only a nested sequence.) Compositions that only use each other in a circle all count.
     let comps: Vec<&Obj> = content.objs(pid::MOBS).iter().filter(|m| m.class == cls::COMPOSITION_MOB).collect();
+    // The last identification is the application that wrote the file last.
+    let by_filmcraft = header.objs(pid::IDENTIFICATION_LIST).last().and_then(|i| i.data(pid::PRODUCT_ID)) == Some(&ids::FILMCRAFT_PRODUCT_ID[..]);
+    let marked = comps.iter().any(|c| tagged_values(c, pid::MOB_USER_COMMENTS).iter().any(|(k, _)| k == ids::SOURCE_START_TAG));
+    let legacy = by_filmcraft && !marked;
+    let mut r = R { report, mobs, essence, doc: Document::default(), sources: HashMap::new(), nests: HashMap::new(), open: Vec::new(), legacy };
     let mut referenced = HashSet::new();
     for c in &comps {
         collect_refs(c, &mut referenced);
@@ -309,22 +317,28 @@ impl R<'_> {
                 }
                 items
             }
-            x if x == cls::SELECTOR => match c.strong(pid::SELECTED) {
-                Some(s) => {
-                    let mut items = self.segment(s, rate, kind, depth);
-                    fit(&mut items, len);
-                    items
+            x if x == cls::SELECTOR => {
+                self.report.info("a selector was flattened to its selected input");
+                match c.strong(pid::SELECTED) {
+                    Some(s) => {
+                        let mut items = self.segment(s, rate, kind, depth);
+                        fit(&mut items, len);
+                        items
+                    }
+                    None => vec![CItem::Filler(len)],
                 }
-                None => vec![CItem::Filler(len)],
-            },
-            x if x == cls::NESTED_SCOPE => match c.objs(pid::NESTED_SLOTS).last() {
-                Some(s) => {
-                    let mut items = self.segment(s, rate, kind, depth);
-                    fit(&mut items, len);
-                    items
+            }
+            x if x == cls::NESTED_SCOPE => {
+                self.report.info("a nested scope was flattened to its final input");
+                match c.objs(pid::NESTED_SLOTS).last() {
+                    Some(s) => {
+                        let mut items = self.segment(s, rate, kind, depth);
+                        fit(&mut items, len);
+                        items
+                    }
+                    None => vec![CItem::Filler(len)],
                 }
-                None => vec![CItem::Filler(len)],
-            },
+            }
             _ => {
                 self.report.info("an unsupported component was imported as a gap");
                 vec![CItem::Filler(len)]
@@ -359,15 +373,19 @@ impl R<'_> {
 
     fn clip(&mut self, c: &Obj, rate: (i64, i64), kind: CKind, master_key: Option<String>) -> CItem {
         let len = units_to_ticks(len_of(c), rate.0, rate.1);
-        let start = units_to_ticks(c.i64(pid::START_TIME).unwrap_or(0), rate.0, rate.1);
-        let name = tagged_values(c, pid::COMPONENT_USER_COMMENTS).into_iter().find(|(k, _)| k == "Clip Name").map(|(_, v)| v).unwrap_or_default();
+        let tagged_name = tagged_values(c, pid::COMPONENT_USER_COMMENTS).into_iter().find(|(k, _)| k == "Clip Name").map(|(_, v)| v);
         let (Some(id), Some(slot)) = (c.mob_id(pid::SOURCE_ID), c.u32(pid::SOURCE_MOB_SLOT_ID)) else { return CItem::Filler(len) };
         if id == [0; 32] {
             return CItem::Filler(len);
         }
+        // an unnamed clip takes the name of the mob it refers to (its master clip's)
+        let name = tagged_name.or_else(|| self.mobs.get(&id).and_then(|m| m.string(pid::MOB_NAME))).unwrap_or_default();
         if let Some(mob) = self.mobs.get(&id).copied().filter(|m| m.class == cls::COMPOSITION_MOB) {
             return self.nest_clip(c, mob, id, slot, rate, kind, name);
         }
+        let units = c.i64(pid::START_TIME).unwrap_or(0);
+        let start_rate = self.start_rate(&id, slot, rate, units);
+        let start = units_to_ticks(units, start_rate.0, start_rate.1);
         match self.resolve(id, slot, start, kind, master_key, 0) {
             Some((source, t)) => CItem::Clip(CClip { len, source, start: t, gain: None, name }),
             None => CItem::Filler(len),
@@ -444,6 +462,24 @@ impl R<'_> {
         CItem::Clip(CClip { len, source, start, gain: None, name })
     }
 
+    /// The edit rate a source clip's start counts in: that of the slot `slot` of mob `id` it
+    /// refers to (AAF object specification, SourceReference), else `rate`, the rate of the slot
+    /// holding the clip. FilmCraft's older files count it at `rate` (see [`R::legacy`]).
+    fn start_rate(&mut self, id: &MobId, slot: u32, rate: (i64, i64), units: i64) -> (i64, i64) {
+        let referenced =
+            self.mobs.get(id).and_then(|m| m.objs(pid::SLOTS).iter().find(|s| s.u32(pid::SLOT_ID) == Some(slot))).and_then(|s| rate_of(s, pid::EDIT_RATE));
+        match referenced {
+            Some(r) if self.legacy => {
+                if r != rate && units != 0 {
+                    self.report.info("an AAF written by an earlier FilmCraft: clip starts were read in sequence edit units, as it wrote them");
+                }
+                rate
+            }
+            Some(r) => r,
+            None => rate,
+        }
+    }
+
     /// Follow a source reference to a file source mob: (source index, file time).
     fn resolve(&mut self, id: MobId, slot_id: u32, start: Tick, kind: CKind, master_key: Option<String>, depth: usize) -> Option<(usize, Tick)> {
         if depth > 16 {
@@ -463,9 +499,11 @@ impl R<'_> {
         if mob.class == cls::MASTER_MOB {
             let key = master_key.unwrap_or_else(|| hex(&id));
             let clip = first_clip(seg)?;
-            let inner = units_to_ticks(clip.i64(pid::START_TIME).unwrap_or(0), rate.0, rate.1);
             let next = clip.mob_id(pid::SOURCE_ID)?;
             let next_slot = clip.u32(pid::SOURCE_MOB_SLOT_ID)?;
+            let units = clip.i64(pid::START_TIME).unwrap_or(0);
+            let inner_rate = self.start_rate(&next, next_slot, rate, units);
+            let inner = units_to_ticks(units, inner_rate.0, inner_rate.1);
             if next == [0; 32] {
                 return None;
             }
@@ -504,7 +542,7 @@ impl R<'_> {
             DataKind::Sound => CKind::Sound,
             _ => kind,
         };
-        let path = d.objs(pid::LOCATOR).iter().find_map(|l| l.string(pid::URL_STRING)).map(|u| crate::common::file_url_to_path(&u));
+        let path = d.objs(pid::LOCATOR).iter().find_map(|l| l.string(pid::URL_STRING)).map(|u| locator_path(&u, self.legacy));
         let file_rate = rate_of(d, pid::SAMPLE_RATE).unwrap_or(rate);
         let length =
             d.i64(pid::FILE_LENGTH).map(|l| units_to_ticks(l, file_rate.0, file_rate.1)).unwrap_or_else(|| units_to_ticks(len_of(seg), rate.0, rate.1));
@@ -690,4 +728,29 @@ fn markers_of(seg: &Obj, rate: (i64, i64)) -> Vec<CMarker> {
 
 fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
+/// The path a NetworkLocator URL names: a `file://` URL's, a relative URL percent-decoded
+/// (craft-libs d6134e51cb), other URLs as they are. FilmCraft's older files (`raw`) wrote relative
+/// paths unencoded.
+fn locator_path(url: &str, raw: bool) -> String {
+    if url.contains("://") || raw { crate::common::file_url_to_path(url) } else { crate::common::relative_url_to_path(url) }
+}
+
+#[cfg(test)]
+mod locator_tests {
+    use super::locator_path;
+
+    #[test]
+    fn decodes_relative_locator_escapes_without_losing_remote_authorities() {
+        assert_eq!(locator_path("Audio%20Files/Di%C3%A1logo%20%231.wav", false), "Audio Files/Diálogo #1.wav");
+        assert_eq!(locator_path("file:///tmp/a%20b.wav", false), "/tmp/a b.wav");
+        assert_eq!(locator_path("file://server/share/a.wav", false), "//server/share/a.wav");
+        assert_eq!(locator_path("https://example.com/a%20b.wav", false), "https://example.com/a%20b.wav");
+        // an invalid escape stays as it is
+        assert_eq!(locator_path("100%.wav", false), "100%.wav");
+        // FilmCraft's older files wrote relative paths unencoded
+        assert_eq!(locator_path("Audio Files/100%20 #1.wav", true), "Audio Files/100%20 #1.wav");
+        assert_eq!(locator_path("file:///tmp/a%20b.wav", true), "/tmp/a b.wav");
+    }
 }

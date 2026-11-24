@@ -178,6 +178,12 @@ pub(crate) fn relative_url(path: &str) -> String {
     percent_encode_path(path)
 }
 
+/// The path a relative URL names: its percent escapes decoded (an invalid escape stays literal,
+/// invalid UTF-8 is replaced). The inverse of [`relative_url`].
+pub(crate) fn relative_url_to_path(url: &str) -> String {
+    percent_decode(url)
+}
+
 /// Resolve a media reference from a document: file URLs become paths, relative paths are joined to
 /// `base_dir` (when given).
 pub fn resolve_path(reference: &str, base_dir: Option<&str>) -> String {

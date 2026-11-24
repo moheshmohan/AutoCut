@@ -37,6 +37,15 @@ sequences and media. Mapping details (what each FilmCraft feature becomes) are i
 `omf` module docs. Times are kept in ticks in the model; compositions use the sequence frame rate
 for picture and the sample rate for sound slots, so audio edits are sample-exact.
 
+AAF source clip starts count edit units of the slot the clip refers to (the master clip's slot,
+at the media's own frame or sample rate), as the AAF object specification says; relative
+locators are percent-encoded URLs. FilmCraft wrote both differently before AV83 (starts in the
+composition slot's units, relative paths raw), as upstream FilmCraft still does: a file whose last
+Identification has FilmCraft's product id and whose compositions lack the `FilmCraft Source
+Start Rate` tag the writer now adds is read that older way, with an info entry when a start
+differs. Unnamed clips take their master clip's name; selectors and nested scopes read as one
+input say so in the report.
+
 Embedded / consolidated audio (`essence`): `audio_needs` lists the media ranges an export
 references (per media item or per clip, with handles); the engine decodes or renders them and
 passes `AudioEssence` (embedded PCM or a written file) back in `MediaOptions`.
@@ -121,6 +130,8 @@ OMF carries no video at all.
   resolving into the dictionary, source clips resolving to mobs and slots, the Edit Protocol
   transition rules and sequence length arithmetic; every stored form round-trips through the
   container; a file rewritten into Premiere Pro's layout (video tracks as layers of one slot,
-  nested compositions tagged top-level) reads back as the same edit.
+  nested compositions tagged top-level) reads back as the same edit; mixed-rate clip starts on
+  disk and read back from our own, another application's and an older FilmCraft file; master
+  names on unnamed clips; relative locator URLs; flattened selectors and nested scopes reported.
 - `src/omf/tests.rs`: the Bento label and TOC, the required properties of every OMF class
   written, reference resolution, embedded WAVE data, sequence lengths in samples.

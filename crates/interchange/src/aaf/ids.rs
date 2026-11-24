@@ -28,6 +28,14 @@ pub(crate) const fn class(xx: u8) -> Auid {
 pub(crate) const ROOT: Auid = guid(0xB3B398A5, 0x1C90, 0x11D4, [0x80, 0x53, 0x08, 0x00, 0x36, 0x21, 0x08, 0x04]);
 /// The meta-dictionary (class 0x25 of the meta-model, 06.0E.2B.34.02.06.01.01.0D.01.01.01.02.25.00.00).
 pub(crate) const META_DICTIONARY: Auid = ul([0x06, 0x0E, 0x2B, 0x34, 0x02, 0x06, 0x01, 0x01, 0x0D, 0x01, 0x01, 0x01, 0x02, 0x25, 0x00, 0x00]);
+/// The product id FilmCraft's AAF writer puts in its Identification (`FILMCRAFT-AAF-EP`), here and
+/// upstream.
+pub(crate) const FILMCRAFT_PRODUCT_ID: Auid = guid(0x46494C4D, 0x4352, 0x4146, *b"T-AAF-EP");
+/// Composition tag of files whose source clip starts count edit units of the referenced slot, as
+/// the AAF object specification says. FilmCraft's writer counted them in the composition slot's
+/// units until AV83 (upstream FilmCraft still does), so a FilmCraft file without this tag is read
+/// that way.
+pub(crate) const SOURCE_START_TAG: &str = "FilmCraft Source Start Rate";
 
 #[allow(dead_code)]
 pub(crate) mod cls {

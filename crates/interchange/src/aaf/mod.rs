@@ -24,7 +24,10 @@
 //! and for every media item a **MasterMob**, a file **SourceMob** per essence (a CDCI or PCM
 //! descriptor with a network locator to the file, or `EssenceData` holding embedded PCM) and a
 //! tape **SourceMob** carrying the media's start timecode. Clip and media markers become comment
-//! markers on the master mob.
+//! markers on the master mob. A clip's start counts edit units of the master slot it points at
+//! (the media's own frame or sample rate); a relative locator is a percent-encoded relative URL.
+//! Files FilmCraft wrote before that (no `FilmCraft Source Start Rate` composition tag, see
+//! `ids::SOURCE_START_TAG`) are read the way they were written.
 //!
 //! Import reads the same structures (and the common variations: sequences inside sequences,
 //! selectors, operation groups around clips, legacy data definitions, essence groups, and Premiere

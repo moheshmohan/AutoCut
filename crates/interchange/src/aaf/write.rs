@@ -244,8 +244,10 @@ pub(crate) fn write(doc: &Document, version: filmcraft_cfb::Version, report: &mu
     }
 
     // ---- nested compositions: a clip refers to one as it does to a master mob, through the
-    // composition's first track of the clip's kind (a broken-out channel: that channel's track)
-    let mut refs = Refs { mobs: master_ref, rates: HashMap::new() };
+    // composition's first track of the clip's kind (a broken-out channel: that channel's track).
+    // A clip's start counts edit units of the slot it refers to: the master slot is at the
+    // source's own rate (craft-libs 3728fd1ffb).
+    let mut refs = Refs { mobs: master_ref, rates: doc.sources.iter().enumerate().map(|(i, s)| (i, source_rate(s))).collect() };
     let nested_ids: Vec<[u8; 32]> = doc.nested.iter().map(|_| new_id()).collect();
     for (si, s) in doc.sources.iter().enumerate() {
         let Some((comp, id)) = s.nested.and_then(|n| Some((doc.nested.get(n)?, nested_ids.get(n)?))) else { continue };
@@ -336,7 +338,7 @@ pub(crate) fn write(doc: &Document, version: filmcraft_cfb::Version, report: &mu
         .data_prop(pid::COMPANY_NAME, utf16z("FilmCraft"))
         .data_prop(pid::PRODUCT_NAME, utf16z("FilmCraft"))
         .data_prop(pid::PRODUCT_VERSION_STRING, utf16z(env!("CARGO_PKG_VERSION")))
-        .data_prop(pid::PRODUCT_ID, super::ids::guid(0x46494C4D, 0x4352, 0x4146, *b"T-AAF-EP").to_vec())
+        .data_prop(pid::PRODUCT_ID, super::ids::FILMCRAFT_PRODUCT_ID.to_vec())
         .data_prop(pid::DATE, timestamp())
         .data_prop(pid::PLATFORM, utf16z("FilmCraft"))
         .data_prop(pid::GENERATION_AUID, mob_id(seed, 0)[16..].to_vec());
@@ -359,8 +361,8 @@ pub(crate) fn write(doc: &Document, version: filmcraft_cfb::Version, report: &mu
     store::write(&root, version).map_err(Error::Other)
 }
 
-/// Where clips find their sources: source index → (mob id, slot id), and for nested compositions
-/// the edit rate of that slot.
+/// Where clips find their sources: source index → (mob id, slot id), and the edit rate of that
+/// slot.
 #[derive(Default)]
 struct Refs {
     mobs: HashMap<usize, ([u8; 32], u32)>,
@@ -429,7 +431,7 @@ fn composition_mob(
                     let n = w.u(cursor + c.len, rate) - w.u(cursor, rate);
                     let s = &doc.sources[c.source];
                     let (mid, mslot) = refs.mobs.get(&c.source).copied().unwrap_or(([0; 32], 0));
-                    // (a nested composition counts the start in its own slot's edit units)
+                    // the start counts edit units of the slot the clip refers to
                     let start = w.u(c.start, refs.rates.get(&c.source).copied().unwrap_or(rate));
                     let mut sc = source_clip(t.kind, n, mid, mslot, start);
                     if !c.name.is_empty() && c.name != s.name {
@@ -554,6 +556,7 @@ fn composition_mob(
         Value::StrongVec(vec![
             tagged("FilmCraft Frame Size", &format!("{}x{}", comp.width, comp.height)),
             tagged("FilmCraft Audio Sample Rate", &comp.sample_rate.to_string()),
+            tagged(super::ids::SOURCE_START_TAG, "referenced slot"),
         ]),
     )
 }
@@ -664,7 +667,8 @@ fn descriptor(w: &mut W, s: &Source) -> Obj {
     d.set(pid::FILE_LENGTH, Value::Data(len.to_le_bytes().to_vec()));
     d.set(pid::CONTAINER_FORMAT, weak(path::CONTAINER_DEFS, container));
     if let Some(p) = &s.path {
-        let url = if crate::common::is_absolute(p) { crate::common::path_to_file_url(p, false) } else { p.clone() };
+        // a relative locator is a relative URL: percent-encoded (craft-libs d6134e51cb)
+        let url = if crate::common::is_absolute(p) { crate::common::path_to_file_url(p, false) } else { crate::common::relative_url(p) };
         d.set(pid::LOCATOR, Value::StrongVec(vec![Obj::new(cls::NETWORK_LOCATOR).data_prop(pid::URL_STRING, utf16z(&url))]));
     }
     d

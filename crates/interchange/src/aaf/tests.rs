@@ -421,3 +421,271 @@ fn audio_tracks_keep_their_names() {
         assert_eq!(names(&p, &AafOptions::default()), [name]);
     }
 }
+
+/// A 24 fps, 48 kHz sequence with one picture and one sound clip of `path`, a file whose picture
+/// runs at `video` and whose sound at `sample_rate`: each clip 2 s long from 1 s into the file.
+fn mixed_rate_project(path: &str, video: FrameRate, sample_rate: u32) -> (Project, ItemId) {
+    let mut p = Project::new("t");
+    let info = filmcraft_media::MediaInfo {
+        name: "a.mov".into(),
+        kind: filmcraft_media::MediaKind::Movie,
+        duration: Tick::from_units(100, 1),
+        video: Some(filmcraft_media::VideoStreamInfo {
+            width: 1280,
+            height: 720,
+            frame_rate: video,
+            par: (1, 1),
+            codec: String::new(),
+            pixel_format: String::new(),
+            color: Default::default(),
+            has_alpha: false,
+            bitrate: None,
+            hdr: None,
+        }),
+        audio_streams: vec![filmcraft_media::AudioStreamInfo { sample_rate, channels: 2, codec: String::new(), bits_per_sample: Some(24) }],
+        container: String::new(),
+        start_timecode: None,
+        file_size: None,
+    };
+    let a = p.add_item(
+        "a.mov",
+        filmcraft_project::Label::Iris,
+        filmcraft_project::ItemKind::Media(filmcraft_project::MediaClip {
+            media: filmcraft_project::MediaRef::File { path: path.into() },
+            info,
+            interpret: Default::default(),
+            mark_in: None,
+            mark_out: None,
+            markers: vec![],
+            offline: false,
+            proxy: None,
+            identity: None,
+        }),
+        None,
+    );
+    let r = FrameRate::FPS_24;
+    let s = p.new_sequence("S", SequenceSettings { frame_rate: r, sample_rate: 48_000, ..Default::default() }, 1, 1, None);
+    for kind in [TrackKind::Video, TrackKind::Audio] {
+        let ti = p.make_track_item(a, kind, Tick::ZERO, TimeRange::new(Tick::from_units(1, 1), Tick::from_units(2, 1)), r).unwrap();
+        p.sequence_mut(s).unwrap().tracks_mut(kind)[0].items.push(ti);
+    }
+    (p, s)
+}
+
+/// Every source clip below `o`.
+fn clips_mut<'a>(o: &'a mut Obj, out: &mut Vec<&'a mut Obj>) {
+    if o.class == cls::SOURCE_CLIP {
+        out.push(o);
+        return;
+    }
+    for (_, v) in &mut o.props {
+        match v {
+            Value::Strong(c) => clips_mut(c, out),
+            Value::StrongVec(v) | Value::StrongSet(v, _) => v.iter_mut().for_each(|c| clips_mut(c, out)),
+            _ => {}
+        }
+    }
+}
+
+/// Rewrite an exported file: `f` gets its header object.
+fn rewritten(bytes: &[u8], f: impl FnOnce(&mut Obj)) -> Vec<u8> {
+    let mut root = store::read(bytes).unwrap();
+    f(strong_mut(&mut root, pid::ROOT_HEADER));
+    store::write(&root, filmcraft_cfb::Version::V4).unwrap()
+}
+
+/// The composition mobs of a header.
+fn compositions_mut(header: &mut Obj) -> Vec<&mut Obj> {
+    objs_mut(strong_mut(header, pid::CONTENT), pid::MOBS).iter_mut().filter(|m| m.class == cls::COMPOSITION_MOB).collect()
+}
+
+/// What the file says about who wrote it: another application's product id.
+fn as_if_written_elsewhere(header: &mut Obj) {
+    for ident in objs_mut(header, pid::IDENTIFICATION_LIST) {
+        ident.set(pid::PRODUCT_ID, Value::Data([7; 16].to_vec()));
+    }
+}
+
+/// A FilmCraft file from before AV83: no start-rate tag on its compositions.
+fn without_start_rate_tag(header: &mut Obj) {
+    for c in compositions_mut(header) {
+        objs_mut(c, pid::MOB_USER_COMMENTS).retain(|t| t.string(pid::TAG_NAME).as_deref() != Some(ids::SOURCE_START_TAG));
+    }
+}
+
+/// Source in of the first clip on V1 and A1 of the first imported sequence.
+fn source_ins(bytes: &[u8]) -> ([Tick; 2], Report) {
+    let (imported, _, report) = import(bytes, &ImportOptions::default()).unwrap();
+    let q = imported.project.sequence(imported.sequences[0]).unwrap();
+    ([q.video_tracks[0].items[0].source_in, q.audio_tracks[0].items[0].source_in], report)
+}
+
+/// A source clip's StartTime counts edit units of the slot it refers to (the master clip's, at
+/// the file's own rate), not of the composition slot that holds it (craft-libs 3728fd1ffb). A
+/// 25 fps, 44.1 kHz file in a 24 fps, 48 kHz sequence, used from 1 s in: 25 frames and 44,100
+/// samples on disk. FilmCraft wrote 24 and 48,000, which other applications read as 0.96 s and
+/// 1.088 s, and read such files from other applications wrong the same way.
+#[test]
+fn source_clip_starts_count_the_referenced_slots_edit_units() {
+    let (p, s) = mixed_rate_project("/m/a.mov", FrameRate::FPS_25, 44_100);
+    let (bytes, _) = export(&p, s, &AafOptions::default()).unwrap();
+    let mut root = store::read(&bytes).unwrap();
+    let content = strong_mut(strong_mut(&mut root, pid::ROOT_HEADER), pid::CONTENT);
+    let comp = objs_mut(content, pid::MOBS).iter_mut().find(|m| m.class == cls::COMPOSITION_MOB).unwrap();
+    let mut clips = Vec::new();
+    clips_mut(comp, &mut clips);
+    let mut starts: Vec<i64> = clips.iter().filter_map(|c| c.i64(pid::START_TIME)).collect();
+    starts.sort();
+    assert_eq!(starts, [25, 44_100], "1 s at 25 fps and at 44.1 kHz");
+
+    let one = Tick::from_units(1, 1);
+    // the round trip
+    let (ins, report) = source_ins(&bytes);
+    assert_eq!(ins, [one, one]);
+    assert!(!report.mentions("earlier FilmCraft"), "{report}");
+    // another application's file says the same: read the same
+    let foreign = rewritten(&bytes, |h| {
+        as_if_written_elsewhere(h);
+        without_start_rate_tag(h);
+    });
+    assert_eq!(source_ins(&foreign).0, [one, one]);
+}
+
+/// AAFs FilmCraft wrote before AV83 (and upstream FilmCraft's) count clip starts in the
+/// composition slot's edit units. They have FilmCraft's product id and no start-rate tag, and
+/// still read as they were written; another application's file with the same numbers is read
+/// by the specification.
+#[test]
+fn earlier_filmcraft_files_keep_their_clip_starts() {
+    let (p, s) = mixed_rate_project("/m/a.mov", FrameRate::FPS_25, 44_100);
+    let (bytes, _) = export(&p, s, &AafOptions::default()).unwrap();
+    let legacy_starts = |h: &mut Obj| {
+        for c in compositions_mut(h) {
+            let mut clips = Vec::new();
+            clips_mut(c, &mut clips);
+            for clip in clips {
+                let old = match clip.i64(pid::START_TIME) {
+                    Some(25) => 24i64,
+                    Some(44_100) => 48_000,
+                    other => panic!("unexpected start {other:?}"),
+                };
+                clip.set(pid::START_TIME, Value::Data(old.to_le_bytes().to_vec()));
+            }
+        }
+    };
+    let old = rewritten(&bytes, |h| {
+        without_start_rate_tag(h);
+        legacy_starts(h);
+    });
+    let one = Tick::from_units(1, 1);
+    let (ins, report) = source_ins(&old);
+    assert_eq!(ins, [one, one], "read as FilmCraft wrote it");
+    assert!(report.mentions("earlier FilmCraft"), "{report}");
+    // the same numbers from another application count the referenced slots' units
+    let theirs = rewritten(&old, as_if_written_elsewhere);
+    assert_eq!(source_ins(&theirs).0, [Tick::from_units(24, 25), Tick::from_units(48_000, 44_100)]);
+}
+
+/// A clip without a "Clip Name" tag is named after the master clip it refers to, not left
+/// unnamed (craft-libs 70fabd64dc): the import used to name it after the file mob.
+#[test]
+fn an_unnamed_clip_takes_its_master_clips_name() {
+    let (p, s) = mixed_rate_project("/m/a.mov", FrameRate::FPS_24, 48_000);
+    let (bytes, _) = export(&p, s, &AafOptions::default()).unwrap();
+    let renamed = rewritten(&bytes, |h| {
+        let content = strong_mut(h, pid::CONTENT);
+        let master = objs_mut(content, pid::MOBS).iter_mut().find(|m| m.class == cls::MASTER_MOB).unwrap();
+        master.set(pid::MOB_NAME, Value::Data(store::utf16z("Master edit")));
+    });
+    let (imported, _, _) = import(&renamed, &ImportOptions::default()).unwrap();
+    let q = imported.project.sequence(imported.sequences[0]).unwrap();
+    assert_eq!(q.video_tracks[0].items[0].name, "Master edit");
+    assert_eq!(q.audio_tracks[0].items[0].name, "Master edit");
+}
+
+/// The URL in a relative locator is percent-encoded on export and decoded on import (craft-libs
+/// d6134e51cb); FilmCraft's earlier files wrote the path raw and still read as written.
+#[test]
+fn relative_media_locators_are_urls() {
+    let path = "Audio Files/100%20 #1.wav";
+    let (p, s) = mixed_rate_project(path, FrameRate::FPS_24, 48_000);
+    let (bytes, _) = export(&p, s, &AafOptions::default()).unwrap();
+    let root = store::read(&bytes).unwrap();
+    let mut all = Vec::new();
+    walk(&root, &mut all);
+    let urls: Vec<String> = all.iter().filter(|o| o.class == cls::NETWORK_LOCATOR).filter_map(|o| o.string(pid::URL_STRING)).collect();
+    assert!(!urls.is_empty() && urls.iter().all(|u| u == "Audio%20Files/100%2520%20%231.wav"), "{urls:?}");
+    let media_path = |bytes: &[u8]| {
+        let (imported, _, _) = import(bytes, &ImportOptions::default()).unwrap();
+        let q = imported.project.sequence(imported.sequences[0]).unwrap();
+        let item = q.video_tracks[0].items[0].item;
+        match &imported.project.item(item).unwrap().as_media().unwrap().media {
+            filmcraft_project::MediaRef::File { path } => path.clone(),
+            other => panic!("{other:?}"),
+        }
+    };
+    assert_eq!(media_path(&bytes), path);
+    let set_url = |h: &mut Obj, url: &str| {
+        let mut all = Vec::new();
+        locators_mut(h, &mut all);
+        for l in all {
+            l.set(pid::URL_STRING, Value::Data(store::utf16z(url)));
+        }
+    };
+    // another application's relative URL
+    let theirs = rewritten(&bytes, |h| {
+        as_if_written_elsewhere(h);
+        set_url(h, "Audio%20Files/Di%C3%A1logo%20%231.wav");
+    });
+    assert_eq!(media_path(&theirs), "Audio Files/Diálogo #1.wav");
+    // FilmCraft's earlier files: the raw path
+    let old = rewritten(&bytes, |h| {
+        without_start_rate_tag(h);
+        set_url(h, path);
+    });
+    assert_eq!(media_path(&old), path);
+}
+
+fn locators_mut<'a>(o: &'a mut Obj, out: &mut Vec<&'a mut Obj>) {
+    if o.class == cls::NETWORK_LOCATOR {
+        out.push(o);
+        return;
+    }
+    for (_, v) in &mut o.props {
+        match v {
+            Value::Strong(c) => locators_mut(c, out),
+            Value::StrongVec(v) | Value::StrongSet(v, _) => v.iter_mut().for_each(|c| locators_mut(c, out)),
+            _ => {}
+        }
+    }
+}
+
+/// A selector or nested scope is read as one of its inputs, and the report says so (craft-libs
+/// 584d87f9e1).
+#[test]
+fn flattened_selectors_and_nested_scopes_are_reported() {
+    let (p, s) = mixed_rate_project("/m/a.mov", FrameRate::FPS_24, 48_000);
+    let (bytes, _) = export(&p, s, &AafOptions::default()).unwrap();
+    for (class, property, message) in
+        [(cls::SELECTOR, pid::SELECTED, "selector was flattened"), (cls::NESTED_SCOPE, pid::NESTED_SLOTS, "nested scope was flattened")]
+    {
+        let wrapped = rewritten(&bytes, |h| {
+            let comp = compositions_mut(h).into_iter().next().unwrap();
+            let slot = objs_mut(comp, pid::SLOTS)
+                .iter_mut()
+                .find(|slot| slot.strong(pid::SEGMENT).is_some_and(|g| g.class == cls::SEQUENCE && g.weak_key(pid::DATA_DEFINITION) == Some(&ddef::SOUND[..])))
+                .unwrap();
+            let segment = strong_mut(slot, pid::SEGMENT);
+            let child = segment.clone();
+            let mut wrapper = Obj::new(class)
+                .with(pid::DATA_DEFINITION, child.get(pid::DATA_DEFINITION).unwrap().clone())
+                .with(pid::LENGTH, child.get(pid::LENGTH).unwrap().clone());
+            wrapper.set(property, if class == cls::SELECTOR { Value::Strong(Box::new(child)) } else { Value::StrongVec(vec![child]) });
+            *segment = wrapper;
+        });
+        let (imported, _, report) = import(&wrapped, &ImportOptions::default()).unwrap();
+        assert!(report.mentions(message), "{report}");
+        let q = imported.project.sequence(imported.sequences[0]).unwrap();
+        assert_eq!(q.audio_tracks[0].items.len(), 1, "the input is still read");
+    }
+}
