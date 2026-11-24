@@ -518,7 +518,12 @@ pub fn parse_timecode(input: &str, rate: FrameRate, drop_frame: bool, current: i
     let base = rate.timecode_base();
     let frames = if nums.len() == 1 && rel.is_some() {
         fr
-    } else if drop_frame && rate.supports_drop_frame() && m < 60 && sec < 60 && fr < base {
+    } else if drop_frame && rate.supports_drop_frame() {
+        // Overflowing fields carry into the next one first, then drop-frame counting applies, so
+        // `01;00;00;30` is the frame `01;00;01;00` names (base >= 1, fields are non-negative).
+        let (sec, fr) = (sec.saturating_add(fr / base), fr % base);
+        let (m, sec) = (m.saturating_add(sec / 60), sec % 60);
+        let (h, m) = (h.saturating_add(m / 60), m % 60);
         fields_to_frames(h, m, sec, fr, rate, true)
     } else {
         // Saturating: typed or agent-sent timecodes can have absurdly large fields.
@@ -764,6 +769,26 @@ mod tests {
         assert_eq!(parse_timecode("-1.00", r, false, 100).unwrap(), 75);
         assert_eq!(parse_timecode("00;01;00;02", FrameRate::FPS_29_97, true, 0).unwrap(), 1800);
         assert!(parse_timecode("abc", r, false, 0).is_err());
+    }
+
+    /// Overflowing fields carry into the next one before drop-frame counting, so `01;00;00;30` is
+    /// the frame `01;00;01;00` names rather than a non-drop count; non-drop overflow is counted as
+    /// before (craft-libs 97080c57f8).
+    #[test]
+    fn overflowing_drop_frame_fields_carry_before_counting() {
+        let df = FrameRate::FPS_29_97;
+        // (typed, the label it reads as)
+        let cases = [("01;00;00;30", "01;00;01;00"), ("00;09;59;45", "00;10;00;15"), ("00;00;90;00", "00;01;30;00"), ("01;75;00;02", "02;15;00;02")];
+        for (typed, label) in cases {
+            let f = parse_timecode(typed, df, true, 0).unwrap();
+            let want = parse_timecode(label, df, true, 0).unwrap();
+            assert_eq!((f, format_timecode_frames(f, df, true)), (want, label.to_string()), "{typed}");
+        }
+        assert_eq!(parse_timecode("00:00:00:90", FrameRate::FPS_25, false, 0).unwrap(), 90);
+        assert_eq!(parse_timecode("00:00:00:90", df, false, 0).unwrap(), 90);
+        // Absurd fields saturate instead of overflowing.
+        let huge = format!("{};{};{};{}", i64::MAX, i64::MAX, i64::MAX, i64::MAX);
+        assert!(parse_timecode(&huge, df, true, 0).is_ok());
     }
 
     #[test]
