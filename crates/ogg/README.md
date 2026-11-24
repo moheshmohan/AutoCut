@@ -28,10 +28,14 @@ let packet = ogg.read_packet(&bytes, s, k)?;
 
 - Every page is read and its CRC checked; damaged pages are dropped and the reader resynchronises
   on the next `OggS`. Packets spanning pages are lists of byte ranges; a continued page whose start
-  was lost drops the fragment.
+  was lost drops the fragment, and a gap in a stream's page sequence numbers (a lost page) drops
+  the packet it was continuing. A beginning-of-stream page for a serial already seen starts the
+  next link of a chained file as a new stream (links may reuse a serial; RFC 3533 §4), unless it
+  carries on that stream's page sequence before its end-of-stream page (a stray flag).
 - `OpusTiming`: packet durations from the TOC; positions anchored on the first page's granule
   (backwards from it), then accumulated forwards, re-anchoring on any granule discontinuity; the
-  final (end-of-stream) page's smaller granule trims the end. Positions are relative to the first
+  final (end-of-stream) page's smaller granule trims the end; packets after the last granule
+  (a truncated file) continue from it and count in the total. Positions are relative to the first
   sample after the pre-skip (pre-skip samples are negative).
 
 ## Tests

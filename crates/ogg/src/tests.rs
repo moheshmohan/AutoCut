@@ -579,12 +579,44 @@ fn read_packet_checks_its_ranges_against_the_source_before_allocating() {
     assert!(matches!(far.read_packet(&f[..], s, 0), Err(Error::Invalid(_))));
 }
 
-/// Opus headers and the first page of one packet, then `count` copies of a page that continues
-/// it with 255 segments of 255 bytes, without holding them.
+/// Opus headers and the first page of one packet, then `count` pages that continue it with 255
+/// segments of 255 bytes each, without holding them. The continuation pages are one template
+/// whose page sequence number (and so CRC) is patched per page: page `k` carries `first_seq + k`,
+/// as a real stream does, so the pages are not taken for lost ones.
 struct EndlessPacket {
     head: Vec<u8>,
+    /// The continuation page with sequence number 0.
     page: Vec<u8>,
     count: u64,
+    first_seq: u32,
+    /// CRC of the template, and what each bit of the sequence number adds to it (the Ogg CRC has
+    /// no initial or final XOR, so it is linear: crc(a ^ b) = crc(a) ^ crc(b)).
+    crc: u32,
+    seq_bits: [u32; 32],
+}
+
+impl EndlessPacket {
+    fn new(head: Vec<u8>, lacing: &[u8], body: &[u8], count: u64, first_seq: u32) -> Self {
+        let mut tpl = Vec::new();
+        page(&mut tpl, 0x01, -1, 3, 0, lacing, body);
+        let crc = u32::from_le_bytes([tpl[22], tpl[23], tpl[24], tpl[25]]);
+        let seq_bits = std::array::from_fn(|i| {
+            let mut v = Vec::new();
+            page(&mut v, 0x01, -1, 3, 1 << i, lacing, body);
+            u32::from_le_bytes([v[22], v[23], v[24], v[25]]) ^ crc
+        });
+        Self { head, page: tpl, count, first_seq, crc, seq_bits }
+    }
+    /// The first 27 bytes of continuation page `k`: the template's, with its sequence number and CRC.
+    fn header(&self, k: u64) -> [u8; 27] {
+        let seq = self.first_seq.wrapping_add(k as u32);
+        let crc = (0..32).filter(|i| seq >> i & 1 != 0).fold(self.crc, |c, i| c ^ self.seq_bits[i]);
+        let mut h = [0u8; 27];
+        h.copy_from_slice(&self.page[..27]);
+        h[18..22].copy_from_slice(&seq.to_le_bytes());
+        h[22..26].copy_from_slice(&crc.to_le_bytes());
+        h
+    }
 }
 
 impl ByteSource for EndlessPacket {
@@ -599,9 +631,19 @@ impl ByteSource for EndlessPacket {
         let mut done = 0;
         while done < buf.len() {
             let at = offset + done as u64;
-            let from = if at < head { &self.head[at as usize..] } else { &self.page[((at - head) % page) as usize..] };
-            let n = from.len().min(buf.len() - done);
-            buf[done..done + n].copy_from_slice(&from[..n]);
+            let n = if at < head {
+                let from = &self.head[at as usize..];
+                let n = from.len().min(buf.len() - done);
+                buf[done..done + n].copy_from_slice(&from[..n]);
+                n
+            } else {
+                let (k, r) = ((at - head) / page, ((at - head) % page) as usize);
+                let header = self.header(k);
+                let from = if r < 27 { &header[r..] } else { &self.page[r..] };
+                let n = from.len().min(buf.len() - done);
+                buf[done..done + n].copy_from_slice(&from[..n]);
+                n
+            };
             done += n;
         }
         Ok(())
@@ -617,12 +659,116 @@ fn a_packet_past_4_gib_is_dropped_not_overflowed() {
     page(&mut head, 0, 0, 3, 1, &l, &b);
     let body = vec![0xF8; 255 * 255];
     page(&mut head, 0, -1, 3, 2, &[255; 255], &body);
-    let mut cont = Vec::new();
-    page(&mut cont, 0x01, -1, 3, 3, &[255; 255], &body);
     // one packet of 65025 bytes a page: past u32::MAX after 66052 pages
     let count = u64::from(u32::MAX) / body.len() as u64 + 1;
-    let src = EndlessPacket { head, page: cont, count };
+    let src = EndlessPacket::new(head, &[255; 255], &body, count, 3);
     let o = open(&src).unwrap();
     assert!(o.streams[0].packets.is_empty(), "{:?}", o.streams[0].packets.first().map(|p| p.size));
     assert!(o.warnings.iter().any(|w| w.contains("packet over 4 GiB dropped")), "{:?}", o.warnings);
+}
+
+/// Opus header pages for `serial` (with the beginning-of-stream flag), then data pages of one
+/// 960-sample packet of `pk_len` bytes each; sequence numbers continue from the header pages.
+fn opus_pages(f: &mut Vec<u8>, serial: u32, npk: usize, pk_len: usize, eos: bool) {
+    let head = opus_head(0);
+    let (l, b) = lace(&[&head], false);
+    page(f, 0x02, 0, serial, 0, &l, &b);
+    let (l, b) = lace(&[b"OpusTags\x00\x00\x00\x00\x00\x00\x00\x00"], false);
+    page(f, 0, 0, serial, 1, &l, &b);
+    for i in 0..npk {
+        let p = pkt(i, pk_len);
+        let (l, b) = lace(&[&p], false);
+        let last = eos && i + 1 == npk;
+        page(f, if last { 0x04 } else { 0 }, (i as i64 + 1) * 960, serial, i as u32 + 2, &l, &b);
+    }
+}
+
+fn page_starts(f: &[u8]) -> Vec<usize> {
+    f.windows(4).enumerate().filter(|(_, w)| *w == b"OggS").map(|(i, _)| i).collect()
+}
+
+#[test]
+fn a_lost_middle_page_drops_the_packet_it_continued() {
+    let mut f = Vec::new();
+    let head = opus_head(0);
+    let (l, b) = lace(&[&head], false);
+    page(&mut f, 0x02, 0, 1, 0, &l, &b);
+    let (l, b) = lace(&[b"OpusTags"], false);
+    page(&mut f, 0, 0, 1, 1, &l, &b);
+    // one packet over three pages: 255 bytes, 255 bytes, then the last 90 with a whole packet
+    let big = pkt(0, 600);
+    page(&mut f, 0, -1, 1, 2, &[255], &big[..255]);
+    page(&mut f, 0x01, -1, 1, 3, &[255], &big[255..510]);
+    let small = pkt(1, 30);
+    let (l, b) = lace(&[&big[510..], &small], false);
+    page(&mut f, 0x01 | 0x04, 1920, 1, 4, &l, &b);
+    let mut g = f.clone();
+    g[page_starts(&f)[3] + 40] ^= 0xFF; // the middle page fails its CRC
+    let o = open(&g).unwrap();
+    assert!(o.warnings.iter().any(|w| w.contains("pages missing")), "{:?}", o.warnings);
+    assert_eq!(o.streams[0].packets.len(), 1);
+    assert_eq!(o.read_packet(&g, 0, 0).unwrap(), small);
+}
+
+#[test]
+fn chained_links_that_reuse_a_serial_are_separate_streams() {
+    let mut f = Vec::new();
+    opus_pages(&mut f, 0, 3, 40, true);
+    opus_pages(&mut f, 0, 3, 40, true);
+    let o = open(&f).unwrap();
+    assert!(o.warnings.is_empty(), "{:?}", o.warnings);
+    assert_eq!(o.streams.len(), 2);
+    for st in &o.streams {
+        assert_eq!((st.codec, st.headers.len(), st.packets.len()), (Codec::Opus, 2, 3));
+        assert!(st.headers[0].starts_with(b"OpusHead"));
+    }
+}
+
+#[test]
+fn a_stray_beginning_of_stream_flag_does_not_split_a_stream() {
+    let mut f = Vec::new();
+    opus_pages(&mut f, 3, 0, 0, false);
+    for i in 0..6u32 {
+        let p = pkt(i as usize, 40);
+        let (l, b) = lace(&[&p], false);
+        let flags = match i {
+            2 => 0x02,
+            5 => 0x04,
+            _ => 0,
+        };
+        page(&mut f, flags, (i64::from(i) + 1) * 960, 3, i + 2, &l, &b);
+    }
+    let o = open(&f).unwrap();
+    assert_eq!(o.streams.len(), 1);
+    assert_eq!((o.streams[0].headers.len(), o.streams[0].packets.len()), (2, 6));
+    assert!(o.warnings.iter().any(|w| w.contains("stray beginning-of-stream")), "{:?}", o.warnings);
+    // a link that ends without its end-of-stream page, then the next link with the same serial:
+    // two streams, and a warning
+    let mut f = Vec::new();
+    opus_pages(&mut f, 0, 3, 40, false);
+    opus_pages(&mut f, 0, 3, 40, true);
+    let o = open(&f).unwrap();
+    assert_eq!(o.streams.len(), 2);
+    assert!(o.warnings.iter().any(|w| w.contains("starts again")), "{:?}", o.warnings);
+}
+
+#[test]
+fn opus_timing_includes_packets_after_the_last_known_granule() {
+    let f = opus_file(6, 312, 0);
+    let o = open(&f[..]).unwrap();
+    let mut stream = o.streams[0].clone();
+    // Missing granules on complete-packet pages are non-conforming. The recovery fallback still
+    // assigns their packet positions; the total must include the same samples.
+    stream.packets.last_mut().unwrap().granule = None;
+    let timing = OpusTiming::of(&stream, 312);
+    assert_eq!(timing.starts, vec![-312, 648, 1608, 2568, 3528, 4488]);
+    assert_eq!(timing.total, 6 * 960 - 312);
+
+    // With no usable granule, every complete packet still contributes its TOC duration.
+    for packet in &mut stream.packets {
+        packet.granule = None;
+    }
+    let timing = OpusTiming::of(&stream, 312);
+    assert_eq!(timing.starts, vec![-312, 648, 1608, 2568, 3528, 4488]);
+    assert_eq!(timing.total, 6 * 960 - 312);
 }

@@ -268,6 +268,8 @@ fn open_with_packet_budget(src: &(impl ByteSource + ?Sized), packet_budget: usiz
     let len = src.len();
     let mut streams: Vec<Stream> = Vec::new();
     let mut by_serial: HashMap<u32, usize> = HashMap::new();
+    // the page sequence number the next page of each stream (by index in `streams`) should carry
+    let mut next_seq: Vec<Option<u32>> = Vec::new();
     let mut partial: HashMap<u32, Partial> = HashMap::new();
     let mut warnings = Warnings::default();
     let mut pos = 0u64;
@@ -329,12 +331,41 @@ fn open_with_packet_budget(src: &(impl ByteSource + ?Sized), packet_budget: usiz
         let flags = page[5];
         let granule = i64::from_le_bytes(page[6..14].try_into().unwrap_or([0; 8]));
         let serial = u32::from_le_bytes([page[14], page[15], page[16], page[17]]);
+        let seq = u32::from_le_bytes([page[18], page[19], page[20], page[21]]);
         let lacing = page[27..27 + nseg].to_vec();
         let body_off = pos + 27 + nseg as u64;
+        // a beginning-of-stream page for a serial already seen starts the next link of a chained
+        // file (RFC 3533 §4), which may reuse the serial; one that carries on the page sequence of
+        // a stream with no end-of-stream page yet is a stray flag in that stream
+        if flags & 0x02 != 0
+            && let Some(&si) = by_serial.get(&serial)
+        {
+            let saw_eos = streams.get(si).is_some_and(|st| st.saw_eos);
+            if !saw_eos && next_seq.get(si).copied().flatten() == Some(seq) {
+                warnings.damage(|| format!("stray beginning-of-stream flag on page at byte {pos}, read as part of stream {serial}"));
+            } else {
+                if !saw_eos {
+                    warnings.damage(|| format!("stream {serial} starts again at byte {pos} before its end-of-stream page"));
+                }
+                by_serial.remove(&serial);
+                if partial.remove(&serial).is_some() {
+                    warnings.damage(|| format!("incomplete packet before page at byte {pos}"));
+                }
+            }
+        }
         let si = *by_serial.entry(serial).or_insert_with(|| {
             streams.push(Stream { serial, codec: Codec::Unknown, headers: Vec::new(), packets: Vec::new(), pages: 0, last_granule: None, saw_eos: false });
+            next_seq.push(None);
             streams.len() - 1
         });
+        // a gap in the page sequence numbers is a lost page: a packet it continued is incomplete
+        if let Some(expected) = next_seq.get_mut(si) {
+            if expected.is_some_and(|n| n != seq) {
+                warnings.damage(|| format!("pages missing before page at byte {pos}"));
+                partial.remove(&serial);
+            }
+            *expected = Some(seq.wrapping_add(1));
+        }
         let st = &mut streams[si];
         let page_index = st.pages;
         st.pages += 1;
@@ -548,6 +579,8 @@ impl OpusTiming {
                     c = c.saturating_add(durations[k] as i64);
                     ends[k] = Some(c);
                 }
+                // the total counts these packets too
+                cursor = Some(c);
                 break;
             }
             let Some(g) = granule_of(j) else { break };
