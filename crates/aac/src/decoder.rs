@@ -23,6 +23,9 @@ const ID_END: u32 = 7;
 const EXT_SBR_DATA: u32 = 13;
 const EXT_SBR_DATA_CRC: u32 = 14;
 
+/// The noise generator's state at the start of a stream and after [`Decoder::reset`].
+const NOISE_SEED: u32 = 0x2545_F491;
+
 /// One decoded `individual_channel_stream` before stereo processing and synthesis.
 struct Ics {
     info: IcsInfo,
@@ -76,7 +79,7 @@ impl Decoder {
         if layout.is_empty() && asc.channel_config != 0 {
             return Err(Error::InvalidConfig("unsupported channel configuration"));
         }
-        let mut d = Decoder { asc, layout: Vec::new(), offsets: Vec::new(), channels: Vec::new(), noise_state: 0x2545_F491, sbr_seen: false };
+        let mut d = Decoder { asc, layout: Vec::new(), offsets: Vec::new(), channels: Vec::new(), noise_state: NOISE_SEED, sbr_seen: false };
         d.set_layout(layout);
         Ok(d)
     }
@@ -113,8 +116,10 @@ impl Decoder {
         &self.layout
     }
 
-    /// Clear the overlap state (e.g. after a seek).
+    /// Clear the overlap and noise state (e.g. after a seek), so a seek to the same place always
+    /// gives the same samples.
     pub fn reset(&mut self) {
+        self.noise_state = NOISE_SEED;
         for c in &mut self.channels {
             c.overlap.fill(0.0);
             c.prev_shape = WindowShape::Sine;
@@ -125,9 +130,16 @@ impl Decoder {
         self.asc.sf_index
     }
 
-    /// Decode one access unit (one `raw_data_block`) into 1024 samples per channel.
+    /// Decode one access unit (one `raw_data_block`) into 1024 samples per channel. An access unit
+    /// that fails leaves the decoder as it was: its damage, including a damaged program config
+    /// element, does not reach the access units after it.
     pub fn decode(&mut self, au: &[u8]) -> Result<Vec<Vec<f32>>> {
-        self.decode_block(au, true)
+        let before = (self.asc.pce.clone(), self.layout.clone(), self.offsets.clone(), self.channels.clone(), self.noise_state);
+        let decoded = self.decode_block(au, true);
+        if decoded.is_err() {
+            (self.asc.pce, self.layout, self.offsets, self.channels, self.noise_state) = before;
+        }
+        decoded
     }
 
     fn decode_block(&mut self, au: &[u8], allow_reconfig: bool) -> Result<Vec<Vec<f32>>> {
@@ -177,17 +189,10 @@ impl Decoder {
                     if allow_reconfig && !saw_element && self.asc.channel_config == 0 && self.asc.pce.as_ref() != Some(&pce) {
                         let layout = pce.layout();
                         if !layout.is_empty() && layout.iter().map(|e| e.0.channels()).sum::<usize>() <= 64 {
-                            // A damaged PCE must not outlive its access unit: the layout changes
-                            // only when the access unit decodes with it.
-                            let pce_before = self.asc.pce.replace(pce);
-                            let before = (std::mem::take(&mut self.layout), std::mem::take(&mut self.offsets), std::mem::take(&mut self.channels));
+                            // `decode` puts the layout back if the access unit then fails
+                            self.asc.pce = Some(pce);
                             self.set_layout(layout);
-                            let decoded = self.decode_block(au, false);
-                            if decoded.is_err() {
-                                self.asc.pce = pce_before;
-                                (self.layout, self.offsets, self.channels) = before;
-                            }
-                            return decoded;
+                            return self.decode_block(au, false);
                         }
                     }
                 }
@@ -219,19 +224,21 @@ impl Decoder {
         Ok(res)
     }
 
+    /// The layout entry a channel element of type `ty` and `tag` fills, among those not `used` yet.
     fn find_slot(&self, ty: ElementType, tag: u8, used: &[bool]) -> Result<usize> {
-        let compatible = |t: ElementType| t == ty || (ty != ElementType::Cpe && t != ElementType::Cpe);
-        if let Some(i) = self.layout.iter().enumerate().position(|(i, &(t, g))| t == ty && g == tag && !used[i]) {
-            return Ok(i);
-        }
-        if let Some(i) = self.layout.iter().enumerate().position(|(i, &(t, _))| t == ty && !used[i]) {
-            return Ok(i);
-        }
-        self.layout
-            .iter()
-            .enumerate()
-            .position(|(i, &(t, _))| compatible(t) && !used[i])
-            .ok_or(Error::Bitstream("unexpected channel element for the channel configuration"))
+        let free = |want: &dyn Fn(ElementType, u8) -> bool| {
+            self.layout.iter().enumerate().position(|(i, &(t, g))| want(t, g) && !used.get(i).copied().unwrap_or(true))
+        };
+        let slot = if self.asc.channel_config == 0 {
+            // A program config names its elements' tags: one it does not list has no place.
+            free(&|t, g| t == ty && g == tag)
+        } else {
+            // An indexed configuration does not: its elements are placed by the order they arrive
+            // in, whatever their tags. Some encoders code an LFE as an SCE, as ffmpeg allows; no
+            // other element changes type (an LFE is not written to the centre channel).
+            free(&|t, _| t == ty).or_else(|| free(&|t, _| ty == ElementType::Sce && t == ElementType::Lfe))
+        };
+        slot.ok_or(Error::Bitstream("unexpected channel element for the channel configuration"))
     }
 
     fn decode_cpe(&mut self, br: &mut BitReader, ch: usize) -> Result<[Vec<f32>; 2]> {
@@ -638,6 +645,69 @@ mod tests {
         let full = silent_au(Some(&six), &[(ID_SCE, 0), (ID_CPE, 0), (ID_CPE, 1), (ID_LFE, 0)]);
         assert_eq!(dec.decode(&full).unwrap().len(), 6);
         assert_eq!(dec.channels(), 6);
+    }
+
+    /// A failed access unit leaves no trace: the next one decodes as if it had not been there.
+    #[test]
+    fn a_failed_access_unit_leaves_the_state_as_it_was() {
+        // A complete mono channel element (one noise band when `noise`), then the access unit ends
+        // without ID_END: its padding reads as another element whose tag is cut off.
+        let unit = |noise: bool| {
+            let mut bw = BitWriter::new();
+            bw.write_bits(ID_SCE, 3);
+            bw.write_bits(0, 4); // tag
+            bw.write_bits(100, 8); // global_gain
+            bw.write_bits(0, 4); // ics_reserved_bit, ONLY_LONG, sine window
+            bw.write_bits(u32::from(noise), 6); // max_sfb
+            bw.write_bits(0, 1); // no predictor
+            if noise {
+                bw.write_bits(u32::from(NOISE_HCB), 4);
+                bw.write_bits(1, 5); // a section of one band
+                bw.write_bits(256, 9); // the first noise energy, offset 0
+            }
+            bw.write_bits(0, 3); // no pulse, TNS or gain control data
+            bw.finish()
+        };
+        for noise in [false, true] {
+            let mut dec = Decoder::from_config(AudioSpecificConfig::lc(4, 1)).unwrap();
+            dec.channels[0].overlap.fill(0.5);
+            dec.channels[0].prev_shape = WindowShape::Kbd;
+            assert!(dec.decode(&unit(noise)).is_err(), "no ID_END");
+            assert!(dec.channels[0].overlap.iter().all(|&s| s == 0.5), "noise {noise}");
+            assert_eq!((dec.channels[0].prev_shape, dec.noise_state), (WindowShape::Kbd, NOISE_SEED), "noise {noise}");
+        }
+    }
+
+    #[test]
+    fn a_reset_restarts_the_noise_generator() {
+        let mut dec = Decoder::from_config(AudioSpecificConfig::lc(4, 1)).unwrap();
+        let first = dec.next_random();
+        dec.next_random();
+        dec.reset();
+        assert_eq!(dec.next_random(), first);
+    }
+
+    /// A program config lists its elements: one it does not list has no place.
+    #[test]
+    fn program_configs_refuse_unlisted_tags() {
+        let pce = ProgramConfig { front: vec![(true, 3), (true, 5)], ..Default::default() };
+        let asc = AudioSpecificConfig { pce: Some(pce), ..AudioSpecificConfig::lc(4, 0) };
+        let dec = Decoder::from_config(asc).unwrap();
+        assert_eq!(dec.find_slot(ElementType::Cpe, 5, &[false, false]), Ok(1));
+        assert!(dec.find_slot(ElementType::Cpe, 9, &[false, false]).is_err());
+        assert!(dec.find_slot(ElementType::Sce, 3, &[false, false]).is_err());
+    }
+
+    /// Some encoders code 5.1's LFE as an SCE, as ffmpeg allows. Nothing else changes type: an LFE
+    /// is not written to the centre channel.
+    #[test]
+    fn indexed_configurations_refuse_elements_of_another_type() {
+        let dec = Decoder::from_config(AudioSpecificConfig::lc(4, 6)).unwrap();
+        // SCE, CPE, CPE, LFE, placed by arrival order whatever the tags
+        assert_eq!(dec.find_slot(ElementType::Cpe, 7, &[true, false, false, false]), Ok(1));
+        assert_eq!(dec.find_slot(ElementType::Sce, 1, &[true, false, false, false]), Ok(3));
+        assert!(dec.find_slot(ElementType::Lfe, 1, &[false, false, false, true]).is_err());
+        assert!(dec.find_slot(ElementType::Cpe, 2, &[false, true, true, false]).is_err());
     }
 
     #[test]

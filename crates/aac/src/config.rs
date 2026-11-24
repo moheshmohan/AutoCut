@@ -153,6 +153,25 @@ pub fn config_layout(channel_config: u8) -> Option<Vec<(ElementType, u8)>> {
     })
 }
 
+/// The channel configuration whose speakers a stream has: its own, or for configuration 0 the
+/// configuration 3–6 that its program config element spells out. A program config element lists
+/// front, side, back and LFE elements in that order, so one that opens with a centre and a front
+/// pair and goes on with exactly the elements of a configuration has that configuration's speakers
+/// (and the same order). Any other list has no speaker order that can be told, and gives 0:
+/// ffmpeg's 5.1(side), for one, lists the pair first and already decodes in WAV order.
+pub fn speaker_config(asc: &AudioSpecificConfig) -> u8 {
+    if asc.channel_config != 0 {
+        return asc.channel_config;
+    }
+    let centre_then_pair = asc.pce.as_ref().is_some_and(|p| p.front.iter().map(|e| e.0).eq([false, true]));
+    if !centre_then_pair {
+        return 0;
+    }
+    let elements = asc.layout();
+    let same = |config: &u8| config_layout(*config).is_some_and(|l| l.iter().map(|e| e.0).eq(elements.iter().map(|e| e.0)));
+    (3..=6).find(same).unwrap_or(0)
+}
+
 /// Parsed `AudioSpecificConfig`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AudioSpecificConfig {
@@ -188,6 +207,22 @@ fn read_rate(br: &mut BitReader) -> Result<(u8, u32)> {
     }
     let r = *SAMPLE_RATES.get(i as usize).ok_or(Error::InvalidConfig("reserved sampling frequency index"))?;
     Ok((i, r))
+}
+
+/// Backward-compatible explicit SBR signalling (ISO/IEC 14496-3 §1.6.6.2): after an AAC-LC
+/// config, a sync extension `0x2b7` with extension object type 5 names SBR and its output rate,
+/// and `0x548` after it names PS. Returns `(sbr, extension rate, ps)`, or `None` when the bits
+/// that follow are not that extension (they are then ignored, as decoders that don't know it do).
+fn sync_extension(br: &mut BitReader) -> Option<(bool, Option<u32>, bool)> {
+    if br.bits_left() < 16 || br.read_bits(11).ok()? != 0x2b7 || read_aot(br).ok()? != 5 {
+        return None;
+    }
+    if br.read_bits(1).ok()? != 1 {
+        return Some((false, None, false));
+    }
+    let (_, rate) = read_rate(br).ok()?;
+    let ps = br.bits_left() >= 12 && br.read_bits(11).ok()? == 0x548 && br.read_bits(1).ok()? == 1;
+    Some((true, Some(rate), ps))
 }
 
 impl AudioSpecificConfig {
@@ -238,6 +273,9 @@ impl AudioSpecificConfig {
         let pce = if channel_config == 0 { Some(ProgramConfig::parse(&mut br)?) } else { None };
         if frame_length_flag {
             return Err(Error::Unsupported("960-sample frames"));
+        }
+        if !sbr && let Some((s, rate, p)) = sync_extension(&mut br) {
+            (sbr, extension_sample_rate, ps) = (s, rate, p);
         }
         let cfg = AudioSpecificConfig { object_type: aot, sample_rate, sf_index, channel_config, frame_length_flag, sbr, ps, extension_sample_rate, pce };
         if cfg.channels() == 0 {
@@ -460,6 +498,54 @@ mod tests {
         assert!(a.sbr);
         assert_eq!(a.sample_rate, 24000);
         assert_eq!(a.extension_sample_rate, Some(48000));
+    }
+
+    /// Backward-compatible signalling, as the Matroska reader synthesises for legacy HE-AAC codec
+    /// IDs and some MP4 muxers write: an AAC-LC config, then `0x2b7`, object type 5 and the output
+    /// rate.
+    #[test]
+    fn a_sync_extension_after_the_config_signals_sbr_and_ps() {
+        // AAC-LC, 22.05 kHz, stereo; 0x2b7, AOT 5, SBR, 44.1 kHz
+        let asc = AudioSpecificConfig::parse(&[0x13, 0x90, 0x56, 0xE5, 0xA0]).unwrap();
+        assert_eq!((asc.object_type, asc.sample_rate, asc.sbr, asc.extension_sample_rate, asc.ps), (2, 22_050, true, Some(44_100), false));
+        // ... then 0x548 and PS
+        let mut bw = BitWriter::new();
+        for (value, bits) in [(2, 5), (7, 4), (1, 4), (0, 3), (0x2b7, 11), (5, 5), (1, 1), (4, 4), (0x548, 11), (1, 1)] {
+            bw.write_bits(value, bits);
+        }
+        let asc = AudioSpecificConfig::parse(&bw.finish()).unwrap();
+        assert_eq!((asc.sbr, asc.extension_sample_rate, asc.ps), (true, Some(44_100), true));
+        // SBR flagged off, a different extension, or too few bits: plain AAC-LC
+        for bytes in [&[0x13, 0x90, 0x56, 0xE5, 0x00][..], &[0x13, 0x90, 0x12, 0x34], &[0x13, 0x90, 0x56]] {
+            let asc = AudioSpecificConfig::parse(bytes).unwrap();
+            assert_eq!((asc.sbr, asc.extension_sample_rate), (false, None), "{bytes:02x?}");
+        }
+    }
+
+    /// A program config element in the shape of a channel configuration has that configuration's
+    /// speakers, with the centre first. ffmpeg's 5.1(side) lists its pair first and already decodes
+    /// in WAV order, so it stays as it is.
+    #[test]
+    fn a_program_config_element_takes_the_configuration_it_matches() {
+        let with = |pce| AudioSpecificConfig { pce: Some(pce), ..AudioSpecificConfig::lc(3, 0) };
+        let centre_first = ProgramConfig { front: vec![(false, 0), (true, 0)], back: vec![(true, 1)], lfe: vec![0], ..Default::default() };
+        assert_eq!(speaker_config(&with(centre_first)), 6);
+        let three = ProgramConfig { front: vec![(false, 0), (true, 0)], ..Default::default() };
+        assert_eq!(speaker_config(&with(three)), 3);
+        let four = ProgramConfig { front: vec![(false, 0), (true, 0)], back: vec![(false, 1)], ..Default::default() };
+        assert_eq!(speaker_config(&with(four)), 4);
+        let five = ProgramConfig { front: vec![(false, 0), (true, 0)], side: vec![(true, 1)], ..Default::default() };
+        assert_eq!(speaker_config(&with(five)), 5);
+        let ffmpeg = ProgramConfig { front: vec![(true, 0), (false, 0)], side: vec![(false, 1)], back: vec![(true, 1)], ..Default::default() };
+        assert_eq!(speaker_config(&with(ffmpeg)), 0);
+        // the same element types with no front pair: the side pair is not left and right
+        let no_front_pair = ProgramConfig { front: vec![(false, 0)], side: vec![(true, 0)], back: vec![(true, 1)], lfe: vec![0], ..Default::default() };
+        assert_eq!(speaker_config(&with(no_front_pair)), 0);
+        // 7.1 in a program config element is not one of the unambiguous configurations
+        let wide = ProgramConfig { front: vec![(false, 0), (true, 0)], side: vec![(true, 1)], back: vec![(true, 2)], lfe: vec![0], ..Default::default() };
+        assert_eq!(speaker_config(&with(wide)), 0);
+        assert_eq!(speaker_config(&AudioSpecificConfig::lc(3, 6)), 6);
+        assert_eq!(speaker_config(&AudioSpecificConfig::lc(3, 0)), 0);
     }
 
     #[test]

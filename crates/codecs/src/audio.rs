@@ -63,7 +63,8 @@ fn vorbis_to_wav_order(channels: usize) -> Option<&'static [usize]> {
 /// surrounds, LFE): output channel → decoded channel, giving the WAV/SMPTE order (L R C LFE Ls Rs)
 /// used elsewhere, as the AC-3 decoder does and the AAC encoder's caller undoes on export. Only the
 /// unambiguous channel configurations 3–6, 11 (6.1: … LFE, back centre, sides) and 12 (7.1: … LFE,
-/// backs, sides); 1, 2, 7 and PCE layouts keep the decoded order.
+/// backs, sides), and program config elements shaped like 3–6 (see
+/// [`filmcraft_aac::speaker_config`]); 1, 2, 7 and other PCE layouts keep the decoded order.
 fn aac_to_wav_order(channel_config: u8) -> Option<&'static [usize]> {
     Some(match channel_config {
         3 => &[1, 2, 0],
@@ -197,7 +198,8 @@ impl PacketDecoder {
                 if let Some(up) = up {
                     out = up.process(out);
                 }
-                let out = reorder(out, aac_to_wav_order(dec.config().channel_config));
+                // a program config element that spells out a configuration has its speakers
+                let out = reorder(out, aac_to_wav_order(filmcraft_aac::speaker_config(dec.config())));
                 self.channels = out.len();
                 return Ok(out);
             }
@@ -316,7 +318,8 @@ pub fn aac_output_rate<'a>(asc: &[u8], first_units: impl IntoIterator<Item = &'a
     let mut dec = filmcraft_aac::Decoder::new(asc).ok()?;
     let core = dec.sample_rate();
     if let Some(ext) = dec.config().extension_sample_rate {
-        return Some(ext);
+        // Only twice the core rate is upsampled to; any other signalled rate plays the core.
+        return Some(if upsamples_core(core, ext) { ext } else { core });
     }
     if core <= 24_000 {
         for au in first_units {
@@ -421,17 +424,24 @@ pub fn contiguous_starts(packets: impl IntoIterator<Item = PacketTime>, toleranc
 /// Taps on each side of the interpolation point in [`Upsample2x`].
 const UPSAMPLE_HALF: usize = 12;
 
+/// Input samples [`Upsample2x`] delays its output by: 481, the delay of the SBR filterbanks (962
+/// output samples), which HE-AAC encoders and the container's priming count on.
+const UPSAMPLE_DELAY: usize = 481;
+
+/// Input samples [`Upsample2x`] keeps per channel.
+const UPSAMPLE_HISTORY: usize = UPSAMPLE_DELAY + UPSAMPLE_HALF;
+
 /// 2× upsampler for HE-AAC. Our decoder reconstructs the AAC-LC core at half the output rate and
 /// not yet the SBR high band, so the core is interpolated to the output rate: timing and pitch are
 /// right and the band above the core's Nyquist stays empty. Even outputs are the input samples,
 /// odd ones a Blackman-windowed sinc half-band interpolation over 2 × [`UPSAMPLE_HALF`] inputs.
-/// The look-ahead delays the output by `UPSAMPLE_HALF` input samples (0.5 ms at 24 kHz); the
-/// state carries across packets, so a seek primed with the preceding packet gives the same
-/// samples as continuous decoding.
+/// The output is delayed by [`UPSAMPLE_DELAY`] input samples, as an SBR decoder's is (it played
+/// about 20 ms early before); the state carries across packets, so a seek primed with the
+/// preceding packet gives the same samples as continuous decoding.
 #[derive(Clone)]
 pub struct Upsample2x {
     taps: [f32; 2 * UPSAMPLE_HALF],
-    /// The last `2 × UPSAMPLE_HALF` input samples per channel.
+    /// The last [`UPSAMPLE_HISTORY`] input samples per channel.
     hist: Vec<Vec<f32>>,
 }
 
@@ -451,7 +461,7 @@ impl Upsample2x {
         for t in &mut taps {
             *t = (*t as f64 / sum) as f32;
         }
-        Self { taps, hist: vec![vec![0.0; 2 * UPSAMPLE_HALF]; channels] }
+        Self { taps, hist: vec![vec![0.0; UPSAMPLE_HISTORY]; channels] }
     }
 
     pub fn reset(&mut self) {
@@ -461,8 +471,10 @@ impl Upsample2x {
     }
 
     pub fn process(&mut self, input: Vec<Vec<f32>>) -> Vec<Vec<f32>> {
-        if self.hist.len() < input.len() {
-            self.hist.resize(input.len(), vec![0.0; 2 * UPSAMPLE_HALF]);
+        // A changed channel count is a new layout: history of channels that were absent meanwhile
+        // (or that held other speakers) would put a step into the output.
+        if self.hist.len() != input.len() {
+            self.hist = vec![vec![0.0; UPSAMPLE_HISTORY]; input.len()];
         }
         let m = UPSAMPLE_HALF;
         input
@@ -475,10 +487,10 @@ impl Upsample2x {
                 // output pair i is centred on buf[i + m]: the sample itself, then the point halfway
                 // to the next one from buf[i + 1 ..= i + 2m]
                 for w in buf.windows(2 * m + 1).take(x.len()) {
-                    out.push(w[m]);
-                    out.push(w[1..].iter().zip(&self.taps).map(|(a, b)| a * b).sum());
+                    out.push(w.get(m).copied().unwrap_or(0.0));
+                    out.push(w.get(1..).unwrap_or_default().iter().zip(&self.taps).map(|(a, b)| a * b).sum());
                 }
-                *hist = buf.split_off(buf.len() - 2 * m);
+                *hist = buf.split_off(buf.len().saturating_sub(UPSAMPLE_HISTORY));
                 out
             })
             .collect()
@@ -530,7 +542,23 @@ fn latm_value(r: &mut filmcraft_bitstream::BitReader) -> Option<u32> {
     r.read_bits(8 * n).ok()
 }
 
-/// StreamMuxConfig after `audioMuxVersion`, leaving the reader after it.
+/// The program config element `r` has reached inside a `StreamMuxConfig`'s
+/// `AudioSpecificConfig`, leaving the reader after it. The element aligns its comment to a byte of
+/// the `AudioSpecificConfig`, which may start at any bit of a LATM frame, and it starts on such a
+/// byte itself: so the bits are lined up from here to read it.
+fn latm_program_config(r: &mut filmcraft_bitstream::BitReader) -> Option<filmcraft_aac::ProgramConfig> {
+    let mut rest = r.clone();
+    let mut lined_up = Vec::with_capacity(rest.bits_left() / 8);
+    while let Ok(b) = rest.read_bits(8) {
+        lined_up.push(b as u8);
+    }
+    let mut pce = filmcraft_bitstream::BitReader::new(&lined_up);
+    let config = filmcraft_aac::ProgramConfig::parse(&mut pce).ok()?;
+    r.skip(pce.position()).ok()?;
+    Some(config)
+}
+
+/// StreamMuxConfig after `useSameStreamMux`, leaving the reader after it.
 fn stream_mux_config(r: &mut filmcraft_bitstream::BitReader) -> Option<LatmConfig> {
     let version = r.read_bits(1).ok()?;
     let version_a = if version == 1 { r.read_bits(1).ok()? } else { 0 };
@@ -547,9 +575,8 @@ fn stream_mux_config(r: &mut filmcraft_bitstream::BitReader) -> Option<LatmConfi
     if sub_frames != 0 || programs != 0 || layers != 0 {
         return None;
     }
-    if version == 1 {
-        latm_value(r)?; // ascLen
-    }
+    let asc_len = if version == 1 { Some(latm_value(r)? as usize) } else { None };
+    let asc_start = r.position();
     // AudioSpecificConfig
     let aot = r.read_bits(5).ok()?;
     let sf = r.read_bits(4).ok()?;
@@ -562,6 +589,23 @@ fn stream_mux_config(r: &mut filmcraft_bitstream::BitReader) -> Option<LatmConfi
     let _extension = r.read_bits(1).ok()?;
     if frame_length_flag != 0 || depends_on_core != 0 {
         return None;
+    }
+    let sample_rate = *AAC_RATES.get(sf as usize)?;
+    let (asc, channels) = if ch == 0 {
+        // the layout is in a program config element: without it, 5.1 played as silent stereo
+        let pce = latm_program_config(r)?;
+        let cfg = filmcraft_aac::AudioSpecificConfig { pce: Some(pce), ..filmcraft_aac::AudioSpecificConfig::lc(sf as u8, 0) };
+        let channels = u32::try_from(cfg.channels()).ok().filter(|&n| n > 0)?;
+        (cfg.to_bytes(), channels)
+    } else {
+        // `ch` is an index into ISO/IEC 14496-3 Table 1.19, not a count: 7 and 12 are eight
+        // channels, 11 is seven, and a reserved configuration has no layout
+        let layout = filmcraft_aac::config_layout(ch as u8)?;
+        (asc_bytes(2, sf as u8, ch as u8), layout.iter().map(|e| e.0.channels() as u32).sum())
+    };
+    // what ascLen counts past the fields read here is fill
+    if let Some(len) = asc_len {
+        r.skip(len.saturating_sub(r.position().saturating_sub(asc_start))).ok()?;
     }
     let frame_length_type = r.read_bits(3).ok()?;
     if frame_length_type != 0 {
@@ -585,7 +629,7 @@ fn stream_mux_config(r: &mut filmcraft_bitstream::BitReader) -> Option<LatmConfi
     if r.read_bits(1).ok()? == 1 {
         r.read_bits(8).ok()?; // crcCheckSum
     }
-    Some(LatmConfig { asc: asc_bytes(2, sf as u8, ch as u8), sample_rate: *AAC_RATES.get(sf as usize)?, channels: if ch == 0 { 2 } else { ch } })
+    Some(LatmConfig { asc, sample_rate, channels })
 }
 
 /// The configuration carried in a LOAS frame (`None` if it reuses an earlier one or is not
@@ -1266,13 +1310,55 @@ mod he_aac_tests {
             y.extend(up.process(vec![chunk.to_vec()]).remove(0));
         }
         assert_eq!(y.len(), 8192);
-        // output 2k + 1 is input k − UPSAMPLE_HALF + ½ (the look-ahead delay), within 0.1 %
-        let d = UPSAMPLE_HALF as f32;
-        for k in 100..4000 {
+        // output 2k + 1 is input k − UPSAMPLE_DELAY + ½ (the SBR filterbanks' delay), within 0.1 %
+        let d = UPSAMPLE_DELAY as f32;
+        for k in 600..4000 {
             let want = (2.0 * std::f32::consts::PI * f * (k as f32 - d + 0.5)).sin();
             assert!((y[2 * k + 1] - want).abs() < 1e-3, "{k}: {} vs {want}", y[2 * k + 1]);
-            assert_eq!(y[2 * k], x[k - UPSAMPLE_HALF]);
+            assert_eq!(y[2 * k], x[k - UPSAMPLE_DELAY]);
         }
+    }
+
+    /// The output lags the input by the SBR filterbanks' delay, whatever the block size: HE-AAC
+    /// played about 20 ms early against other decoders.
+    #[test]
+    fn the_upsampler_delays_by_the_sbr_filterbanks() {
+        let mut impulse = vec![0.0; 2000];
+        impulse[100] = 1.0;
+        let mut up = Upsample2x::new(1);
+        let mut out = Vec::new();
+        for block in impulse.chunks(300) {
+            out.extend(up.process(vec![block.to_vec()]).remove(0));
+        }
+        assert_eq!(out.len(), 4000);
+        assert_eq!(UPSAMPLE_DELAY, 481);
+        assert_eq!(out[(100 + 481) * 2], 1.0);
+        assert!(out[..(100 + 481 - UPSAMPLE_HALF) * 2].iter().all(|&s| s == 0.0));
+        // a change of channel count starts each channel's history afresh
+        let mut fresh = Upsample2x::new(2);
+        let block = vec![vec![0.5; 1024], vec![0.25; 1024]];
+        let mut up = Upsample2x::new(2);
+        up.process(block.clone());
+        up.process(vec![vec![0.5; 1024]]);
+        assert_eq!(up.process(block.clone()), fresh.process(block));
+        // a reset forgets the history
+        up.reset();
+        assert!(up.process(vec![vec![0.0; 600]]).remove(0).iter().all(|&s| s == 0.0));
+    }
+
+    /// A signalled output rate that is not twice the core's is not upsampled to, so the core plays
+    /// at its own rate (it was reported at the signalled rate with the core's samples).
+    #[test]
+    fn an_sbr_rate_other_than_twice_the_core_plays_the_core() {
+        // AOT 5, 24 kHz, mono, extension 44.1 kHz, core AOT 2
+        let mut bw = filmcraft_bitstream::BitWriter::new();
+        for (value, bits) in [(5, 5), (6, 4), (1, 4), (4, 4), (2, 5), (0, 3)] {
+            bw.write_bits(value, bits);
+        }
+        let asc = bw.finish();
+        assert_eq!(aac_output_rate(&asc, []), Some(24_000));
+        // twice the core is upsampled to, as before
+        assert_eq!(aac_output_rate(&[0x2B, 0x92, 0x08, 0x00], []), Some(44_100));
     }
 }
 
@@ -1315,6 +1401,42 @@ mod surround_order_tests {
             }
         }
         assert_eq!(dec.channels, 6);
+        for (ch, samples) in out.iter().enumerate() {
+            let window = &samples[4800..38_400];
+            let own = power(window, hz[ch], rate as f32);
+            for (other, &f) in hz.iter().enumerate().filter(|&(o, _)| o != ch) {
+                let p = power(window, f, rate as f32);
+                assert!(own > 100.0 * p, "channel {ch}: {} Hz {own} vs {f} Hz (channel {other}) {p}", hz[ch]);
+            }
+        }
+    }
+
+    /// A program config element that lists a centre and a front pair (configuration 3's elements, as
+    /// ffmpeg's `-aac_pce` and AudioToolbox write) has configuration 3's speakers: it decodes to L R
+    /// C. Its decoded order C L R was kept, so the centre played on the left.
+    #[test]
+    fn a_program_config_shaped_like_a_configuration_decodes_in_wav_order() {
+        let rate = 48_000u32;
+        // tones per speaker, in WAV order: L, R, C
+        let hz = [300.0f32, 400.0, 500.0];
+        let tone = |f: f32| (0..rate as usize).map(|i| 0.25 * (std::f32::consts::TAU * f * i as f32 / rate as f32).sin()).collect::<Vec<f32>>();
+        let wav: Vec<Vec<f32>> = hz.iter().map(|&f| tone(f)).collect();
+        // configuration 3 in AAC element order: C, L R
+        let coded: Vec<&[f32]> = [2usize, 0, 1].iter().map(|&c| wav[c].as_slice()).collect();
+        let mut enc = filmcraft_aac::Encoder::new(filmcraft_aac::EncoderConfig::cbr(rate, 3, 192_000)).unwrap();
+        let mut units = enc.encode(&coded);
+        units.extend(enc.flush());
+        // the same elements, described by a program config element instead of configuration 3
+        let pce = filmcraft_aac::ProgramConfig { object_type: 1, sf_index: 3, front: vec![(false, 0), (true, 0)], ..Default::default() };
+        let asc = filmcraft_aac::AudioSpecificConfig { pce: Some(pce), ..filmcraft_aac::AudioSpecificConfig::lc(3, 0) };
+        let mut dec = PacketDecoder::aac(&asc.to_bytes(), rate).unwrap();
+        let mut out = vec![Vec::new(); 3];
+        for u in &units {
+            for (o, c) in out.iter_mut().zip(dec.decode(u, 0).unwrap()) {
+                o.extend(c);
+            }
+        }
+        assert_eq!(dec.channels, 3);
         for (ch, samples) in out.iter().enumerate() {
             let window = &samples[4800..38_400];
             let own = power(window, hz[ch], rate as f32);
@@ -1531,5 +1653,117 @@ mod bounded_latm_tests {
         frame.push(0x7F);
         let mut last = Some(LatmConfig { asc: vec![0x11, 0x90], sample_rate: 48_000, channels: 2 });
         assert_eq!(latm_split(&frame, &mut last), None);
+    }
+
+    /// A LOAS frame: `fields` (value, bits) after the 3-byte header, then `payload` with its
+    /// length, padded to a byte; the header's length is set to the body's.
+    fn loas(fields: &[(u32, u32)], payload: &[u8]) -> Vec<u8> {
+        let mut w = filmcraft_bitstream::BitWriter::new();
+        for &(v, n) in fields {
+            w.write_bits(v, n);
+        }
+        let mut len = payload.len();
+        while len >= 255 {
+            w.write_bits(255, 8);
+            len -= 255;
+        }
+        w.write_bits(len as u32, 8);
+        for &b in payload {
+            w.write_bits(u32::from(b), 8);
+        }
+        w.align_zero();
+        let body = w.finish();
+        [&[0x56, 0xE0 | (body.len() >> 8) as u8, body.len() as u8][..], &body].concat()
+    }
+
+    /// `useSameStreamMux` 0 and a version-0 `StreamMuxConfig` for AAC-LC at `sf` with `ch`.
+    fn config_fields(sf: u32, ch: u32) -> Vec<(u32, u32)> {
+        // useSameStreamMux, audioMuxVersion, allStreamsSameTimeFraming, numSubFrames, numProgram,
+        // numLayer; object type, rate index, configuration, its three flags; frameLengthType,
+        // latmBufferFullness, otherDataPresent, crcCheckPresent
+        vec![(0, 1), (0, 1), (1, 1), (0, 6), (0, 4), (0, 3), (2, 5), (sf, 4), (ch, 4), (0, 3), (0, 3), (0xFF, 8), (0, 1), (0, 1)]
+    }
+
+    #[test]
+    fn a_channel_configuration_is_not_a_channel_count() {
+        for (config, channels) in [(1, 1), (2, 2), (3, 3), (4, 4), (5, 5), (6, 6), (7, 8), (11, 7), (12, 8)] {
+            let got = latm_config(&loas(&config_fields(3, config), &[0; 4])).unwrap_or_else(|| panic!("configuration {config} refused"));
+            assert_eq!((got.channels, got.sample_rate), (channels, 48_000), "configuration {config}");
+        }
+    }
+
+    #[test]
+    fn a_reserved_channel_configuration_is_refused() {
+        for config in [8, 9, 10, 13, 14, 15] {
+            assert_eq!(latm_config(&loas(&config_fields(3, config), &[0; 4])), None, "configuration {config}");
+        }
+    }
+
+    /// 5.1 as a program config element (centre, front pair, back pair, LFE) in the
+    /// `StreamMuxConfig`, with `audioMuxVersion` 0 (the configuration inline) and 1 (`ascLen`
+    /// before it, one fill byte after it): six channels, and the element is in the configuration
+    /// the decoder gets. It played as silent stereo.
+    #[test]
+    fn a_program_config_element_in_the_stream_mux_config_gives_the_layout() {
+        use filmcraft_aac::{AudioSpecificConfig, ProgramConfig};
+        let pce = ProgramConfig { sf_index: 3, front: vec![(false, 0), (true, 0)], back: vec![(true, 1)], lfe: vec![0], ..Default::default() };
+        // the AudioSpecificConfig on its own, to know its length and copy its bits
+        let mut w = filmcraft_bitstream::BitWriter::new();
+        w.write_bits(2, 5);
+        w.write_bits(3, 4);
+        w.write_bits(0, 4);
+        w.write_bits(0, 3);
+        pce.write(&mut w);
+        let asc_bits = w.bit_len();
+        let asc = w.finish();
+        let asc_fields: Vec<(u32, u32)> = (0..asc_bits).map(|i| (u32::from(asc[i / 8] >> (7 - i % 8) & 1), 1)).collect();
+        let tail = [(0, 3), (0xFF, 8), (0, 1), (0, 1)];
+        for version in [0, 1] {
+            let mut f = vec![(0, 1), (version, 1)];
+            if version == 1 {
+                f.extend([(0, 1), (0, 2), (0xFF, 8)]); // audioMuxVersionA, taraBufferFullness
+            }
+            f.extend([(1, 1), (0, 6), (0, 4), (0, 3)]);
+            if version == 1 {
+                f.extend([(0, 2), (asc_bits as u32 + 8, 8)]); // ascLen, with a byte of fill
+            }
+            f.extend(asc_fields.iter().copied());
+            if version == 1 {
+                f.push((0xA5, 8));
+            }
+            f.extend(tail);
+            let frame = loas(&f, &[9; 12]);
+            let cfg = latm_config(&frame).unwrap_or_else(|| panic!("version {version} refused"));
+            assert_eq!((cfg.channels, cfg.sample_rate), (6, 48_000), "version {version}");
+            let parsed = AudioSpecificConfig::parse(&cfg.asc).unwrap();
+            assert_eq!((parsed.channel_config, parsed.pce.as_ref().map(|p| p.layout())), (0, Some(pce.layout())), "version {version}");
+            // the payload is found after the configuration
+            assert_eq!(latm_split(&frame, &mut None).map(|(_, p)| p), Some(vec![9; 12]), "version {version}");
+        }
+        // a configuration 0 with an element that does not parse is refused, not played as stereo
+        let mut f = config_fields(3, 0);
+        f.truncate(9);
+        assert_eq!(latm_config(&loas(&f, &[])), None);
+    }
+
+    #[test]
+    fn mutated_latm_frames_never_panic() {
+        let base = loas(&config_fields(3, 2), &[7; 40]);
+        let mut x = 0x2545_F491u32;
+        for _ in 0..20_000 {
+            let mut f = base.clone();
+            for _ in 0..1 + x % 4 {
+                x ^= x << 13;
+                x ^= x >> 17;
+                x ^= x << 5;
+                let at = x as usize % f.len();
+                f[at] = (x >> 8) as u8;
+            }
+            f.truncate(f.len() - (x >> 20) as usize % 8);
+            let _ = latm_config(&f);
+            let _ = latm_split(&f, &mut None);
+            let mut last = latm_config(&base);
+            let _ = latm_split(&f, &mut last);
+        }
     }
 }

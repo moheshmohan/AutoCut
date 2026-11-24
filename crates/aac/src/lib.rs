@@ -43,7 +43,7 @@ mod mdct;
 mod tables;
 mod tns;
 
-pub use config::{AdtsHeader, AudioSpecificConfig, ElementType, ProgramConfig, config_layout, split_adts};
+pub use config::{AdtsHeader, AudioSpecificConfig, ElementType, ProgramConfig, config_layout, speaker_config, split_adts};
 pub use decoder::Decoder;
 pub use encoder::{BitrateMode, Encoder, EncoderConfig, EncoderStats};
 pub use mdct::WindowShape;
