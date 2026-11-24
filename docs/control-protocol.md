@@ -256,7 +256,7 @@ Ctrl), `Ctrl` (macOS ⌃), `Alt`, `Shift`. The dialog (Edit ▸ Keyboard Shortcu
 or `--bridge 127.0.0.1:9877` to drive the running app. Tools: `command_list`, `command_run`,
 `command_batch`, `doc_inspect`, `render_preview`, `project_inspect`, `sequence_inspect`, `media_import`,
 `render_frame`, `ui_inspect`, `ui_elements`, `ui_click`, `ui_drag`, `ui_key`, `ui_type`, `ui_screenshot`,
-`ui_control`, `feedback_bundle` (and the AutoCut, template and recipe tools of
+`ui_control`, `feedback_bundle` (and the AutoCut, template, recipe and review tools of
 [agents.md](agents.md#tools)); resources `filmcraft://document` and `filmcraft://commands`.
 `.mcp.json` registers both.
 

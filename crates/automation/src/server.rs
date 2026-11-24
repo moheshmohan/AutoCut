@@ -1626,6 +1626,122 @@ fn insta360_params(p: &Insta360Params) -> Value {
     Value::Object(m)
 }
 
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+pub struct ReviewCommentParams {
+    /// What to change, in plain words (at most 2000 characters).
+    pub text: String,
+    /// Where on the timeline, seconds. Give at most one of seconds, timecode and frame; none: the playhead.
+    #[serde(default)]
+    pub seconds: Option<f64>,
+    /// Where, as the sequence's time code (00:00:12:12).
+    #[serde(default)]
+    pub timecode: Option<String>,
+    /// Where, as a frame of the sequence.
+    #[serde(default)]
+    pub frame: Option<i64>,
+    /// The sequence (an id from project_inspect); default the active one.
+    #[serde(default)]
+    pub sequence: Option<u64>,
+    /// The clip the comment points at (a clip id from sequence_inspect).
+    #[serde(default)]
+    pub clip: Option<u64>,
+    /// The area it points at: [x, y, w, h] in sequence pixels (w and h 0 for a point).
+    #[serde(default, rename = "box")]
+    pub area: Option<Vec<f64>>,
+    /// "user" when these are the user's own words; default "agent".
+    #[serde(default)]
+    pub author: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+pub struct ReviewInboxParams {
+    /// "open" (default), "done" or "all".
+    #[serde(default)]
+    pub status: Option<String>,
+    /// Only comments created after this time (RFC 3339): pass the last answer's `now`.
+    #[serde(default)]
+    pub since: Option<String>,
+    /// Return as soon as a new open comment arrives, or at the timeout.
+    #[serde(default)]
+    pub wait: Option<bool>,
+    /// How long `wait` waits, seconds (0..600, default 60).
+    #[serde(default)]
+    pub timeout: Option<u64>,
+}
+
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+pub struct ReviewLookParams {
+    /// The comment id, e.g. "c3".
+    pub id: String,
+    /// The picture's size against the sequence's (0.05..1); default a long side of 960 px.
+    #[serde(default)]
+    pub scale: Option<f64>,
+    /// Also return the PNG inline (`pngBase64`), besides its path.
+    #[serde(default)]
+    pub inline: Option<bool>,
+}
+
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+pub struct ReviewDoneParams {
+    /// The comment id, e.g. "c3".
+    pub id: String,
+    /// What was changed (at most 1000 characters).
+    pub note: String,
+}
+
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+pub struct ReviewPacketParams {
+    /// A new or empty folder (absolute); default build/review/packet-<n> beside the project.
+    #[serde(default)]
+    pub out: Option<String>,
+    /// The sequence; default the active one.
+    #[serde(default)]
+    pub sequence: Option<u64>,
+    /// Frames on the sheet, one of each shot (1..120, default 40).
+    #[serde(default)]
+    pub frames: Option<u32>,
+    /// Motion filmstrips (default true).
+    #[serde(default)]
+    pub strips: Option<bool>,
+    /// The QA report to include; default the newest *.qa.json in build/ or beside the project.
+    #[serde(default)]
+    pub qa: Option<String>,
+    /// Run delivery.preflight now and include its report (slow).
+    #[serde(default)]
+    pub preflight: Option<bool>,
+    /// Render the filmstrips in the call; else they are a job (its id in `job`).
+    #[serde(default)]
+    pub wait: Option<bool>,
+}
+
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+pub struct ReviewGateParams {
+    /// The finish reviewer's whole answer: FIX/KEEP lines, then one last line
+    /// `GATE: ship | fix <n> [keep 1] | rebuild - <why> | recapture - <what>`.
+    #[serde(default)]
+    pub text: Option<String>,
+    /// The round this answer is for (1 or 2); a third is refused.
+    #[serde(default)]
+    pub round: Option<u8>,
+    /// The packet folder it reviewed.
+    #[serde(default)]
+    pub packet: Option<String>,
+    /// Check the answer, record nothing.
+    #[serde(default)]
+    pub dry_run: Option<bool>,
+    /// The user's own words: they close the open run early, or end a run that used its two rounds.
+    #[serde(default)]
+    pub user: Option<String>,
+    /// With `user`: what they decided — "ship", "fix", "rebuild" or "recapture".
+    #[serde(default)]
+    pub verdict: Option<String>,
+}
+
+/// A JSON object of the given fields that are set.
+fn some_fields(fields: &[(&str, Option<Value>)]) -> Value {
+    Value::Object(fields.iter().filter_map(|(k, v)| v.clone().map(|v| ((*k).to_string(), v))).collect())
+}
+
 fn ok_json(v: &Value) -> CallToolResult {
     CallToolResult::success(vec![Content::text(serde_json::to_string_pretty(v).unwrap_or_default())])
 }
@@ -2620,6 +2736,109 @@ impl FilmcraftMcp {
     }
 
     #[tool(
+        title = "Review: comment on a frame",
+        description = "Pin a review comment to a frame of the sequence (`review.comment`): where (seconds, timecode or frame; default the playhead), optionally the clip and a box [x, y, w, h] in sequence pixels it points at, and what to change. Kept in the review inbox beside the project (build/review/inbox.jsonl), not in the project: no undo step. Returns the comment with its id (c1, c2…). Mark author \"user\" only for the user's own words.",
+        annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = false, open_world_hint = false)
+    )]
+    async fn review_comment(&self, Parameters(p): Parameters<ReviewCommentParams>) -> Result<CallToolResult, McpError> {
+        let params = some_fields(&[
+            ("text", Some(json!(p.text))),
+            ("seconds", p.seconds.map(|v| json!(v))),
+            ("timecode", p.timecode.map(|v| json!(v))),
+            ("frame", p.frame.map(|v| json!(v))),
+            ("sequence", p.sequence.map(|v| json!(v))),
+            ("clip", p.clip.map(|v| json!(v))),
+            ("box", p.area.map(|v| json!(v))),
+            ("author", p.author.map(|v| json!(v))),
+        ]);
+        wrap(self.run("review.comment", params).await)
+    }
+
+    #[tool(
+        title = "Review: inbox",
+        description = "The review comments (`review.inbox`): open ones by default (status done or all for the rest), each with its time, clip, box, text and author, plus `now` to pass as `since` next time. wait: true returns as soon as a new open comment arrives (the user clicking Comment on Frame in the Program Monitor, or another agent), or at the timeout (at most 600 s); it waits as a job (progress, cancellable), so the app keeps answering. Then review_look a comment, fix it, and review_done it.",
+        annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn review_inbox(
+        &self,
+        Parameters(p): Parameters<ReviewInboxParams>,
+        context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let params = some_fields(&[
+            ("status", p.status.map(|v| json!(v))),
+            ("since", p.since.map(|v| json!(v))),
+            ("wait", p.wait.map(|v| json!(v))),
+            ("timeout", p.timeout.map(|v| json!(v))),
+        ]);
+        // a wait runs as a job, so the session (and the app over the bridge) keeps answering
+        if crate::long_job::is_long("review.inbox", &params) {
+            return Ok(self.run_long("review.inbox", params, &context).await);
+        }
+        wrap(self.run("review.inbox", params).await)
+    }
+
+    #[tool(
+        title = "Review: look at a comment",
+        description = "A comment's frame and its context (`review.look`): a PNG of the frame with the comment's box drawn (path; pngBase64 with inline: true), the clips, titles and captions there, and sequence.checkMotion's findings at that moment. Read the PNG with your image tools before changing anything.",
+        annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn review_look(&self, Parameters(p): Parameters<ReviewLookParams>) -> Result<CallToolResult, McpError> {
+        let params = some_fields(&[("id", Some(json!(p.id))), ("scale", p.scale.map(|v| json!(v))), ("inline", p.inline.map(|v| json!(v)))]);
+        wrap(self.run("review.look", params).await)
+    }
+
+    #[tool(
+        title = "Review: mark a comment done",
+        description = "Mark a review comment done with a note of what was changed (`review.done`); it leaves the open inbox and keeps its text, time and note. Only after the change is made and looked at.",
+        annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn review_done(&self, Parameters(p): Parameters<ReviewDoneParams>) -> Result<CallToolResult, McpError> {
+        wrap(self.run("review.done", json!({"id": p.id, "note": p.note})).await)
+    }
+
+    #[tool(
+        title = "Review: finish packet",
+        description = "Build the finish reviewer's packet (`review.packet`): a frame sheet (one frame of each shot), motion filmstrips, the QA report, the review comments and a brief.md for the reviewer, in a new folder. Give the folder to a fresh reviewer (a new context that did not make the edit) with docs/finish-reviewer.md, then record its answer with review_gate.",
+        annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = false, open_world_hint = false)
+    )]
+    async fn review_packet(
+        &self,
+        Parameters(p): Parameters<ReviewPacketParams>,
+        context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let params = some_fields(&[
+            ("out", p.out.map(|v| json!(v))),
+            ("sequence", p.sequence.map(|v| json!(v))),
+            ("frames", p.frames.map(|v| json!(v))),
+            ("strips", p.strips.map(|v| json!(v))),
+            ("qa", p.qa.map(|v| json!(v))),
+            ("preflight", p.preflight.map(|v| json!(v))),
+            ("wait", p.wait.map(|v| json!(v))),
+        ]);
+        if crate::long_job::is_long("review.packet", &params) {
+            return Ok(self.run_long("review.packet", params, &context).await);
+        }
+        wrap(self.run("review.packet", params).await)
+    }
+
+    #[tool(
+        title = "Review: finish gate",
+        description = "Record the finish reviewer's answer (`review.gate` with text: FIX/KEEP lines, then one GATE line — ship, fix <n> [keep 1], rebuild or recapture; at most eight fixes and two rounds) or the user's own words (user, with verdict), which close the run early. dry_run checks an answer without recording it; with neither text nor user it returns the runs so far.",
+        annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = false, open_world_hint = false)
+    )]
+    async fn review_gate(&self, Parameters(p): Parameters<ReviewGateParams>) -> Result<CallToolResult, McpError> {
+        let params = some_fields(&[
+            ("text", p.text.map(|v| json!(v))),
+            ("round", p.round.map(|v| json!(v))),
+            ("packet", p.packet.map(|v| json!(v))),
+            ("dryRun", p.dry_run.map(|v| json!(v))),
+            ("user", p.user.map(|v| json!(v))),
+            ("verdict", p.verdict.map(|v| json!(v))),
+        ]);
+        wrap(self.run("review.gate", params).await)
+    }
+
+    #[tool(
         title = "Video templates: list",
         description = "The video templates (whole-sequence starters with media slots — 21 built in: photo-beat slideshow, channel intro, top 3 / top 5, talking head with auto-captions, product promo, travel vlog intro and outro, before/after, lower thirds + chapters, end card, tutorial with webcam, podcast, collage, quote card, countdown, event recap, day in my life, unboxing, Q&A, robot showcase — and the user's own from <data dir>/Video Templates): id, name, length, variants (16:9, 9:16, 1:1, 4:5), slots (kind, count, required). Pass `template` for one in full, with every placement's time and the beat grid. Then template_apply (a `captions` slot is transcribed from its sources).",
         annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
@@ -2875,7 +3094,7 @@ impl FilmcraftMcp {
     }
 }
 
-const INSTRUCTIONS: &str = "FilmCraft video editor (Premiere Pro-class). Every edit is an engine command: `command_list` to discover ids/params, `command_run` to execute (undoable; `command_batch` runs several). `doc_inspect` (or `project_inspect`/`sequence_inspect`) returns ids you can pass to commands; `render_preview` shows the result. In bridge mode the `ui_*` tools drive the live app: `ui_elements` lists clickable ids, `ui_click`/`ui_drag`/`ui_key` operate it, `ui_screenshot` shows it. Time is in ticks: 254016000000 per second (commands also accept `seconds`, `frame` or `timecode`). For plain-language requests, `autocut_plan` turns a prompt into a validated command batch (dry run) and `autocut_edit` runs it; local models (Ollama) handle routine edits, and a needsSupervisor result means you plan that one yourself with the command tools. Cloud media: `googlephotos_pick` opens the Google Photos picker — the user chooses items, or pass `query` and a local vision agent (Qwen2.5-VL via Ollama, plus Screen Recording/Accessibility grants) drives the picker itself: it types the query into the picker's search, selects matching videos and presses Done (pass `queries` with `all` for many searches — a list, or one per month of a whole history — in one session and one tab, `left` returning what did not fit), or pass `album` and it picks that whole album (the user's curated seed); `googlephotos_cached`/`googlephotos_add` re-import earlier picks (after the one-time `filmcraft-cli photos auth`). `googlephotos_upload` sends a finished export to the user's Google Photos library (a long job with progress; needs `filmcraft-cli photos auth --upload` once); with `album` it also goes into that album (FilmCraft's album of that title, created when missing; needs `photos auth --albums`), and `photos.createAlbum` / `photos.albums` / `photos.addToAlbum` (command_run) manage the albums FilmCraft made. 360° video: `insta360_list` / `insta360_import` bring the user's Insta360 recordings (from Insta360 Studio's download folder or a camera card) in as 360° media (the camera's .lrv attached as the proxy, the two lenses aligned), and `insta360_download` fetches named recordings from their Insta360 cloud by driving Insta360 Studio with the local vision agent (tell the user first: it moves the mouse); `clip.reframe360` (command_run) looks into a 360° clip through a keyframable virtual camera (yaw, pitch, roll, fov, distance; presets natural, wide, tinyPlanet, rabbitHole, sphere), `clip.stabilize360` steadies it (the camera's turn measured from the pictures; mode smooth, light, strong or lock), `clip.follow360` turns it to follow a subject (target subject, box or face), `clip.vrMove` writes a camera move (planetIn, planetOut, orbit, barrelRoll, whipPan, reveal, pushIn, crashZoom, drift) as editable keyframes, `clip.hyperlapse360` speeds and steadies a long stretch, `media.salience360` says where the action is round the sphere, and `media.vrProperties` / `media.align360` set and refine how a picture maps onto the sphere. `autocut_direct` turns normal and 360° clips into one catchy edit on the beat, the local model directing every shot and camera move (rules without a model; `dry_run` shows the plan and its commands first). `youtube_upload` publishes a video to one of the user's connected YouTube channels (private by default; `youtube.channels` lists them, `youtube.connect` connects another — the user picks it in Google's account chooser — `youtube.setDefault` / `youtube.disconnect` via command_run). `publish_run` publishes to a destination (youtube, youtubeShort, instagramReel) after the shared pre-flight (`publish.preflight` shows the checklist, `publish.fixCopy` writes a copy that passes); `instagram_publish` publishes a video as a Reel on the user's connected Instagram professional account (`instagram.account`, `instagram.limits` via command_run; the user connects it once with `filmcraft-cli instagram auth`). Showcases (\"make a video of every robot since 2020\"): `showcase_analyze` finds every clip of a subject or of what a `prompt` asks for (plan: true also plans; with `album`, the clips are that whole Google Photos album, picked and imported first), `showcase_plan` groups them into entries and writes the voice-over, the user reviews the plan with you, `showcase_build` builds (and exports) it; `showcase_inspect` shows what is kept. Motion tracking (command_run): `track.create` follows an object boxed on a clip (`subject` or flat-surface `points` tracking, both ways, kept in the project), `track.attach` makes a clip, graphic layer, effect point or mask follow it (keyframes, re-written by `track.refine`), and `track.label` / `track.blurObject` / `track.spotlight` track and add a callout, a privacy blur or a spotlight in one step; `clip.cameraTrack` keeps a subject, box or face framed with a gentle push-in. Vertical video: `sequence_auto_reframe` makes a 9:16 (1:1, 4:5) copy of a sequence whose clips follow their subject (a local tracker, Motion keyframes), and `shorts_make` turns a long talk into scored, reframed, captioned shorts (exported, and uploaded to YouTube privately when asked); `trailer_make` cuts a finished showcase into a vertical trailer for Reels (a hook, robots in date order on the beat, an end card; the show's redaction kept). Talking clips: `speech_understand` finds the words, speakers, pauses, fillers and retakes of raw clips (English or Malayalam), and `rough_cut` turns them into a clean talking edit (pauses, fillers and abandoned takes cut between words; exported when asked). Quick templates: `quick_short` turns an album, a folder or the selected clips into a finished vertical Short or Reel — it indexes the scenes, understands the speech, picks a template (the AI-ready Shorts starters, or `template`), fills every slot from the scene index and the speech, writes the text with the local model and exports with a report of every choice; it runs without any model (and says what it fell back on), and downloads models only with `download` after the user agreed. Voice: `isolate_voice` keeps clips' speech and removes noise, crowds and music, `enhance_voice` is the one-knob voice boost for clips that keep their own speech (isolation, EQ, de-esser, compression, a loudness match), `enhance_audio_file` does either straight on a file (`audio.voiceModelStatus` says whether the neural model is installed; `audio.downloadVoiceModel` only after the user agreed). Scenes: `scenes_analyze` indexes clips shot by shot (cuts, sharpness, exposure, camera move, an aesthetic score and a local Qwen3-VL description of each shot; `scenes.status` lists the models, `scenes.downloadModel` only after the user agreed), and `scenes_search` finds shots by what they show or what is said in them (`media.bestShots` and `media.scenes` via command_run). Privacy: `auto_redact` hides visitors' faces and number plates behind a tracked blur, robots and signs left sharp (`redact.status` says whether the detectors are installed; `redact.downloadModels` only after the user agreed). Music (command_run): `music.suggest` {mood: epic|tense|uplifting|calm|happy|dark|dreamy|energetic|sad or a synonym, genre: cinematic|electronic|pop|ambient|lofi|piano, useCase, duration, energy} ranks styles and returns `audio.generate` params; `music.preview` renders exactly what `audio.generate` {kind: music, …, seed, energy (0–1 or a curve), levels/mute per stem (drums, bass, melody, pad), stems, soundfont} would place, for the user to hear first; music plays on the built-in oscillators or a SoundFont (`soundfont`: auto, oscillators, generaluser-gs or an .sf2 path; `music.useSoundfont` keeps the choice) with the same arrangement and beat map either way. `music.soundfonts` shows GeneralUser GS (size, source, licence text, the author's note on sample provenance); download it only after the user read and agreed: `music.downloadSoundfont` {consent: true}. `music.generateNeural` (ACE-Step, once `music.downloadNeuralModel` installed it) makes music from a description. Generation by the user's own local tools (`generate.providers` lists them; none set up: say so, the user describes them in a file, see docs/generation.md): `generate.image` {prompt, references?, fromPlayhead?, transparent?, place?} makes a picture or edits one after references, `generate.video` {prompt, image?: item|path|\"playhead\", seconds} a short clip, `generate.sound` {prompt, kind: sfx|music, seconds} a sound, `generate.fillGap` {track, atSeconds | all} fills an empty stretch of a video track with a clip that carries on from the frame before it (`from`: before, after, both = from the frame before to the frame after, motion = the movement before it carries on), `generate.extend` {atSeconds, seconds} carries a shot on past its end, `generate.restyle` {prompt, clip?, how?, look?, references?} makes a clip again in another look through an adapter of the clip tool (its shapes and movement stay; `look` has the picture tool change the first frame first, which is how a character is swapped), and `generate.augment` {instruction, atSeconds, animate?} changes what the frame shows (add a character, change the weather) and lays the result over the clip; `variations` (up to 4) makes several to choose from and `generate.pick` {item} swaps one in; `generate.assets` {manifest} makes the files a scene's assets.json names and leaves the ones that are there (pictures, cut-outs, clips and sounds for a RAEA composition, a later one made from an earlier one by name); one generation at a time, each a job (`wait: true`), credit and licence of the tool in `generate.providers`. Motion graphics written as code (command_run; RAEA, installed separately, see docs/raea-workflow.md): `motion.check` {source, composition?} gives RAEA's findings, `motion.stills` {source, composition?, at: [frames], output} stills with their text boxes, and `motion.render` {source, composition?, output: a new revision folder, canvas?, size?, preview?, alpha?, fps?, spec? | expected?, holds?, place?} renders under the GPU lock, checks, probes and preflights the result, writes autocut-import.json and imports it (a long job, `wait: true`; a render that fails its checks is kept on disk and not imported); `composition.import` {source, composition?, output, place?} brings a composition in as the edit it is (a long job): its footage and sounds as real clips at their times, trims, speeds, gains, opacity and boxes, each layer RAEA drew (graphics, captions, what lies under the footage) as one clip on a track of its own, into a new sequence of its size and rate or, with `place`, on new tracks of the open one. EffectCraft templates (command_run; linked in the packaged app, other builds say they lack it): `effectcraft.templateInfo` {template} lists an .ectemplate's comp and controls (name, type, default, range), and `effectcraft.renderTemplate` {template, values?: {control: value}, size?, fps?, range?, out?, format?: prores4444|png, place?} fills it and renders it with alpha under the GPU lock (EffectCraft's GPU compositor, the CPU as the fallback), probes, imports and places it above the picture (a long job, `wait: true`). Taste memory (command_run): `autocut.fingerprint` reads a sequence's six axes (opening, title entrance, transition family, colour look, caption style, close) and warns when four or more match one of the last three videos; `autocut.deal` {for: look|titleStyle|transitionFamily|music|register|endCard, options?} picks against that history inside the taste profile; `autocut.feedback` {about, id, verdict: dislike|like, note?} retires (or favours) a choice for good — record what the user dislikes about a finished video with it. Direct, Quick Short and showcase builds deal what the user and the taste leave open and record each video's fingerprint (their report's `deals` and `fingerprint`; `guidance: false` keeps their own defaults).";
+const INSTRUCTIONS: &str = "FilmCraft video editor (Premiere Pro-class). Every edit is an engine command: `command_list` to discover ids/params, `command_run` to execute (undoable; `command_batch` runs several). `doc_inspect` (or `project_inspect`/`sequence_inspect`) returns ids you can pass to commands; `render_preview` shows the result. In bridge mode the `ui_*` tools drive the live app: `ui_elements` lists clickable ids, `ui_click`/`ui_drag`/`ui_key` operate it, `ui_screenshot` shows it. Time is in ticks: 254016000000 per second (commands also accept `seconds`, `frame` or `timecode`). For plain-language requests, `autocut_plan` turns a prompt into a validated command batch (dry run) and `autocut_edit` runs it; local models (Ollama) handle routine edits, and a needsSupervisor result means you plan that one yourself with the command tools. Cloud media: `googlephotos_pick` opens the Google Photos picker — the user chooses items, or pass `query` and a local vision agent (Qwen2.5-VL via Ollama, plus Screen Recording/Accessibility grants) drives the picker itself: it types the query into the picker's search, selects matching videos and presses Done (pass `queries` with `all` for many searches — a list, or one per month of a whole history — in one session and one tab, `left` returning what did not fit), or pass `album` and it picks that whole album (the user's curated seed); `googlephotos_cached`/`googlephotos_add` re-import earlier picks (after the one-time `filmcraft-cli photos auth`). `googlephotos_upload` sends a finished export to the user's Google Photos library (a long job with progress; needs `filmcraft-cli photos auth --upload` once); with `album` it also goes into that album (FilmCraft's album of that title, created when missing; needs `photos auth --albums`), and `photos.createAlbum` / `photos.albums` / `photos.addToAlbum` (command_run) manage the albums FilmCraft made. 360° video: `insta360_list` / `insta360_import` bring the user's Insta360 recordings (from Insta360 Studio's download folder or a camera card) in as 360° media (the camera's .lrv attached as the proxy, the two lenses aligned), and `insta360_download` fetches named recordings from their Insta360 cloud by driving Insta360 Studio with the local vision agent (tell the user first: it moves the mouse); `clip.reframe360` (command_run) looks into a 360° clip through a keyframable virtual camera (yaw, pitch, roll, fov, distance; presets natural, wide, tinyPlanet, rabbitHole, sphere), `clip.stabilize360` steadies it (the camera's turn measured from the pictures; mode smooth, light, strong or lock), `clip.follow360` turns it to follow a subject (target subject, box or face), `clip.vrMove` writes a camera move (planetIn, planetOut, orbit, barrelRoll, whipPan, reveal, pushIn, crashZoom, drift) as editable keyframes, `clip.hyperlapse360` speeds and steadies a long stretch, `media.salience360` says where the action is round the sphere, and `media.vrProperties` / `media.align360` set and refine how a picture maps onto the sphere. `autocut_direct` turns normal and 360° clips into one catchy edit on the beat, the local model directing every shot and camera move (rules without a model; `dry_run` shows the plan and its commands first). `youtube_upload` publishes a video to one of the user's connected YouTube channels (private by default; `youtube.channels` lists them, `youtube.connect` connects another — the user picks it in Google's account chooser — `youtube.setDefault` / `youtube.disconnect` via command_run). `publish_run` publishes to a destination (youtube, youtubeShort, instagramReel) after the shared pre-flight (`publish.preflight` shows the checklist, `publish.fixCopy` writes a copy that passes); `instagram_publish` publishes a video as a Reel on the user's connected Instagram professional account (`instagram.account`, `instagram.limits` via command_run; the user connects it once with `filmcraft-cli instagram auth`). Showcases (\"make a video of every robot since 2020\"): `showcase_analyze` finds every clip of a subject or of what a `prompt` asks for (plan: true also plans; with `album`, the clips are that whole Google Photos album, picked and imported first), `showcase_plan` groups them into entries and writes the voice-over, the user reviews the plan with you, `showcase_build` builds (and exports) it; `showcase_inspect` shows what is kept. Motion tracking (command_run): `track.create` follows an object boxed on a clip (`subject` or flat-surface `points` tracking, both ways, kept in the project), `track.attach` makes a clip, graphic layer, effect point or mask follow it (keyframes, re-written by `track.refine`), and `track.label` / `track.blurObject` / `track.spotlight` track and add a callout, a privacy blur or a spotlight in one step; `clip.cameraTrack` keeps a subject, box or face framed with a gentle push-in. Vertical video: `sequence_auto_reframe` makes a 9:16 (1:1, 4:5) copy of a sequence whose clips follow their subject (a local tracker, Motion keyframes), and `shorts_make` turns a long talk into scored, reframed, captioned shorts (exported, and uploaded to YouTube privately when asked); `trailer_make` cuts a finished showcase into a vertical trailer for Reels (a hook, robots in date order on the beat, an end card; the show's redaction kept). Talking clips: `speech_understand` finds the words, speakers, pauses, fillers and retakes of raw clips (English or Malayalam), and `rough_cut` turns them into a clean talking edit (pauses, fillers and abandoned takes cut between words; exported when asked). Quick templates: `quick_short` turns an album, a folder or the selected clips into a finished vertical Short or Reel — it indexes the scenes, understands the speech, picks a template (the AI-ready Shorts starters, or `template`), fills every slot from the scene index and the speech, writes the text with the local model and exports with a report of every choice; it runs without any model (and says what it fell back on), and downloads models only with `download` after the user agreed. Voice: `isolate_voice` keeps clips' speech and removes noise, crowds and music, `enhance_voice` is the one-knob voice boost for clips that keep their own speech (isolation, EQ, de-esser, compression, a loudness match), `enhance_audio_file` does either straight on a file (`audio.voiceModelStatus` says whether the neural model is installed; `audio.downloadVoiceModel` only after the user agreed). Scenes: `scenes_analyze` indexes clips shot by shot (cuts, sharpness, exposure, camera move, an aesthetic score and a local Qwen3-VL description of each shot; `scenes.status` lists the models, `scenes.downloadModel` only after the user agreed), and `scenes_search` finds shots by what they show or what is said in them (`media.bestShots` and `media.scenes` via command_run). Privacy: `auto_redact` hides visitors' faces and number plates behind a tracked blur, robots and signs left sharp (`redact.status` says whether the detectors are installed; `redact.downloadModels` only after the user agreed). Music (command_run): `music.suggest` {mood: epic|tense|uplifting|calm|happy|dark|dreamy|energetic|sad or a synonym, genre: cinematic|electronic|pop|ambient|lofi|piano, useCase, duration, energy} ranks styles and returns `audio.generate` params; `music.preview` renders exactly what `audio.generate` {kind: music, …, seed, energy (0–1 or a curve), levels/mute per stem (drums, bass, melody, pad), stems, soundfont} would place, for the user to hear first; music plays on the built-in oscillators or a SoundFont (`soundfont`: auto, oscillators, generaluser-gs or an .sf2 path; `music.useSoundfont` keeps the choice) with the same arrangement and beat map either way. `music.soundfonts` shows GeneralUser GS (size, source, licence text, the author's note on sample provenance); download it only after the user read and agreed: `music.downloadSoundfont` {consent: true}. `music.generateNeural` (ACE-Step, once `music.downloadNeuralModel` installed it) makes music from a description. Generation by the user's own local tools (`generate.providers` lists them; none set up: say so, the user describes them in a file, see docs/generation.md): `generate.image` {prompt, references?, fromPlayhead?, transparent?, place?} makes a picture or edits one after references, `generate.video` {prompt, image?: item|path|\"playhead\", seconds} a short clip, `generate.sound` {prompt, kind: sfx|music, seconds} a sound, `generate.fillGap` {track, atSeconds | all} fills an empty stretch of a video track with a clip that carries on from the frame before it (`from`: before, after, both = from the frame before to the frame after, motion = the movement before it carries on), `generate.extend` {atSeconds, seconds} carries a shot on past its end, `generate.restyle` {prompt, clip?, how?, look?, references?} makes a clip again in another look through an adapter of the clip tool (its shapes and movement stay; `look` has the picture tool change the first frame first, which is how a character is swapped), and `generate.augment` {instruction, atSeconds, animate?} changes what the frame shows (add a character, change the weather) and lays the result over the clip; `variations` (up to 4) makes several to choose from and `generate.pick` {item} swaps one in; `generate.assets` {manifest} makes the files a scene's assets.json names and leaves the ones that are there (pictures, cut-outs, clips and sounds for a RAEA composition, a later one made from an earlier one by name); one generation at a time, each a job (`wait: true`), credit and licence of the tool in `generate.providers`. Motion graphics written as code (command_run; RAEA, installed separately, see docs/raea-workflow.md): `motion.check` {source, composition?} gives RAEA's findings, `motion.stills` {source, composition?, at: [frames], output} stills with their text boxes, and `motion.render` {source, composition?, output: a new revision folder, canvas?, size?, preview?, alpha?, fps?, spec? | expected?, holds?, place?} renders under the GPU lock, checks, probes and preflights the result, writes autocut-import.json and imports it (a long job, `wait: true`; a render that fails its checks is kept on disk and not imported); `composition.import` {source, composition?, output, place?} brings a composition in as the edit it is (a long job): its footage and sounds as real clips at their times, trims, speeds, gains, opacity and boxes, each layer RAEA drew (graphics, captions, what lies under the footage) as one clip on a track of its own, into a new sequence of its size and rate or, with `place`, on new tracks of the open one. EffectCraft templates (command_run; linked in the packaged app, other builds say they lack it): `effectcraft.templateInfo` {template} lists an .ectemplate's comp and controls (name, type, default, range), and `effectcraft.renderTemplate` {template, values?: {control: value}, size?, fps?, range?, out?, format?: prores4444|png, place?} fills it and renders it with alpha under the GPU lock (EffectCraft's GPU compositor, the CPU as the fallback), probes, imports and places it above the picture (a long job, `wait: true`). Taste memory (command_run): `autocut.fingerprint` reads a sequence's six axes (opening, title entrance, transition family, colour look, caption style, close) and warns when four or more match one of the last three videos; `autocut.deal` {for: look|titleStyle|transitionFamily|music|register|endCard, options?} picks against that history inside the taste profile; `autocut.feedback` {about, id, verdict: dislike|like, note?} retires (or favours) a choice for good — record what the user dislikes about a finished video with it. Direct, Quick Short and showcase builds deal what the user and the taste leave open and record each video's fingerprint (their report's `deals` and `fingerprint`; `guidance: false` keeps their own defaults). Review: `review_comment` pins a comment to a frame (and a clip or box), `review_inbox` lists the open ones (`wait: true` returns when the user adds one with Comment on Frame), `review_look` shows a comment's frame with its box and context, `review_done` marks it done with a note of what changed; before shipping, `review_packet` builds the finish reviewer's packet for a fresh reviewer and `review_gate` records its GATE answer (ship, fix, rebuild or recapture; two rounds at most) or the user's own words.";
 
 /// Resources: the project (as `doc_inspect`) and the command catalog (as `command_list`).
 const DOCUMENT_URI: &str = "filmcraft://document";
@@ -3661,11 +3880,52 @@ mod tests {
             "recipe_list",
             "recipe_run",
             "feedback_bundle",
+            "review_comment",
+            "review_inbox",
+            "review_look",
+            "review_done",
+            "review_packet",
+            "review_gate",
         ] {
             assert!(names.contains(&want), "{want} not listed");
         }
         let ro = |n: &str| tools.iter().find(|t| t["name"] == n).map(|t| t["annotations"]["readOnlyHint"].clone());
         assert_eq!((ro("command_list"), ro("command_run")), (Some(json!(true)), Some(json!(false))));
+    }
+
+    /// PX8.4: the review tools reach the review commands: a comment pinned to a frame comes back
+    /// from the inbox, is looked at, marked done and leaves the open inbox; the gate checks an
+    /// answer without recording it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn review_tools_round_trip_a_comment() {
+        let dir = std::env::temp_dir().join(format!("fc-mcp-review-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut s = demo();
+        s.path = Some(dir.join("edit.fcproj").display().to_string());
+        let mut c = Client::start(s);
+        c.init().await;
+        let body = |r: &Value| -> Value {
+            assert_eq!(r["result"]["isError"], false, "{r}");
+            serde_json::from_str(r["result"]["content"][0]["text"].as_str().unwrap()).unwrap()
+        };
+        let v = body(&c.call(1, "review_comment", json!({"seconds": 0.5, "text": "Hold this shot longer", "box": [10, 20, 100, 50], "author": "user"})).await);
+        let id = v["comment"]["id"].as_str().or_else(|| v["id"].as_str()).unwrap().to_string();
+        let v = body(&c.call(2, "review_inbox", json!({})).await);
+        let open: Vec<&str> = v["comments"].as_array().unwrap().iter().filter_map(|c| c["id"].as_str()).collect();
+        assert_eq!(open, [id.as_str()], "{v}");
+        let v = body(&c.call(3, "review_look", json!({"id": id, "scale": 0.25})).await);
+        assert!(v["frame"].is_object(), "{v}");
+        body(&c.call(4, "review_done", json!({"id": id, "note": "held it two seconds longer"})).await);
+        let v = body(&c.call(5, "review_inbox", json!({"status": "done"})).await);
+        assert_eq!(v["comments"][0]["note"], "held it two seconds longer", "{v}");
+        assert_eq!(body(&c.call(6, "review_inbox", json!({})).await)["comments"], json!([]));
+        // the gate checks an answer and records nothing on a dry run
+        let r = c.call(7, "review_gate", json!({"text": "FIX 1: the title sits low\nGATE: fix 1", "round": 1, "dry_run": true})).await;
+        assert_eq!(r["result"]["isError"], false, "{r}");
+        // strict arguments: a misspelt one is refused, not ignored
+        let r = c.call(8, "review_done", json!({"id": id, "notes": "x"})).await;
+        assert_eq!(r["error"]["code"], -32602, "{r}");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// Strict arguments, malformed JSON, batch, doc_inspect and render_preview over the raw line

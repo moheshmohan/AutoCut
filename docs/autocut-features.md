@@ -332,7 +332,7 @@ pipeline: `quick_short`, `shorts_make`, `trailer_make`, `rough_cut`, `autocut_pl
 report`, `scenes_analyze/search`, `template_list/apply`, `showcase_*`, `sequence_auto_reframe`,
 `auto_redact`, `speech_understand`, `isolate_voice`, `enhance_voice/audio_file`,
 `googlephotos_*`, `insta360_*`, `youtube_upload`, `instagram_publish`, `publish_run`,
-`recipe_list/run`, `feedback_bundle`, `ui_*`, plus `command_run/batch/list`. Recipes
+`recipe_list/run`, `feedback_bundle`, `review_*`, `ui_*`, plus `command_run/batch/list`. Recipes
 (`builtin:template-publish-youtube`, `builtin:delivery-quality-gate`) chain multi-step flows.
 The agent guide is `docs/autocut-agent-guide.md`.
 
@@ -684,3 +684,33 @@ sessions; FrameAtlas/screen-protection/render-cache/delivery-gate upgrades; the 
   `target/eval/<when>/report.json` and `summary.md` compare the two runs and the previous
   report. Minutes, not part of `cargo xtask ci`: run it when a pipeline's choices change
   (docs/testing.md).
+
+## Update 2026-11-24 (PX8, review pointed at frames)
+
+- **PX8.1**: review comments pinned to frames, kept in `build/review/inbox.jsonl` beside the saved
+  project (one JSON object a line, at most 2000 comments and 4 MB; not in the project, so no undo
+  step). `review.comment {time|seconds|frame|timecode?, sequence?, clip?, box?, text, author?}`
+  adds one (ids c1, c2…, never reused); `review.inbox {status?, since?, wait?, timeout?, job?}`
+  lists them and, with `wait`, returns when a new open comment arrives (as a job over MCP, the
+  bridge and the control channel, so the app keeps answering); `review.look {id, scale?, out?,
+  inline?}` draws the comment's box on its frame (`build/review/look-<id>.png`) with what is on
+  screen there; `review.done {id, note}` and `review.delete {id}`.
+- **PX8.2**: **Comment on Frame** on the Program monitor's transport: click a spot or drag a box
+  on the picture, type, Enter. Open comments are drawn on their frames and marked on the scrub
+  bar; Previous and Next step through them. Every control has an automation id
+  (`program.review.*`).
+- **PX8.3**: the finish reviewer's contract (`docs/finish-reviewer.md`): a fresh reviewer gets
+  `review.packet {out?, sequence?, frames?, strips?, qa?, preflight?, wait?}` (a brief, a frame
+  sheet, motion filmstrips, QA or preflight, the motion check, decisions, comments, the rounds so
+  far) and answers on one last line, `GATE: ship | fix <n> [keep 1] | rebuild - <why> |
+  recapture - <what>`; `review.gate {text, round?, packet?, dryRun?}` checks and records it (two
+  rounds at most), and `review.gate {user, verdict?}` records the user's own words, which close a
+  run early.
+- **PX8.4**: the same over MCP and the shell. MCP tools `review_comment`, `review_inbox`,
+  `review_look`, `review_done`, `review_packet` and `review_gate` (a wait and a packet's
+  filmstrips run as long jobs with progress); `filmcraft-cli review (--project p.fcproj |
+  --bridge addr) <comment|inbox|look|done|delete|packet|gate> [key=value … | JSON]`, with the
+  comment id first for `look`, `done` and `delete` and `gate --file answer.txt` for a reviewer's
+  answer.
+- **PX8.5**: the agent guide's "Review comments and the finish reviewer" (§9), and the credits
+  for the rules adapted from impeccable, hallmark, taste-skill and huashu-motion (ATTRIBUTION.md).

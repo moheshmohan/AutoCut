@@ -896,6 +896,10 @@ filmcraft-cli --project "P.fcproj" export "Name (2160x3840).mp4" --preset "High 
   `GATE: recapture - <what>`. Check it with `review.gate {text}`; after two rounds without a
   ship, only the user's own words (`review.gate {user: "…"}`) close the run. It never blocks
   delivery yet.
+- **Over MCP and the shell.** The MCP tools `review_comment`, `review_inbox` (`wait: true` runs
+  as a job with progress), `review_look`, `review_done`, `review_packet` and `review_gate` take
+  the same parameters. From a terminal: `filmcraft-cli review --bridge 127.0.0.1:9877 inbox`,
+  `… look c3`, `… done c3 note="raised the title"`, `… gate --file answer.txt round=1`.
 
 ## 10. Narration and Malayalam
 

@@ -43,6 +43,7 @@ mod probe;
 mod project_lock;
 mod publish;
 mod quick;
+mod review;
 mod scenes;
 mod showcase_tools;
 mod trailer;
@@ -612,6 +613,17 @@ SUBCOMMANDS
                                 target/eval/<when>/report.json and summary.md, compared with the
                                 previous run. Minutes, not part of `cargo xtask ci`: run it when a
                                 pipeline's choices change
+  review (--project p.fcproj | --bridge addr) <comment|inbox|look|done|delete|packet|gate>
+         [key=value ... | JSON] [--file answer.txt]
+                                the review inbox and the finish reviewer (PX8): comment
+                                text=\"…\" [seconds=S|timecode=TC|frame=N] [clip=ID] [box=[x,y,w,h]]
+                                pins a comment to a frame; inbox [status=open|done|all]
+                                [wait=true timeout=60] lists them (or waits for a new one); look
+                                <id> writes the frame with its box as a PNG plus its context;
+                                done <id> note=\"…\"; delete <id>; packet builds the finish
+                                reviewer's packet (frame sheet, motion filmstrips, QA, a brief);
+                                gate --file answer.txt [round=1] records the reviewer's answer,
+                                gate user=\"…\" verdict=ship the user's own words
   trailer (--project p.fcproj | --bridge addr) [--sequence id] [--plan plan.json]
           [--report build.json] [--seconds 34] [--aspect 9:16|1:1|4:5]
           [--platform reels|youtube|tiktok|vertical] [--robots N] [--hook LABEL [--hook-at S]]
@@ -2919,6 +2931,7 @@ async fn cli() {
         "quick" => quick::run(&a).await,
         "direct" => direct::run(&a).await,
         "eval" => eval::run(&a).await,
+        "review" => review::run(&a).await,
         "shorts" => {
             // long video → vertical shorts (autocut.shorts); every usage error before anything runs
             let src = a.pos(1).unwrap_or_else(|| usage("shorts <project.fcproj | media file> [--count N] [--aspect 9:16] [--export dir] [--upload-youtube]"));
