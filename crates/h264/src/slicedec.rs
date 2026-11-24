@@ -44,6 +44,11 @@ pub struct PicState {
     pub skip_deblock: bool,
 }
 
+/// Whether `decoded + add` macroblocks fit in a picture of `total`.
+fn mbs_fit(decoded: usize, add: usize, total: usize) -> bool {
+    decoded.checked_add(add).is_some_and(|n| n <= total)
+}
+
 impl PicState {
     pub fn new(frame: FrameRef) -> Self {
         let (mb_w, mb_h) = (frame.mb_w, frame.mb_h());
@@ -82,12 +87,21 @@ impl PicState {
         self.skip_deblock = false;
     }
 
+    /// Fail when decoding `n` more macroblocks would exceed the picture's own count: a conforming
+    /// picture reconstructs each macroblock once, so overlapping slices (compact skip runs that
+    /// repeat a whole picture of prediction work) are refused before the work is done.
+    #[inline]
+    pub fn reserve_mbs(&self, n: usize) -> Result<()> {
+        ensure!(mbs_fit(self.decoded_mbs, n, self.mb_w * self.mb_h), "slice data overlaps macroblocks already decoded in this picture");
+        Ok(())
+    }
+
     /// Record a decoded macroblock and deblock / publish rows that became final.
     #[inline]
     pub fn mb_done(&mut self, addr: usize) {
         self.decoded_mbs += 1;
         let r = addr / self.mb_w;
-        self.row_count[r] += 1;
+        self.row_count[r] = self.row_count[r].saturating_add(1);
         if self.row_count[r] as usize >= self.mb_w && r == self.rows_recon {
             while self.rows_recon < self.mb_h && self.row_count[self.rows_recon] as usize >= self.mb_w {
                 self.rows_recon += 1;
@@ -256,8 +270,9 @@ impl<'a> SliceDecoder<'a> {
         if sh.slice_type == SliceType::B && !sh.direct_spatial_mv_pred && !refs[1].is_empty() {
             let poc1 = refs[1][0].poc();
             for r0 in refs[0].iter() {
-                let tb = (pic.poc - r0.poc()).clamp(-128, 127);
-                let td = (poc1 - r0.poc()).clamp(-128, 127);
+                // POCs saturate at the i32 limits on hostile streams, so their differences do too.
+                let tb = pic.poc.saturating_sub(r0.poc()).clamp(-128, 127);
+                let td = poc1.saturating_sub(r0.poc()).clamp(-128, 127);
                 if td == 0 || r0.long_term {
                     tdirect.push((256, true));
                 } else {
@@ -317,8 +332,8 @@ impl<'a> SliceDecoder<'a> {
             w.mode = WpMode::Implicit;
             for r0 in refs[0].iter() {
                 for r1 in refs[1].iter() {
-                    let tb = (cur_poc - r0.poc()).clamp(-128, 127);
-                    let td = (r1.poc() - r0.poc()).clamp(-128, 127);
+                    let tb = cur_poc.saturating_sub(r0.poc()).clamp(-128, 127);
+                    let td = r1.poc().saturating_sub(r0.poc()).clamp(-128, 127);
                     let pair = if td == 0 || r0.long_term || r1.long_term {
                         (32, 32)
                     } else {
@@ -557,6 +572,17 @@ impl<'a> SliceDecoder<'a> {
         (refs, mvs, false)
     }
 
+    /// Temporal direct mvL0 = (DistScaleFactor * mvCol + 128) >> 8 and mvL1 = mvL0 − mvCol (8-191,
+    /// 8-192), clipped to the i16 vector range (the spec range, −2^15..2^15−1) a stream can exceed.
+    /// The i32 maths cannot overflow; a truncating `as i16` used to wrap mvL0 past the range,
+    /// after which the mvL1 subtraction overflowed a debug build. mvL1 is scaled from the
+    /// unclamped mvL0 with only the results clipped: dsf 512, mvCol 32767 keeps mvL1 at 32767.
+    fn temporal_direct_mvs(dsf: i32, mv_col: [i16; 2]) -> ([i16; 2], [i16; 2]) {
+        let clamp = |v: i32| v.clamp(-(1 << 15), (1 << 15) - 1) as i16;
+        let m0 = mv_col.map(|c| (dsf * i32::from(c) + 128) >> 8);
+        (m0.map(clamp), [clamp(m0[0] - i32::from(mv_col[0])), clamp(m0[1] - i32::from(mv_col[1]))])
+    }
+
     /// Derive direct-mode motion for the 8x8 blocks in `b8_mask` of the current MB.
     fn derive_direct(&mut self, b8_mask: u8) -> Result<()> {
         let spatial = self.sh.direct_spatial_mv_pred;
@@ -591,13 +617,7 @@ impl<'a> SliceDecoder<'a> {
                         }
                     };
                     let (dsf, ltr) = self.tdirect.get(ref0 as usize).copied().unwrap_or((256, true));
-                    let (mv0, mv1) = if ltr {
-                        (mv_col, [0, 0])
-                    } else {
-                        let s = |c: i16| ((dsf * c as i32 + 128) >> 8) as i16;
-                        let m0 = [s(mv_col[0]), s(mv_col[1])];
-                        (m0, [m0[0] - mv_col[0], m0[1] - mv_col[1]])
-                    };
+                    let (mv0, mv1) = if ltr { (mv_col, [0, 0]) } else { Self::temporal_direct_mvs(dsf, mv_col) };
                     ([ref0, 0], [mv0, mv1])
                 };
                 self.set_motion(x, y, unit, unit, refs, mvs);
@@ -1426,6 +1446,7 @@ impl<'a> SliceDecoder<'a> {
             if !intra_slice {
                 let run = r.read_ue()? as usize;
                 ensure!(addr + run <= total, "mb_skip_run out of range");
+                self.pic.reserve_mbs(run)?;
                 for _ in 0..run {
                     self.start_mb(addr);
                     self.decode_skip()?;
@@ -1437,6 +1458,7 @@ impl<'a> SliceDecoder<'a> {
                 }
                 ensure!(addr < total, "macroblock address {addr} out of range");
             }
+            self.pic.reserve_mbs(1)?;
             self.start_mb(addr);
             self.decode_mb_cavlc(r)?;
             self.pic.mb_done(addr);
@@ -1446,5 +1468,47 @@ impl<'a> SliceDecoder<'a> {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod overlap_tests {
+    use super::mbs_fit;
+
+    #[test]
+    fn a_picture_takes_each_macroblock_once() {
+        assert!(mbs_fit(0, 99, 99));
+        assert!(!mbs_fit(1, 99, 99));
+        assert!(!mbs_fit(usize::MAX, 1, 99));
+    }
+}
+
+#[cfg(test)]
+mod temporal_direct_tests {
+    use super::SliceDecoder;
+
+    /// Temporal direct mvs stay inside the spec's motion-vector range -2^15..2^15-1 with a
+    /// large `DistScaleFactor` and a co-located mv at an i16 extreme: the scale used to
+    /// truncate past the range with `as i16`, and mvL0 - mvCol then overflowed a debug build
+    /// ("attempt to subtract with overflow"). `dsf` 256 is the identity scale.
+    #[test]
+    fn temporal_direct_mvs_at_i16_extremes_stay_in_the_spec_range() {
+        for dsf in [-1024i32, -1, 256, 1023] {
+            for col in [[i16::MIN, i16::MIN], [i16::MAX, i16::MAX], [i16::MIN, i16::MAX]] {
+                let (mv0, mv1) = SliceDecoder::temporal_direct_mvs(dsf, col);
+                for mv in [mv0, mv1] {
+                    for c in mv {
+                        assert!((-(1 << 15)..(1 << 15)).contains(&i32::from(c)), "dsf {dsf}, col {col:?}: {mv:?}");
+                    }
+                }
+                if dsf == 256 {
+                    assert_eq!((mv0, mv1), (col, [0, 0]), "dsf 256 is the identity scale");
+                }
+            }
+        }
+        // mvL1 is scaled from the unclamped mvL0 with only the results clipped; deriving it from
+        // the clipped mvL0 gave [0, 0] here.
+        let (mv0, mv1) = SliceDecoder::temporal_direct_mvs(512, [i16::MAX, 0]);
+        assert_eq!((mv0, mv1), ([i16::MAX, 0], [i16::MAX, 0]), "mvL1 keeps mvL0's off-range part");
     }
 }

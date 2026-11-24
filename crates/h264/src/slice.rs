@@ -144,7 +144,7 @@ pub struct SliceHeader {
 
 impl SliceHeader {
     pub fn qp(&self, pps: &Pps) -> i32 {
-        pps.pic_init_qp + self.slice_qp_delta
+        pps.pic_init_qp.saturating_add(self.slice_qp_delta)
     }
     pub fn has_mmco5(&self) -> bool {
         self.mmcos.iter().any(|m| m.op == 5)
@@ -195,9 +195,9 @@ impl SliceHeader {
         let mut num_ref_idx_active = [pps.num_ref_idx_l0_default_active, pps.num_ref_idx_l1_default_active];
         if !slice_type.is_intra() {
             if r.read_flag()? {
-                num_ref_idx_active[0] = r.read_ue()? + 1;
+                num_ref_idx_active[0] = r.read_ue_plus(1)?;
                 if slice_type.is_b() {
-                    num_ref_idx_active[1] = r.read_ue()? + 1;
+                    num_ref_idx_active[1] = r.read_ue_plus(1)?;
                 }
             }
             let max = if field_pic { 32 } else { 16 };
@@ -303,7 +303,7 @@ impl SliceHeader {
             ensure!(cabac_init_idc <= 2, "cabac_init_idc out of range");
         }
         let slice_qp_delta = r.read_se()?;
-        let qp = pps.pic_init_qp + slice_qp_delta;
+        let Some(qp) = pps.pic_init_qp.checked_add(slice_qp_delta) else { return crate::error::invalid("slice QP out of range") };
         ensure!((0..=51).contains(&qp), "slice QP {qp} out of range");
         let mut sp_for_switch = false;
         let mut slice_qs_delta = 0;
@@ -431,39 +431,44 @@ impl PocState {
                 let (prev_msb, prev_lsb) = if sh.idr { (0, 0) } else { (self.prev_ref_msb, self.prev_ref_lsb) };
                 let max_lsb = 1i32 << sps.log2_max_poc_lsb;
                 let lsb = sh.pic_order_cnt_lsb as i32;
-                let msb = if lsb < prev_lsb && prev_lsb - lsb >= max_lsb / 2 {
-                    prev_msb + max_lsb
-                } else if lsb > prev_lsb && lsb - prev_lsb > max_lsb / 2 {
-                    prev_msb - max_lsb
+                let msb = if lsb < prev_lsb && prev_lsb.saturating_sub(lsb) >= max_lsb / 2 {
+                    prev_msb.saturating_add(max_lsb)
+                } else if lsb > prev_lsb && lsb.saturating_sub(prev_lsb) > max_lsb / 2 {
+                    prev_msb.saturating_sub(max_lsb)
                 } else {
                     prev_msb
                 };
-                let top = msb + lsb;
-                let bottom = top + sh.delta_pic_order_cnt_bottom;
+                let top = msb.saturating_add(lsb);
+                let bottom = top.saturating_add(sh.delta_pic_order_cnt_bottom);
                 Poc { top, bottom, msb, frame_num_offset: 0 }
             }
             1 => {
                 let frame_num_offset = self.frame_num_offset(sh.idr, sh.frame_num, sps);
-                let n = sps.offset_for_ref_frame.len() as i32;
-                let mut abs_frame_num = if n != 0 { frame_num_offset + sh.frame_num as i32 } else { 0 };
+                // Computed in i64 so that opposite offsets cancel before anything saturates; only
+                // the results are clamped to i32.
+                let n = sps.offset_for_ref_frame.len() as i64;
+                let mut abs_frame_num = if n != 0 { i64::from(frame_num_offset) + i64::from(sh.frame_num) } else { 0 };
                 if sh.nal_ref_idc == 0 && abs_frame_num > 0 {
                     abs_frame_num -= 1;
                 }
-                let mut expected = 0i32;
+                let mut expected = 0i64;
                 if abs_frame_num > 0 {
                     let cycle_cnt = (abs_frame_num - 1) / n;
                     let in_cycle = (abs_frame_num - 1) % n;
-                    let delta_cycle: i32 = sps.offset_for_ref_frame.iter().sum();
-                    expected = cycle_cnt.wrapping_mul(delta_cycle);
+                    let delta_cycle = sps.offset_for_ref_frame.iter().map(|&o| i64::from(o)).sum::<i64>();
+                    expected = cycle_cnt.saturating_mul(delta_cycle);
                     for &o in &sps.offset_for_ref_frame[..=in_cycle as usize] {
-                        expected += o;
+                        expected = expected.saturating_add(i64::from(o));
                     }
                 }
                 if sh.nal_ref_idc == 0 {
-                    expected += sps.offset_for_non_ref_pic;
+                    expected = expected.saturating_add(i64::from(sps.offset_for_non_ref_pic));
                 }
-                let top = expected + sh.delta_pic_order_cnt[0];
-                let bottom = top + sps.offset_for_top_to_bottom_field + sh.delta_pic_order_cnt[1];
+                let top = expected.saturating_add(i64::from(sh.delta_pic_order_cnt[0])).clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
+                let bottom = i64::from(top)
+                    .saturating_add(i64::from(sps.offset_for_top_to_bottom_field))
+                    .saturating_add(i64::from(sh.delta_pic_order_cnt[1]))
+                    .clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
                 Poc { top, bottom, msb: 0, frame_num_offset }
             }
             _ => {
@@ -471,9 +476,9 @@ impl PocState {
                 let temp = if sh.idr {
                     0
                 } else if sh.nal_ref_idc == 0 {
-                    2 * (frame_num_offset + sh.frame_num as i32) - 1
+                    2i32.saturating_mul(frame_num_offset.saturating_add(sh.frame_num as i32)).saturating_sub(1)
                 } else {
-                    2 * (frame_num_offset + sh.frame_num as i32)
+                    2i32.saturating_mul(frame_num_offset.saturating_add(sh.frame_num as i32))
                 };
                 Poc { top: temp, bottom: temp, msb: 0, frame_num_offset }
             }
@@ -484,7 +489,7 @@ impl PocState {
         if idr {
             0
         } else if self.prev_frame_num > frame_num {
-            self.prev_frame_num_offset + sps.max_frame_num() as i32
+            self.prev_frame_num_offset.saturating_add(sps.max_frame_num() as i32)
         } else {
             self.prev_frame_num_offset
         }
@@ -497,7 +502,7 @@ impl PocState {
         if sh.nal_ref_idc != 0 {
             if mmco5 {
                 self.prev_ref_msb = 0;
-                self.prev_ref_lsb = poc.top - poc.frame();
+                self.prev_ref_lsb = poc.top.saturating_sub(poc.frame());
             } else {
                 self.prev_ref_msb = poc.msb;
                 self.prev_ref_lsb = sh.pic_order_cnt_lsb as i32;
@@ -517,5 +522,161 @@ impl PocState {
         let off = self.frame_num_offset(false, frame_num, sps);
         self.prev_frame_num_offset = off;
         self.prev_frame_num = frame_num;
+    }
+}
+
+#[cfg(test)]
+mod poc_tests {
+    use super::*;
+    use filmcraft_bitstream::BitWriter;
+
+    fn sps(poc_type: u32) -> Sps {
+        let mut w = BitWriter::new();
+        w.write_bits(66, 8);
+        w.write_bits(0, 8);
+        w.write_bits(30, 8);
+        w.write_ue(0); // sps id
+        w.write_ue(0); // log2_max_frame_num - 4
+        w.write_ue(poc_type);
+        match poc_type {
+            0 => w.write_ue(0),
+            1 => {
+                w.write_bit(false);
+                w.write_se(i32::MAX); // offset_for_non_ref_pic
+                w.write_se(i32::MAX); // offset_for_top_to_bottom_field
+                w.write_ue(1);
+                w.write_se(i32::MAX);
+            }
+            _ => {}
+        }
+        w.write_ue(1); // max_num_ref_frames
+        w.write_bit(false);
+        w.write_ue(0);
+        w.write_ue(0);
+        w.write_bit(true);
+        w.write_bit(true);
+        w.write_bit(false);
+        w.write_bit(false);
+        w.rbsp_trailing();
+        Sps::parse(&w.finish()).expect("sps")
+    }
+
+    fn header(frame_num: u32, lsb: u32, delta_bottom: i32, delta: [i32; 2], nal_ref_idc: u8) -> SliceHeader {
+        SliceHeader {
+            nal_ref_idc,
+            nal_unit_type: 1,
+            idr: false,
+            first_mb_in_slice: 0,
+            slice_type_raw: 0,
+            slice_type: SliceType::P,
+            pps_id: 0,
+            colour_plane_id: 0,
+            frame_num,
+            field_pic: false,
+            bottom_field: false,
+            idr_pic_id: 0,
+            pic_order_cnt_lsb: lsb,
+            delta_pic_order_cnt_bottom: delta_bottom,
+            delta_pic_order_cnt: delta,
+            redundant_pic_cnt: 0,
+            direct_spatial_mv_pred: false,
+            num_ref_idx_active: [1, 0],
+            ref_pic_list_mod: [Vec::new(), Vec::new()],
+            pred_weight_table: None,
+            no_output_of_prior_pics: false,
+            long_term_reference: false,
+            adaptive_ref_pic_marking: false,
+            mmcos: Vec::new(),
+            cabac_init_idc: 0,
+            slice_qp_delta: 0,
+            sp_for_switch: false,
+            slice_qs_delta: 0,
+            disable_deblocking_filter_idc: 0,
+            slice_alpha_c0_offset_div2: 0,
+            slice_beta_offset_div2: 0,
+            slice_group_change_cycle: 0,
+            header_bits: 0,
+        }
+    }
+
+    #[test]
+    fn extreme_bottom_delta_saturates_instead_of_reversing_picture_order() {
+        let sps = sps(0);
+        let sh = header(0, 1, i32::MAX, [0, 0], 1);
+        let poc = PocState::default().compute(&sh, &sps);
+        assert_eq!((poc.top, poc.bottom), (1, i32::MAX));
+    }
+
+    /// Offsets and deltas are se(v) values that a stream may set anywhere in the i32 range.
+    #[test]
+    fn poc_does_not_overflow_on_extreme_deltas() {
+        for poc_type in 0..=2 {
+            let sps = sps(poc_type);
+            for nal_ref_idc in [0, 1] {
+                let mut state = PocState::default();
+                for frame_num in 0..4 {
+                    for delta in [i32::MIN, -1, 1, i32::MAX] {
+                        let sh = header(frame_num, 5, delta, [delta, delta], nal_ref_idc);
+                        let poc = state.compute(&sh, &sps);
+                        let _ = poc.frame();
+                        state.update(&sh, &poc);
+                    }
+                }
+            }
+        }
+    }
+
+    /// An MMCO5 reference picture can leave `prev_ref_lsb` far below zero; the next type 0
+    /// picture's MSB comparison (`lsb - prev_lsb`) must not overflow.
+    #[test]
+    fn poc_type0_tolerates_negative_prev_ref_lsb() {
+        let sps = sps(0);
+        let sh = header(1, 5, 0, [0, 0], 1);
+        let mut state = PocState { prev_ref_msb: i32::MAX, prev_ref_lsb: i32::MIN, ..PocState::default() };
+        let poc = state.compute(&sh, &sps);
+        let _ = poc.frame();
+        state.update(&sh, &poc);
+    }
+
+    /// An MMCO5 picture whose bottom field order is far below its top one stores the difference.
+    #[test]
+    fn mmco5_prev_ref_lsb_saturates() {
+        let mut sh = header(1, 5, 0, [0, 0], 1);
+        sh.mmcos.push(Mmco { op: 5, difference_of_pic_nums_minus1: 0, long_term_pic_num: 0, long_term_frame_idx: 0, max_long_term_frame_idx_plus1: 0 });
+        let poc = Poc { top: i32::MAX, bottom: i32::MIN, msb: 0, frame_num_offset: 0 };
+        let mut state = PocState::default();
+        state.update(&sh, &poc);
+        assert_eq!(state.prev_ref_lsb, i32::MAX);
+    }
+
+    /// Type 2 doubles FrameNumOffset + frame_num, which a long run of frame_num wraps can push past i32.
+    #[test]
+    fn poc_type2_frame_num_offset_saturates() {
+        let sps = sps(2);
+        for nal_ref_idc in [0, 1] {
+            let sh = header(0, 0, 0, [0, 0], nal_ref_idc);
+            let state = PocState { prev_frame_num_offset: i32::MAX, prev_frame_num: 5, ..PocState::default() };
+            let poc = state.compute(&sh, &sps);
+            assert!(poc.top >= i32::MAX - 1, "{poc:?}");
+        }
+    }
+
+    #[test]
+    fn poc_type1_cancellation_happens_before_clamping() {
+        let sps = sps(1);
+        let sh = header(0, 0, 0, [-i32::MAX, 0], 1);
+        let state = PocState { prev_frame_num_offset: 2, ..PocState::default() };
+        let poc = state.compute(&sh, &sps);
+        assert_eq!(poc.top, i32::MAX);
+    }
+
+    #[test]
+    fn poc_type1_saturates_only_after_wide_cycle_arithmetic_exceeds_i64() {
+        let mut sps = sps(1);
+        sps.offset_for_ref_frame = vec![i32::MAX; 255];
+        let sh = header(u32::MAX, 0, 0, [0, 0], 1);
+        let state = PocState { prev_frame_num_offset: i32::MAX, ..PocState::default() };
+        let poc = state.compute(&sh, &sps);
+        assert_eq!(poc.top, i32::MAX);
     }
 }

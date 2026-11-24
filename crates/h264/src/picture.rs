@@ -169,7 +169,24 @@ impl Frame {
         }
         #[cfg(not(feature = "threads"))]
         {
-            self.rows[r].get().expect("reference row decoded before use")
+            // Rows are decoded in order here, so a row is published before it is read; one that
+            // is not reads as gray with no motion instead of panicking.
+            self.rows[r].get_or_init(|| self.gray_row())
+        }
+    }
+
+    /// A gray intra row with no motion, what "non-existing" frames publish.
+    #[cfg(not(feature = "threads"))]
+    fn gray_row(&self) -> FrameRow {
+        let per_list = |n: usize| -> [Box<[_]>; 2] { [vec![u32::MAX; n].into(), vec![u32::MAX; n].into()] };
+        FrameRow {
+            y: vec![128; self.width * 16].into(),
+            cb: vec![128; self.cwidth * 8].into(),
+            cr: vec![128; self.cwidth * 8].into(),
+            mv: [vec![[0; 2]; self.mb_w * 16].into(), vec![[0; 2]; self.mb_w * 16].into()],
+            ref_idx: [vec![-1; self.mb_w * 4].into(), vec![-1; self.mb_w * 4].into()],
+            ref_id: per_list(self.mb_w * 4),
+            intra: vec![true; self.mb_w].into(),
         }
     }
 
@@ -330,5 +347,20 @@ impl RefPic {
     }
     pub fn id(&self) -> u32 {
         self.frame.id
+    }
+}
+
+#[cfg(all(test, not(feature = "threads")))]
+mod row_tests {
+    use super::*;
+
+    /// Without threads a row read before it was published is gray, not a panic.
+    #[test]
+    fn an_unpublished_row_reads_as_gray_without_threads() {
+        let f = Frame::new(0, 0, 2, 2);
+        let row = f.row(1);
+        assert!(row.y.iter().chain(row.cb.iter()).chain(row.cr.iter()).all(|&s| s == 128));
+        assert_eq!((row.y.len(), row.cb.len(), row.mv[0].len(), row.ref_idx[1].len(), row.intra.len()), (32 * 16, 16 * 8, 32, 8, 2));
+        assert!(row.intra.iter().all(|&i| i) && row.ref_id[0].iter().all(|&id| id == u32::MAX));
     }
 }

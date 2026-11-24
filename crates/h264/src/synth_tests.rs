@@ -103,6 +103,8 @@ struct Pic {
     /// Explicit weights (luma, cb, cr) as (weight, offset) for refIdx 0 of list 0 and list 1;
     /// log2 denominators are 5 (luma) and 3 (chroma).
     wt: Option<[[(i32, i32); 3]; 2]>,
+    /// first_mb_in_slice (CAVLC I and P slices: `mbs` are the slice's macroblocks from there).
+    first_mb: u32,
 }
 
 impl Pic {
@@ -115,7 +117,7 @@ impl Pic {
 }
 
 fn slice_header(w: &mut BitWriter, p: &Pic, cabac: bool) {
-    w.write_ue(0); // first_mb
+    w.write_ue(p.first_mb);
     w.write_ue(if p.b {
         6
     } else if p.is_p() {
@@ -554,5 +556,123 @@ fn poc_type1_reordering() {
                 assert!(p.y == e.0 && p.u == e.1 && p.v == e.2, "output {k} (cabac={cabac})");
             }
         }
+    }
+}
+
+#[test]
+fn avcc_accepts_generated_sps_and_pps() {
+    let sps = sps(66, 4, false, PocType::T2);
+    let pps = pps(false, false);
+    let (sps, pps) = (&sps[4..], &pps[4..]);
+    let mut avcc = vec![1, 66, 0, 30, 0xff, 0xe1];
+    avcc.extend_from_slice(&(sps.len() as u16).to_be_bytes());
+    avcc.extend_from_slice(sps);
+    avcc.push(1);
+    avcc.extend_from_slice(&(pps.len() as u16).to_be_bytes());
+    avcc.extend_from_slice(pps);
+    let decoder = Decoder::from_avcc(&avcc).unwrap();
+    assert_eq!(decoder.nal_length_size(), Some(4));
+}
+
+/// A slice NAL in the avcC PPS list was handled like stream data and started a picture; every
+/// entry is now checked (SPS first, PPS after, none empty) before any is handled, and a refused
+/// record leaves the NAL length size unset.
+#[test]
+fn avcc_rejects_a_valid_picture_slice_without_starting_a_picture() {
+    let sequence = sps(66, 4, false, PocType::T0);
+    let picture = pps(false, false);
+    let slice = slice_nal(&Pic { idr: true, frame_num: 0, ref_idc: 3, mbs: vec![Some(vec![128; 384]); NMB], poc_lsb: Some(0), ..Default::default() }, false);
+    let mut avcc = vec![1, 66, 0, 30, 0xff, 0xe1];
+    let nal = &sequence[4..];
+    avcc.extend_from_slice(&(nal.len() as u16).to_be_bytes());
+    avcc.extend_from_slice(nal);
+    avcc.push(2);
+    avcc.extend_from_slice(&((picture.len() - 4) as u16).to_be_bytes());
+    avcc.extend_from_slice(&picture[4..]);
+    avcc.extend_from_slice(&((slice.len() - 4) as u16).to_be_bytes());
+    avcc.extend_from_slice(&slice[4..]);
+
+    let mut decoder = Decoder::with_threads(1);
+    assert!(decoder.configure_avcc(&avcc).is_err());
+    assert!(decoder.flush().is_empty());
+    assert_eq!(decoder.stats().pictures, 0);
+    assert_eq!(decoder.nal_length_size(), None);
+
+    // An empty entry is refused too, in either list.
+    let mut empty = vec![1, 66, 0, 30, 0xff, 0xe1, 0, 0, 0];
+    assert!(Decoder::with_threads(1).configure_avcc(&empty).is_err());
+    empty.truncate(6);
+    empty.extend_from_slice(&(nal.len() as u16).to_be_bytes());
+    empty.extend_from_slice(nal);
+    empty.extend_from_slice(&[1, 0, 0]);
+    assert!(Decoder::with_threads(1).configure_avcc(&empty).is_err());
+}
+
+/// A slice_qp_delta at the end of the Exp-Golomb range is an error, not an overflow of
+/// pic_init_qp + slice_qp_delta.
+#[test]
+fn slice_qp_addition_does_not_overflow() {
+    for qp_delta in [26, i32::MAX, -i32::MAX] {
+        let mut w = BitWriter::new();
+        w.write_ue(0); // first_mb
+        w.write_ue(7); // I slice
+        w.write_ue(0); // pps id
+        w.write_bits(0, 4); // frame_num
+        w.write_ue(0); // idr_pic_id
+        w.write_bit(false); // no_output_of_prior_pics
+        w.write_bit(false); // long_term_reference
+        w.write_se(qp_delta);
+        w.write_ue(1); // disable_deblocking_filter_idc
+        w.rbsp_trailing();
+        let mut stream = sps(66, 1, false, PocType::T2);
+        stream.extend(pps(false, false));
+        stream.extend(nal(3, 5, &w.finish()));
+        let r = Decoder::with_threads(1).decode(&stream, 0).map(|pics| pics.len());
+        assert!(matches!(&r, Err(crate::Error::Invalid(m)) if m.contains("slice QP")), "slice_qp_delta {qp_delta}: {r:?}");
+    }
+}
+
+/// A chunk may start only so many pictures (64), however cheap each one is to ask for: 64
+/// one-picture access units in one call decode, 65 are refused.
+#[test]
+fn a_chunk_with_too_many_pictures_is_refused() {
+    let chunk = |pictures: u32| {
+        let mut stream = sps(66, 1, false, PocType::T2);
+        stream.extend(pps(false, false));
+        for i in 0..pictures {
+            let p = Pic { idr: i == 0, frame_num: i % 16, ref_idc: 3, mbs: vec![Some(vec![128; 384]); NMB], ..Default::default() };
+            stream.extend(slice_nal(&p, false));
+        }
+        stream
+    };
+    for threads in [1, 2] {
+        let mut dec = Decoder::with_threads(threads);
+        let mut out = dec.decode(&chunk(64), 0).unwrap();
+        out.extend(dec.flush());
+        assert_eq!(out.len(), 64);
+        let mut dec = Decoder::with_threads(threads);
+        let r = dec.decode(&chunk(65), 0).map(|pics| pics.len());
+        assert!(matches!(&r, Err(crate::Error::Invalid(m)) if m.contains("too many pictures")), "{r:?}");
+        // The next call starts counting again.
+        assert!(dec.decode(&chunk(1), 0).is_ok());
+    }
+}
+
+/// A second slice that covers macroblocks the picture already decoded is refused instead of
+/// doing the picture's prediction work again.
+#[test]
+fn a_slice_overlapping_decoded_macroblocks_is_refused() {
+    let mut stream = sps(66, 1, false, PocType::T2);
+    stream.extend(pps(false, false));
+    let p = Pic { idr: true, frame_num: 0, ref_idc: 3, mbs: vec![Some(vec![128; 384]); NMB], ..Default::default() };
+    stream.extend(slice_nal(&p, false));
+    // A second slice of the same picture from macroblock 1: every one of them is decoded already.
+    stream.extend(slice_nal(&Pic { first_mb: 1, mbs: vec![Some(vec![128; 384]); NMB - 1], ..p }, false));
+    for threads in [1, 2] {
+        let mut dec = Decoder::with_threads(threads);
+        let first = dec.decode(&stream, 0).err();
+        let _ = dec.flush();
+        let err = first.or_else(|| dec.take_error());
+        assert!(matches!(&err, Some(crate::Error::Invalid(m)) if m.contains("overlaps")), "{err:?}");
     }
 }
