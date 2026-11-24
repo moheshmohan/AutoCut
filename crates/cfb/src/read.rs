@@ -1,6 +1,6 @@
 //! Reading compound files ([MS-CFB] §2.2–2.6).
 
-use crate::{ENDOFCHAIN, Error, FREESECT, MAXREGSECT, MINI_SECTOR_SIZE, NOSTREAM, Result, SIGNATURE, compare_names};
+use crate::{ENDOFCHAIN, Error, FREESECT, MAX_STREAM_SIZE, MAXREGSECT, MINI_SECTOR_SIZE, NOSTREAM, Result, SIGNATURE, compare_names};
 
 /// Directory entry object type (§2.6.1).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -73,6 +73,13 @@ fn invalid(s: impl Into<String>) -> Error {
     Error::Invalid(s.into())
 }
 
+/// The first value that occurs twice in `ids` (memory proportional to `ids`, not to the FAT).
+fn repeated(ids: &[u32]) -> Option<u32> {
+    let mut sorted = ids.to_vec();
+    sorted.sort_unstable();
+    sorted.windows(2).find(|w| w.first() == w.get(1)).and_then(|w| w.first().copied())
+}
+
 impl<'a> CompoundFile<'a> {
     /// Parse the header, FAT, mini FAT, directory and mini stream of `data`.
     pub fn open(data: &'a [u8]) -> Result<CompoundFile<'a>> {
@@ -132,7 +139,13 @@ impl<'a> CompoundFile<'a> {
             }
             d = u32_at(s, per * 4);
         }
+        // Slots past the header's count are padding (free, or zero from some writers).
         fat_sectors.truncate(n_fat);
+        // Every FAT sector is a sector of the file, so none is listed twice. A file that names one
+        // sector over and over would otherwise build a FAT many times its own size.
+        if let Some(dup) = repeated(&fat_sectors) {
+            return Err(invalid(format!("FAT sector {dup} is listed twice")));
+        }
         let mut fat = Vec::with_capacity(fat_sectors.len() * sector_size / 4);
         for s in fat_sectors {
             let b = cf.sector(s)?;
@@ -175,32 +188,47 @@ impl<'a> CompoundFile<'a> {
         Ok(&self.data[start..end])
     }
 
-    /// Concatenate a regular sector chain; `limit` stops once that many bytes are read.
-    fn read_chain(&self, start: u32, limit: Option<usize>) -> Result<Vec<u8>> {
-        let mut out = Vec::new();
-        let mut s = start;
-        let mut steps = 0usize;
+    /// The sector numbers of the chain from `start`: all of it, or its first `want` sectors. A
+    /// sector visited twice is an error: a loop shorter than a stream would otherwise read back
+    /// as the same sectors over and over.
+    fn chain_ids(&self, start: u32, want: Option<usize>) -> Result<Vec<u32>> {
         // A chain cannot visit more sectors than the file holds. Not `self.fat.len()`: the FAT can
-        // be far longer (one FAT sector named by many header / DIFAT slots), and a looping chain
-        // would then append a whole sector per FAT entry (hundreds of MB, or an abort).
+        // be far longer than the file has sectors, and a looping chain would then append a whole
+        // sector per FAT entry (hundreds of MB, or an abort).
         let max_steps = self.data.len() / self.sector_size + 1;
-        while s != ENDOFCHAIN {
+        let want = want.unwrap_or(usize::MAX);
+        let mut ids = Vec::new();
+        let mut s = start;
+        while s != ENDOFCHAIN && ids.len() < want {
             if s > MAXREGSECT {
                 return Err(invalid(format!("bad sector {s:#x} in a chain")));
             }
-            steps += 1;
-            if steps > max_steps {
+            if ids.len() >= max_steps {
                 return Err(invalid(format!("sector chain loops: more than {max_steps} sectors in a {}-byte file", self.data.len())));
             }
-            let b = self.sector(s)?;
-            out.extend_from_slice(b);
-            if limit.is_some_and(|l| out.len() >= l) {
+            ids.push(s);
+            if ids.len() == want {
                 break;
             }
             s = *self.fat.get(s as usize).ok_or_else(|| invalid(format!("sector {s} has no FAT entry")))?;
             if s == FREESECT {
                 return Err(invalid("chain runs into a free sector"));
             }
+        }
+        if let Some(dup) = repeated(&ids) {
+            return Err(invalid(format!("sector chain loops: sector {dup} is visited twice")));
+        }
+        Ok(ids)
+    }
+
+    /// Concatenate a regular sector chain; `limit` stops once that many bytes are read.
+    fn read_chain(&self, start: u32, limit: Option<usize>) -> Result<Vec<u8>> {
+        let ids = self.chain_ids(start, limit.map(|l| l.div_ceil(self.sector_size)))?;
+        // `limit` is at most the file length (callers check) and the chain holds distinct sectors
+        // of the file, so this capacity is bounded by the file's own size.
+        let mut out = Vec::with_capacity(limit.unwrap_or(ids.len().saturating_mul(self.sector_size)).min(self.data.len()));
+        for s in ids {
+            out.extend_from_slice(self.sector(s)?);
         }
         if let Some(l) = limit {
             if out.len() < l {
@@ -213,9 +241,11 @@ impl<'a> CompoundFile<'a> {
 
     fn read_mini_chain(&self, start: u32, size: usize) -> Result<Vec<u8>> {
         let mut out = Vec::with_capacity(size);
+        let mut ids = Vec::new();
+        let mut filled = 0usize;
         let mut s = start;
         let mut steps = 0usize;
-        while out.len() < size {
+        while filled < size {
             if s > MAXREGSECT {
                 return Err(invalid("mini stream chain ends early"));
             }
@@ -223,10 +253,20 @@ impl<'a> CompoundFile<'a> {
             if steps > self.minifat.len().max(1) {
                 return Err(invalid("mini sector chain loops"));
             }
-            let at = s as usize * MINI_SECTOR_SIZE;
-            let b = self.mini_stream.get(at..at + MINI_SECTOR_SIZE).ok_or_else(|| invalid("mini sector outside the mini stream"))?;
-            out.extend_from_slice(b);
+            ids.push(s);
+            filled = filled.saturating_add(MINI_SECTOR_SIZE);
             s = *self.minifat.get(s as usize).ok_or_else(|| invalid("mini sector has no mini FAT entry"))?;
+        }
+        // A loop shorter than the stream would otherwise read back as repeated data.
+        if repeated(&ids).is_some() {
+            return Err(invalid("mini sector chain loops"));
+        }
+        for s in ids {
+            let b = (s as usize)
+                .checked_mul(MINI_SECTOR_SIZE)
+                .and_then(|at| self.mini_stream.get(at..at.checked_add(MINI_SECTOR_SIZE)?))
+                .ok_or_else(|| invalid("mini sector outside the mini stream"))?;
+            out.extend_from_slice(b);
         }
         out.truncate(size);
         Ok(out)
@@ -276,6 +316,20 @@ impl<'a> CompoundFile<'a> {
         &self.entries[0]
     }
 
+    /// Reject a loop or a bad link anywhere in the root's mini stream sector chain, also past the
+    /// root entry's declared size (`open` reads only that far, so it never follows such a loop).
+    /// Opening stays tolerant; callers that want the strict check (AAF) call this.
+    pub fn validate_root_chain(&self) -> Result<()> {
+        let root = self.root();
+        if root.size > 0 {
+            if root.start == ENDOFCHAIN {
+                return Err(invalid("nonempty root mini stream has no sector chain"));
+            }
+            self.chain_ids(root.start, None)?;
+        }
+        Ok(())
+    }
+
     pub fn entry(&self, id: usize) -> Option<&Entry> {
         self.entries.get(id)
     }
@@ -297,11 +351,22 @@ impl<'a> CompoundFile<'a> {
         Ok(cur)
     }
 
-    /// Contents of stream `id`.
+    /// Contents of stream `id`, refused above [`MAX_STREAM_SIZE`].
     pub fn read(&self, id: usize) -> Result<Vec<u8>> {
+        self.read_capped(id, MAX_STREAM_SIZE)
+    }
+
+    /// Contents of stream `id`, refused with [`Error::LimitExceeded`] when it is larger than `cap`
+    /// bytes (or than [`MAX_STREAM_SIZE`], whichever is smaller). Nothing is allocated for a
+    /// refused stream.
+    pub fn read_capped(&self, id: usize, cap: u64) -> Result<Vec<u8>> {
         let e = self.entries.get(id).ok_or_else(|| Error::NotFound(format!("entry {id}")))?;
         if e.kind != EntryKind::Stream {
             return Err(invalid(format!("{:?} is not a stream", e.name)));
+        }
+        let cap = cap.min(MAX_STREAM_SIZE);
+        if e.size > cap {
+            return Err(Error::LimitExceeded(format!("stream {:?} is {} bytes, the limit is {cap}", e.name, e.size)));
         }
         let size = usize::try_from(e.size).map_err(|_| invalid("stream too large"))?;
         if size == 0 {
@@ -316,6 +381,11 @@ impl<'a> CompoundFile<'a> {
     /// Contents of the stream at `path`.
     pub fn read_path(&self, path: &str) -> Result<Vec<u8>> {
         self.read(self.find(path)?)
+    }
+
+    /// Contents of the stream at `path`, refused when larger than `cap` bytes.
+    pub fn read_path_capped(&self, path: &str, cap: u64) -> Result<Vec<u8>> {
+        self.read_capped(self.find(path)?, cap)
     }
 
     /// Sector size in bytes (512 or 4096).

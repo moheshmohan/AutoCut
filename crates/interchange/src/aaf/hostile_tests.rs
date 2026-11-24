@@ -67,3 +67,21 @@ fn weak_collections_within_the_index_are_read() {
         assert_eq!(read_keys(sf, index(2, 4, &[1, 2, 3, 4, 5, 6, 7, 8])).unwrap(), [vec![1, 2, 3, 4], vec![5, 6, 7, 8]]);
     }
 }
+
+/// The root's mini stream chain loops past the root entry's declared size. The compound file
+/// reader only reads that far, so the file used to open; AAF asks for the whole chain to be sound
+/// (craft-libs f759a35db8).
+#[test]
+fn a_root_mini_stream_chain_looping_past_its_size_is_refused() {
+    let mut file = weak_collection_file(SF_WEAK_VECTOR, index(0, 0, &[]));
+    assert!(store::read(&file).is_ok());
+    let u32_at = |b: &[u8], at: usize| u32::from_le_bytes([b[at], b[at + 1], b[at + 2], b[at + 3]]);
+    let root = (u32_at(&file, 48) as usize + 1) * 512; // version 3: 512-byte sectors, root entry first
+    let (start, size) = (u32_at(&file, root + 116), u32_at(&file, root + 120));
+    // the writer's chains are contiguous: point the last sector of the root's chain at the first
+    let last = start + size.div_ceil(512) - 1;
+    let fat = (u32_at(&file, 76) as usize + 1) * 512;
+    file[fat + last as usize * 4..][..4].copy_from_slice(&start.to_le_bytes());
+    let e = store::read(&file).unwrap_err();
+    assert!(e.contains("sector chain loops"), "{e}");
+}

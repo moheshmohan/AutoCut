@@ -369,6 +369,9 @@ const MAX_MATERIALIZED_STREAM_BYTES: usize = 256 << 20;
 /// Parse the object tree of an AAF compound file (the root object).
 pub(crate) fn read(bytes: &[u8]) -> Result<Obj, String> {
     let cf = CompoundFile::open(bytes).map_err(|e| e.to_string())?;
+    // `open` reads the root mini stream only as far as the root entry says; a loop past that
+    // point is damage an AAF writer never leaves (craft-libs f759a35db8).
+    cf.validate_root_chain().map_err(|e| e.to_string())?;
     let mut paths = Vec::new();
     if let Ok(rp) = cf.read_path("referenced properties")
         && rp.len() >= 7
@@ -405,7 +408,12 @@ impl R<'_> {
 
     fn stream(&mut self, parent: usize, name: &str) -> Result<Vec<u8>, String> {
         let id = self.child(parent, name)?;
-        let data = self.cf.read(id).map_err(|e| e.to_string())?;
+        // A stream past what the budget has left is refused before it is copied out.
+        let left = MAX_MATERIALIZED_STREAM_BYTES.saturating_sub(self.materialized_stream_bytes);
+        let data = self.cf.read_capped(id, left as u64).map_err(|e| match e {
+            filmcraft_cfb::Error::LimitExceeded(_) => bad("AAF materialized stream data exceeds the memory limit"),
+            e => e.to_string(),
+        })?;
         self.materialized_stream_bytes = self
             .materialized_stream_bytes
             .checked_add(data.len())

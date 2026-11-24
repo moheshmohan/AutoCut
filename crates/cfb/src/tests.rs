@@ -242,12 +242,13 @@ fn difat_self_loop_fails_fast() {
     assert_eq!(CompoundFile::open(&b).unwrap_err(), Error::Invalid(expect));
 }
 
-/// All 109 header slots name the same FAT sector, so the FAT is 109 copies of it, and the
-/// directory chain loops (sector 0 → 0). The loop guard used to be the FAT length, so this 450 KB
+/// All 109 header slots name the same FAT sector, so the FAT would be 109 copies of it, and the
+/// directory chain loops (sector 0 -> 0). The loop guard used to be the FAT length, so this 450 KB
 /// file appended a sector per FAT entry before failing: a 457 MB buffer per open (117 GB with
-/// 64 KB sectors in a 7 MB file). A chain cannot visit more sectors than the file has.
+/// 64 KB sectors in a 7 MB file). No file lists a FAT sector twice, so the list is now refused
+/// before any of it is read (craft-cfb's extraction).
 #[test]
-fn duplicated_fat_sector_chain_loop_fails_fast() {
+fn duplicated_fat_sector_is_refused() {
     let ss = 4096;
     let mut b = bare_header(12);
     put_u32(&mut b, 44, 109); // FAT sectors: the 109 header slots...
@@ -260,10 +261,143 @@ fn duplicated_fat_sector_chain_loop_fails_fast() {
     put_u32(&mut fat, 0, 0); // FAT[0] = 0: sector 0 is followed by itself
     b.extend_from_slice(&fat);
     b.resize(110 * ss, 0); // big enough for 109 FAT sectors to pass the size check
-    // The message names the bound the walk stopped at: 111, this file's 110 sectors + 1, not the
-    // 109 * 1024 = 111,616 entries of the inflated FAT that the old guard allowed (a 457 MB buffer).
-    let expect = format!("sector chain loops: more than 111 sectors in a {}-byte file", b.len());
+    assert_eq!(CompoundFile::open(&b).unwrap_err(), Error::Invalid("FAT sector 0 is listed twice".into()));
+}
+
+/// The same sector listed for two of a file's real FAT sectors (one in the header, one later) is
+/// refused too, and spare FAT sectors that are all different still open.
+#[test]
+fn a_fat_sector_listed_twice_among_others_is_refused() {
+    let data = pattern(38_000, 4);
+    let mut w = Writer::new(Version::V3);
+    w.stream(Writer::ROOT, "big", data.clone()).unwrap();
+    let mut b = w.finish();
+    let n_fat = u32::from_le_bytes(b[44..48].try_into().unwrap());
+    // three spare (free) FAT sectors appended and listed after the real ones
+    let sectors = (b.len() / 512 - 1) as u32;
+    for i in 0..3 {
+        put_u32(&mut b, 76 + (n_fat + i) as usize * 4, sectors + i);
+        b.extend_from_slice(&[0xFF; 512]);
+    }
+    put_u32(&mut b, 44, n_fat + 3);
+    assert_eq!(CompoundFile::open(&b).unwrap().read_path("big").unwrap(), data);
+    let last = u32::from_le_bytes(b[76 + (n_fat + 2) as usize * 4..][..4].try_into().unwrap());
+    put_u32(&mut b, 76 + (n_fat + 1) as usize * 4, last);
+    assert_eq!(CompoundFile::open(&b).unwrap_err(), Error::Invalid(format!("FAT sector {last} is listed twice")));
+}
+
+/// A directory chain that loops (sector 1 -> 1) stops after as many sectors as the file has, not
+/// after as many as the FAT has entries.
+#[test]
+fn looping_directory_chain_fails_fast() {
+    let mut b = bare_header(9);
+    put_u32(&mut b, 44, 1);
+    put_u32(&mut b, 76, 0); // the FAT is sector 0
+    put_u32(&mut b, 48, 1); // the directory starts at sector 1
+    let mut fat = vec![0xFF; 512];
+    put_u32(&mut fat, 0, FATSECT);
+    put_u32(&mut fat, 4, 1); // FAT[1] = 1
+    b.extend_from_slice(&fat);
+    b.resize(3 * 512, 0);
+    let expect = format!("sector chain loops: more than 4 sectors in a {}-byte file", b.len());
     assert_eq!(CompoundFile::open(&b).unwrap_err(), Error::Invalid(expect));
+}
+
+/// Byte offset of FAT entry `k` in a file whose first FAT sector holds it (the writer's files
+/// here are small enough).
+fn fat_entry_at(b: &[u8], k: usize) -> usize {
+    let ss = 1usize << u16::from_le_bytes([b[30], b[31]]);
+    (u32::from_le_bytes(b[76..80].try_into().unwrap()) as usize + 1) * ss + k * 4
+}
+
+/// Byte offset of directory entry `i` (the writer stores the directory contiguously).
+fn dir_at(b: &[u8], i: usize) -> usize {
+    let ss = 1usize << u16::from_le_bytes([b[30], b[31]]);
+    (u32::from_le_bytes(b[48..52].try_into().unwrap()) as usize + 1) * ss + i * 128
+}
+
+fn invalid_containing(r: Result<Vec<u8>>, what: &str) {
+    match r {
+        Err(Error::Invalid(m)) if m.contains(what) => {}
+        other => panic!("expected an Invalid error containing {what:?}, got {other:?}"),
+    }
+}
+
+/// A chain that loops inside the stream's declared size used to read back as the same sectors
+/// over and over (the step bound is the file's sector count, which such a loop stays under). It
+/// is damage.
+#[test]
+fn a_stream_chain_that_loops_within_its_size_is_refused() {
+    let data = pattern(5000, 1);
+    let mut w = Writer::new(Version::V3);
+    w.stream(Writer::ROOT, "big", data.clone()).unwrap();
+    let mut b = w.finish();
+    let start = u32::from_le_bytes(b[dir_at(&b, 1) + 116..][..4].try_into().unwrap()) as usize;
+    assert_eq!(CompoundFile::open(&b).unwrap().read_path("big").unwrap(), data);
+    let at = fat_entry_at(&b, start + 3);
+    put_u32(&mut b, at, start as u32 + 2); // sectors .., 2, 3, 2, 3, ...
+    invalid_containing(CompoundFile::open(&b).unwrap().read_path("big"), &format!("sector chain loops: sector {} is visited twice", start + 2));
+}
+
+#[test]
+fn a_mini_chain_that_loops_within_its_size_is_refused() {
+    let data = pattern(200, 1);
+    let mut w = Writer::new(Version::V3);
+    w.stream(Writer::ROOT, "small", data.clone()).unwrap();
+    let mut b = w.finish();
+    assert_eq!(CompoundFile::open(&b).unwrap().read_path("small").unwrap(), data);
+    let start = u32::from_le_bytes(b[dir_at(&b, 1) + 116..][..4].try_into().unwrap()) as usize;
+    let minifat = (u32::from_le_bytes(b[60..64].try_into().unwrap()) as usize + 1) * 512;
+    put_u32(&mut b, minifat + (start + 1) * 4, start as u32); // mini sectors 0, 1, 0, 1
+    invalid_containing(CompoundFile::open(&b).unwrap().read_path("small"), "mini sector chain loops");
+}
+
+/// `open` reads the root's mini stream only as far as the root entry says, so a loop past that
+/// point is never followed; the strict check AAF asks for finds it (craft-libs f759a35db8).
+#[test]
+fn strict_root_validation_rejects_a_loop_beyond_the_declared_mini_stream() {
+    let data = pattern(100, 1);
+    let mut w = Writer::new(Version::V3);
+    w.stream(Writer::ROOT, "small", data.clone()).unwrap();
+    let mut b = w.finish();
+    let cf = CompoundFile::open(&b).unwrap();
+    assert_eq!(cf.validate_root_chain(), Ok(()));
+    let root = dir_at(&b, 0);
+    let start = u32::from_le_bytes(b[root + 116..][..4].try_into().unwrap());
+    let at = fat_entry_at(&b, start as usize);
+    put_u32(&mut b, at, start); // the root's one mini stream sector is followed by itself
+    let cf = CompoundFile::open(&b).unwrap();
+    assert_eq!(cf.read_path("small").unwrap(), data, "opening stays tolerant");
+    assert!(matches!(cf.validate_root_chain(), Err(Error::Invalid(m)) if m.contains("sector chain loops")));
+    // a root that claims a mini stream but has no chain
+    put_u32(&mut b, root + 116, ENDOFCHAIN);
+    let cf = CompoundFile::open(&b).unwrap();
+    assert_eq!(cf.validate_root_chain(), Err(Error::Invalid("nonempty root mini stream has no sector chain".into())));
+}
+
+/// Streams are refused above 1 GiB (or a per-call cap) before anything is allocated, and a size
+/// the file cannot hold is refused whatever the cap.
+#[test]
+fn stream_size_cap() {
+    assert_eq!(MAX_STREAM_SIZE, 1 << 30);
+    let data = pattern(5000, 3);
+    let mut w = Writer::new(Version::V4);
+    w.stream(Writer::ROOT, "s", data.clone()).unwrap();
+    w.stream(Writer::ROOT, "t", vec![1, 2, 3]).unwrap();
+    let mut b = w.finish();
+    let over = |r: Result<Vec<u8>>| assert!(matches!(r, Err(Error::LimitExceeded(_))), "{r:?}");
+    let cf = CompoundFile::open(&b).unwrap();
+    over(cf.read_path_capped("s", 4999));
+    over(cf.read_capped(cf.find("s").unwrap(), 0));
+    assert_eq!(cf.read_path_capped("t", 3).unwrap(), [1, 2, 3], "a stream under the cap");
+    assert_eq!(cf.read_path_capped("s", 5000).unwrap(), data);
+    assert_eq!(cf.read_path_capped("s", u64::MAX).unwrap(), data, "a cap above the limit does not raise it");
+    let s = (1..3).find(|&i| cf.entries[i].name == "s").unwrap();
+    let e = dir_at(&b, s);
+    b[e + 120..e + 128].copy_from_slice(&(MAX_STREAM_SIZE + 1).to_le_bytes());
+    over(CompoundFile::open(&b).unwrap().read_path("s"));
+    b[e + 120..e + 128].copy_from_slice(&(MAX_STREAM_SIZE - 1).to_le_bytes());
+    invalid_containing(CompoundFile::open(&b).unwrap().read_path("s"), "larger than the file");
 }
 
 /// Positive control for the chain bound: the longest chains a file can hold still read back, in

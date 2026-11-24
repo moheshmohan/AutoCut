@@ -26,7 +26,13 @@ for &child in &cf.entries[header].children { /* sorted siblings */ }
   shifts between 7 and 16 are tolerated.
 - Every chain (DIFAT, FAT, mini FAT, directory, streams) is bounds-checked and cycle-checked; a
   directory tree that references an entry twice is rejected. Damaged or truncated files return
-  `Error::Invalid`, never panic or loop.
+  `Error::Invalid`, never panic or loop. A chain that visits a sector twice is refused, also when
+  the loop is shorter than the stream (it used to read back as repeated data), and so is a FAT
+  sector listed twice in the header or DIFAT (it would build a FAT many times the file's size).
+- `read` refuses a stream larger than `MAX_STREAM_SIZE` (1 GiB) with `Error::LimitExceeded`
+  before allocating; `read_capped` / `read_path_capped` take a lower per-call cap.
+- `open` reads the root's mini stream only as far as the root entry says; `validate_root_chain`
+  checks the whole chain (the AAF reader calls it).
 - Version 3 stream sizes ignore the high 32 bits (§2.6.3).
 
 ## Writing
@@ -49,7 +55,9 @@ chain is contiguous. Sibling trees are balanced binary search trees in [MS-CFB] 
 `src/tests.rs`: round trips for both versions with empty, mini, boundary (63/64/65, 4095/4096/4097
 bytes) and multi-sector streams and up to 40 siblings; red-black invariants of every sibling tree;
 a 7.5 MB stream that needs DIFAT sectors; Unicode and case-insensitive names; truncation at every
-29 bytes and 1500 random mutations never panic and only return complete streams.
+29 bytes and 1500 random mutations never panic and only return complete streams; stream and mini
+chains looping inside their size, a FAT sector listed twice, a root chain looping past its size
+and the stream cap each have a test.
 The writer rejects a duplicate sibling name with an O(1) hash lookup on the upper-cased name (a scan over the
 siblings made n children cost O(n^2): 20 000 AAF markers took a minute); `adding_many_children_is_not_quadratic`
 and `duplicate_names_are_still_rejected` (`tests/writer_scale.rs`) cover it.

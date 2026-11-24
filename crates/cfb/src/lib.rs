@@ -46,6 +46,10 @@ pub const MINI_STREAM_CUTOFF: u32 = 4096;
 pub const MINI_SECTOR_SIZE: usize = 64;
 /// Longest directory entry name in UTF-16 code units, without the terminating NUL (§2.6.1).
 pub const MAX_NAME_LEN: usize = 31;
+/// Largest stream [`CompoundFile::read`] returns (1 GiB); [`CompoundFile::read_capped`] can set a
+/// lower cap. A larger stream is refused with [`Error::LimitExceeded`] before anything is
+/// allocated.
+pub const MAX_STREAM_SIZE: u64 = 1 << 30;
 
 /// Errors from the reader and writer.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -58,6 +62,9 @@ pub enum Error {
     NotFound(String),
     /// A name the format cannot store (too long, illegal characters, duplicate).
     BadName(String),
+    /// The file is well-formed so far but holds a stream larger than [`MAX_STREAM_SIZE`] or a
+    /// per-call cap.
+    LimitExceeded(String),
 }
 
 impl fmt::Display for Error {
@@ -67,6 +74,7 @@ impl fmt::Display for Error {
             Error::Invalid(s) => write!(f, "invalid compound file: {s}"),
             Error::NotFound(s) => write!(f, "no entry {s:?}"),
             Error::BadName(s) => write!(f, "invalid entry name {s:?}"),
+            Error::LimitExceeded(s) => write!(f, "compound file limit exceeded: {s}"),
         }
     }
 }
