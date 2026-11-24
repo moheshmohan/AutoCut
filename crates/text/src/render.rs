@@ -35,23 +35,69 @@ enum Cmd {
     Z,
 }
 
-struct Rec(Vec<Cmd>);
+/// Most outline commands one glyph may record. Real glyphs have a few hundred; a hostile CFF
+/// charstring or composite glyph can emit millions from a small font, and every recorded glyph is
+/// cached.
+const MAX_OUTLINE_ELEMENTS: usize = 100_000;
+
+/// Records a glyph's outline. A drawing past [`MAX_OUTLINE_ELEMENTS`] (`truncated`), or one that
+/// draws before its first `move_to` (`invalid`), is a failed draw.
+#[derive(Default)]
+struct Rec {
+    cmds: Vec<Cmd>,
+    truncated: bool,
+    invalid: bool,
+}
+
+impl Rec {
+    /// Whether a contour has started (the first command is always a `move_to`).
+    fn has_start(&mut self) -> bool {
+        if self.cmds.is_empty() {
+            self.invalid = true;
+            false
+        } else {
+            true
+        }
+    }
+    /// Whether another command fits.
+    fn room(&mut self) -> bool {
+        if self.cmds.len() >= MAX_OUTLINE_ELEMENTS {
+            self.truncated = true;
+            false
+        } else {
+            true
+        }
+    }
+    fn push(&mut self, c: Cmd) {
+        if self.room() {
+            self.cmds.push(c);
+        }
+    }
+}
 
 impl OutlinePen for Rec {
     fn move_to(&mut self, x: f32, y: f32) {
-        self.0.push(Cmd::M(x, y));
+        self.push(Cmd::M(x, y));
     }
     fn line_to(&mut self, x: f32, y: f32) {
-        self.0.push(Cmd::L(x, y));
+        if self.has_start() {
+            self.push(Cmd::L(x, y));
+        }
     }
     fn quad_to(&mut self, cx0: f32, cy0: f32, x: f32, y: f32) {
-        self.0.push(Cmd::Q(cx0, cy0, x, y));
+        if self.has_start() {
+            self.push(Cmd::Q(cx0, cy0, x, y));
+        }
     }
     fn curve_to(&mut self, cx0: f32, cy0: f32, cx1: f32, cy1: f32, x: f32, y: f32) {
-        self.0.push(Cmd::C(cx0, cy0, cx1, cy1, x, y));
+        if self.has_start() {
+            self.push(Cmd::C(cx0, cy0, cx1, cy1, x, y));
+        }
     }
     fn close(&mut self) {
-        self.0.push(Cmd::Z);
+        if self.has_start() {
+            self.push(Cmd::Z);
+        }
     }
 }
 
@@ -65,9 +111,9 @@ fn outline(face: FaceId, gid: u32) -> Option<Arc<Vec<Cmd>>> {
     let f = fonts::face(face);
     let v = f.font().and_then(|font| {
         let g = font.outline_glyphs().get(GlyphId::new(gid))?;
-        let mut rec = Rec(Vec::new());
+        let mut rec = Rec::default();
         g.draw(DrawSettings::unhinted(Size::unscaled(), LocationRef::default()), &mut rec).ok()?;
-        Some(Arc::new(rec.0))
+        (!rec.truncated && !rec.invalid).then(|| Arc::new(rec.cmds))
     });
     let mut m = c.lock().unwrap_or_else(|e| e.into_inner());
     if m.len() > 20_000 {
@@ -456,6 +502,22 @@ mod tests {
 
     fn ink(m: &Mask) -> f32 {
         m.a.iter().sum()
+    }
+
+    #[test]
+    fn pen_caps_path_growth() {
+        let mut pen = Rec::default();
+        OutlinePen::move_to(&mut pen, 0.0, 0.0);
+        for _ in 0..MAX_OUTLINE_ELEMENTS {
+            OutlinePen::line_to(&mut pen, 1.0, 2.0);
+        }
+        assert_eq!(pen.cmds.len(), MAX_OUTLINE_ELEMENTS);
+        assert!(pen.truncated);
+        // drawing before the first move_to records nothing and fails the draw
+        let mut invalid = Rec::default();
+        OutlinePen::line_to(&mut invalid, 1.0, 2.0);
+        OutlinePen::close(&mut invalid);
+        assert!(invalid.invalid && invalid.cmds.is_empty());
     }
 
     #[test]

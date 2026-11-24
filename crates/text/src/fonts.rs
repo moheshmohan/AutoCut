@@ -212,13 +212,29 @@ pub struct VMetrics {
     pub underline_thickness: f32,
 }
 
+/// Largest font file loaded: the biggest real font collections are a few hundred MB.
+const MAX_FONT_FILE_BYTES: u64 = 512 << 20;
+
+/// The bytes of the file at `path`, at most `max`. A size checked earlier can be stale (the file
+/// may have grown since, or never been checked), so the read itself stops one byte past the limit,
+/// and a longer file is an error.
+fn read_capped(path: &std::path::Path, max: u64) -> std::io::Result<Vec<u8>> {
+    use std::io::Read as _;
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)?.take(max.saturating_add(1)).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > max {
+        return Err(std::io::Error::other(format!("font file is larger than {max} bytes")));
+    }
+    Ok(bytes)
+}
+
 impl Face {
     fn bytes(&self) -> Option<&[u8]> {
         self.bytes
             .get_or_init(|| match &self.info.data {
                 FaceData::Static(b) => Some(FaceBytes::Static(b)),
                 FaceData::Shared(b) => Some(FaceBytes::Shared(b.clone())),
-                FaceData::File(p) => std::fs::read(p).ok().map(|v| FaceBytes::Shared(Arc::new(v))),
+                FaceData::File(p) => read_capped(p, MAX_FONT_FILE_BYTES).ok().map(|v| FaceBytes::Shared(Arc::new(v))),
             })
             .as_ref()
             .map(FaceBytes::get)
@@ -249,8 +265,13 @@ impl Face {
     /// file is not loaded yet is read into a temporary buffer that is dropped afterwards, so
     /// probing many system faces does not keep every font file in memory.
     pub fn covers_text(&self, text: &str) -> bool {
+        self.covers_text_within(text, MAX_FONT_FILE_BYTES)
+    }
+    /// [`Face::covers_text`], reading at most `max` bytes of a file not loaded yet (a longer file
+    /// covers nothing).
+    fn covers_text_within(&self, text: &str, max: u64) -> bool {
         if let (FaceData::File(p), None) = (&self.info.data, self.bytes.get()) {
-            let Ok(data) = std::fs::read(p) else { return false };
+            let Ok(data) = read_capped(p, max) else { return false };
             let Ok(font) = FontRef::from_index(&data, self.info.index) else { return false };
             let charmap = font.charmap();
             return text.chars().all(|c| charmap.map(c).is_some_and(|g| g.to_u32() != 0));
@@ -595,13 +616,14 @@ fn system_fallback(c: char, prefer: &Face) -> Option<FaceId> {
     let near = |f: &&Arc<Face>| (f.info.family.starts_with('.'), f.info.italic != prefer.info.italic, f.info.weight.abs_diff(prefer.info.weight));
     let code = c as u32;
     let block = code >> 7;
-    let covers = |f: &Arc<Face>| if f.bytes.get().is_some() { f.has_char(c) } else { f.covers_text(&c.to_string()) };
+    // a face not loaded yet is read for the probe and dropped, at most `max` bytes of it
+    let covers = |f: &Arc<Face>, max: u64| if f.bytes.get().is_some() { f.has_char(c) } else { f.covers_text_within(&c.to_string(), max) };
     let mut found: Option<FaceId> = None;
     // faces named for the script
     if let Some((_, _, hints)) = SCRIPT_HINTS.iter().find(|(a, b, _)| (*a..=*b).contains(&code)) {
         let mut named: Vec<&Arc<Face>> = system.iter().copied().filter(|f| hints.iter().any(|h| f.info.family.contains(h))).collect();
         named.sort_by_key(near);
-        found = named.into_iter().find(|f| covers(f)).map(|f| f.id);
+        found = named.into_iter().find(|f| covers(f, MAX_FONT_FILE_BYTES)).map(|f| f.id);
     }
     // faces in use already (a font the user picked, one found before)
     if found.is_none() {
@@ -626,7 +648,8 @@ fn system_fallback(c: char, prefer: &Face) -> Option<FaceId> {
         };
         let mut all: Vec<&Arc<Face>> = system.iter().copied().filter(small).collect();
         all.sort_by_key(near);
-        found = all.into_iter().find(|f| covers(f)).map(|f| f.id);
+        // the size was checked above, but a file can grow before it is read
+        found = all.into_iter().find(|f| covers(f, MAX_PROBE_BYTES)).map(|f| f.id);
     }
     // the face is used now: keep its bytes, and remember it for the block
     let found = found.filter(|id| face(*id).has_char(c));
@@ -734,6 +757,41 @@ mod tests {
         assert!(f.has_char('A') && f.has_char('Ж'));
         assert!(!f.has_char('\u{5d0}'), "Inter has no Hebrew");
         assert!(f.has_feature(b"liga") || f.has_feature(b"calt"));
+    }
+
+    /// A read stops at its cap, whatever the file has grown to since its size was checked.
+    #[test]
+    fn a_read_is_capped_where_the_file_has_grown() {
+        let path = std::env::temp_dir().join(format!("filmcraft-font-cap-{}", std::process::id()));
+        std::fs::write(&path, b"0123456789").expect("write temp file");
+        assert_eq!(read_capped(&path, 10).expect("ten bytes fit"), b"0123456789");
+        assert!(read_capped(&path, 9).is_err());
+        assert!(read_capped(&path.with_extension("missing"), 9).is_err());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A coverage probe does not read a file past its cap, whatever size the file had when it
+    /// was checked: one grown past the cap covers nothing (and is not kept).
+    #[test]
+    fn coverage_probes_do_not_read_past_their_cap() {
+        let path = std::env::temp_dir().join(format!("filmcraft-covers-text-cap-{}.ttf", std::process::id()));
+        std::fs::write(&path, INTER_REGULAR).expect("write temp font");
+        let cap = INTER_REGULAR.len() as u64 - 1;
+        let info = FaceInfo {
+            family: "Inter".into(),
+            style: "Regular".into(),
+            weight: 400,
+            italic: false,
+            index: 0,
+            data: FaceData::File(path.clone()),
+            origin: "system",
+        };
+        let f = Face { id: 0, info, bytes: OnceLock::new(), shaper: OnceLock::new() };
+        assert!(!f.covers_text_within("A", cap), "a file past the probe cap is not read");
+        assert!(f.bytes.get().is_none());
+        assert!(f.covers_text_within("A", cap + 1));
+        assert!(f.covers_text("A"), "the public probe has the load cap");
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
