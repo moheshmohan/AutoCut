@@ -375,3 +375,20 @@ fn uncompressed_chunk_of_the_wrong_size_fails_before_the_picture_is_allocated() 
     let e = decode("a.exr", &f).err().expect("a wrong-size chunk is an error").to_string();
     assert!(e.contains("chunk 0 has the wrong size"), "{e}");
 }
+
+/// A header can describe a large picture over compressed chunks of a few bytes. The picture used
+/// to be allocated, and without an alpha channel written opaque, before the first chunk failed to
+/// expand: a file of about 200 bytes (one half channel, 2^22 × 16 pixels, ZIP) committed 1 GiB. A
+/// chunk too short to expand to its lines is now refused before the picture exists.
+#[test]
+fn compressed_chunks_too_short_for_their_lines_fail_before_the_picture_is_allocated() {
+    for comp in [1, 3, 5] {
+        let mut f = exr_file(&[("R", 1)], [0, 0, 0, 15], [0, 0, 0, 15], comp, pattern);
+        for name in [&b"dataWindow"[..], b"displayWindow"] {
+            let at = f.windows(name.len()).position(|w| w == name).unwrap() + name.len() + 1 + 6 + 4;
+            f[at..at + 16].copy_from_slice(&box2i([0, 0, (1 << 16) - 1, 15]));
+        }
+        let e = decode("a.exr", &f).err().expect("a chunk too short for its lines is an error").to_string();
+        assert!(e.contains("chunk 0 is too short for its"), "compression {comp}: {e}");
+    }
+}

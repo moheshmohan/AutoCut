@@ -11,6 +11,15 @@
 //! (the format's predictor); a chunk that would not shrink is stored raw, as the format allows.
 use crate::{ExportError, ExrCompression, Result};
 
+/// An empty buffer with room for `len` bytes, or an error when the allocation fails (instead of
+/// aborting the process). The caller already holds the frame, so the second, file-sized buffer
+/// of a large export is the allocation most likely to fail.
+fn output_buffer(len: usize) -> Result<Vec<u8>> {
+    let mut out = Vec::new();
+    out.try_reserve_exact(len).map_err(|_| ExportError::Encode(format!("not enough memory for a {len}-byte frame file")))?;
+    Ok(out)
+}
+
 /// `w * h * 4` when `rgba` holds exactly that many bytes.
 fn checked_len(rgba: &[u8], w: u32, h: u32) -> Result<usize> {
     let n = (w as usize).checked_mul(h as usize).and_then(|n| n.checked_mul(4)).ok_or_else(|| ExportError::Encode("frame size".into()))?;
@@ -22,8 +31,10 @@ fn checked_len(rgba: &[u8], w: u32, h: u32) -> Result<usize> {
 
 /// The RGB bytes of an RGBA8 frame (alpha dropped).
 pub(crate) fn rgb(rgba: &[u8], w: u32, h: u32) -> Result<Vec<u8>> {
-    checked_len(rgba, w, h)?;
-    Ok(rgba.as_chunks::<4>().0.iter().flat_map(|&[r, g, b, _]| [r, g, b]).collect())
+    let n = checked_len(rgba, w, h)?;
+    let mut out = output_buffer(n / 4 * 3)?;
+    out.extend(rgba.as_chunks::<4>().0.iter().flat_map(|&[r, g, b, _]| [r, g, b]));
+    Ok(out)
 }
 
 /// An uncompressed Targa file: 24-bit BGR, or 32-bit BGRA with `alpha` (straight alpha, as the
@@ -36,7 +47,12 @@ pub(crate) fn tga(rgba: &[u8], w: u32, h: u32, alpha: bool) -> Result<Vec<u8>> {
     };
     let bpp: usize = if alpha { 4 } else { 3 };
     let row = w as usize * 4;
-    let mut out = Vec::with_capacity(18 + w as usize * h as usize * bpp + 26);
+    let len = (w as usize)
+        .checked_mul(h as usize)
+        .and_then(|n| n.checked_mul(bpp))
+        .and_then(|n| n.checked_add(18 + 26))
+        .ok_or_else(|| ExportError::Encode("frame size".into()))?;
+    let mut out = output_buffer(len)?;
     out.extend_from_slice(&[0, 0, 2]); // no ID, no colour map, uncompressed true-colour
     out.extend_from_slice(&[0; 5]); // colour map specification (unused)
     out.extend_from_slice(&[0, 0, 0, 0]); // x / y origin
@@ -125,7 +141,7 @@ pub(crate) fn dpx(rgba: &[u8], w: u32, h: u32) -> Result<Vec<u8>> {
     put32(&mut hd, 1632, 1);
     // television header: progressive
     hd[1928] = 0;
-    let mut out = Vec::with_capacity(size);
+    let mut out = output_buffer(size)?;
     out.extend_from_slice(&hd);
     let ten = |v: u8| (u32::from(v) << 2) | (u32::from(v) >> 6);
     for &[r, g, b, _] in rgba.as_chunks::<4>().0 {
@@ -220,7 +236,7 @@ pub(crate) fn exr(rgba: &[u8], w: u32, h: u32, alpha: bool, compression: ExrComp
     let body = (h as usize).checked_mul(line + 8);
     let size = table.zip(body).and_then(|(t, b)| hd.len().checked_add(t)?.checked_add(b)).ok_or_else(|| ExportError::Encode("frame size".into()))?;
     // the uncompressed size: compressed chunks only shrink it
-    let mut out = Vec::with_capacity(size);
+    let mut out = output_buffer(size)?;
     out.extend_from_slice(&hd);
     let table_at = out.len();
     out.resize(table_at + chunks * 8, 0);
@@ -551,6 +567,13 @@ mod tests {
             }
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A frame-sized output buffer that cannot be allocated is an error, not an abort.
+    #[test]
+    fn a_failed_output_allocation_is_an_error() {
+        assert!(matches!(output_buffer(usize::MAX), Err(ExportError::Encode(_))));
+        assert!(output_buffer(16).is_ok_and(|b| b.is_empty() && b.capacity() >= 16));
     }
 
     #[test]

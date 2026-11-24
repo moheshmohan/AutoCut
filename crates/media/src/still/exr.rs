@@ -38,6 +38,11 @@ const MAX_CHANNELS: usize = 1024;
 /// (16 lines of a 16K-wide, 8-channel float image is 8 MB); a hostile header naming a thousand
 /// channels on a 64M-pixel-wide line would otherwise ask for hundreds of GB.
 const MAX_CHUNK_BYTES: usize = 256 << 20;
+/// Most bytes one byte of RLE data expands to: a two-byte run is at most 128 bytes.
+const MAX_RLE_EXPANSION: usize = 64;
+/// Most bytes one byte of a zlib stream inflates to: deflate's longest match (258 bytes) takes at
+/// least two bits.
+const MAX_ZLIB_EXPANSION: usize = 1032;
 
 /// Whether `b` starts like an OpenEXR file.
 pub fn sniff(b: &[u8]) -> bool {
@@ -430,6 +435,8 @@ pub fn decode(name: &str, b: &[u8]) -> Result<Decoded> {
     if decoded_bytes > MAX_DECODED_BYTES {
         return Err(MediaError::Unsupported(format!("{name}: EXR decoded buffers exceed the {MAX_DECODED_BYTES}-byte limit")));
     }
+    // PXR24 byte planes of one scan line
+    let pxr24_line = h.channels.iter().try_fold(0usize, |t, c| t.checked_add(plane_count(c.ty).checked_mul(dw)?));
     let chunks = dh.div_ceil(lpc);
     let table_end = table.checked_add(chunks.checked_mul(8).ok_or_else(|| bad("offset table size".into()))?).ok_or_else(|| bad("offset table size".into()))?;
     if table_end > b.len() {
@@ -449,19 +456,28 @@ pub fn decode(name: &str, b: &[u8]) -> Result<Decoded> {
         if y.map(i64::from) != Some(want) {
             return Err(bad(format!("chunk {i} is not at line {want}")));
         }
-        // stored raw: its length follows from the geometry, so check it before the output exists
-        if matches!(h.compression, Compression::None) && size != line.checked_mul(lpc.min(dh - i * lpc)).ok_or_else(|| bad("chunk size".into()))? {
-            return Err(bad(format!("chunk {i} has the wrong size")));
+        // stored raw: its length follows from the geometry, so check it before the output exists;
+        // compressed, it must be long enough to expand to its lines, or a file of a few hundred
+        // bytes could have the whole picture allocated (and, without alpha, written) before its
+        // first chunk fails to decode
+        let n = lpc.min(dh - i * lpc);
+        let expected = line.checked_mul(n).ok_or_else(|| bad("chunk size".into()))?;
+        let packed = match h.compression {
+            _ if size == expected => None,
+            Compression::None => return Err(bad(format!("chunk {i} has the wrong size"))),
+            Compression::Rle => Some((expected, size.saturating_mul(MAX_RLE_EXPANSION))),
+            Compression::Zip => Some((expected, size.saturating_mul(MAX_ZLIB_EXPANSION))),
+            Compression::Pxr24 => {
+                let planes = pxr24_line.and_then(|l| l.checked_mul(n)).ok_or_else(|| bad("chunk size".into()))?;
+                Some((planes, size.saturating_mul(MAX_ZLIB_EXPANSION)))
+            }
+        };
+        if packed.is_some_and(|(need, most)| need > most) {
+            return Err(bad(format!("chunk {i} is too short for its {n} lines")));
         }
     }
+    // zeroed pages are committed only as chunks write them
     let mut px = vec![0f32; px_len];
-    if !alpha {
-        px.par_chunks_mut(4).for_each(|p| {
-            if let Some(a) = p.get_mut(3) {
-                *a = 1.0;
-            }
-        });
-    }
     let row = dw * 4;
     px.par_chunks_mut(row * lpc).enumerate().try_for_each(|(i, rows)| -> Result<()> {
         let n = rows.len() / row;
@@ -484,13 +500,16 @@ pub fn decode(name: &str, b: &[u8]) -> Result<Decoded> {
                 Compression::Rle => unpredict(unrle(data, expected).ok_or_else(|| bad(format!("chunk {i}: bad RLE data")))?).into(),
                 Compression::Zip => unpredict(inflate::zlib(data, expected).map_err(|e| bad(format!("chunk {i}: {e}")))?).into(),
                 Compression::Pxr24 => {
-                    let per_line = h.channels.iter().try_fold(0usize, |t, c| t.checked_add(plane_count(c.ty).checked_mul(dw)?));
-                    let planes = per_line.and_then(|l| l.checked_mul(n)).ok_or_else(|| bad("chunk size".into()))?;
+                    let planes = pxr24_line.and_then(|l| l.checked_mul(n)).ok_or_else(|| bad("chunk size".into()))?;
                     let inflated = inflate::zlib(data, planes).map_err(|e| bad(format!("chunk {i}: {e}")))?;
                     unpxr24(&inflated, &h.channels, dw, n).ok_or_else(|| bad(format!("chunk {i}: bad PXR24 data")))?.into()
                 }
             }
         };
+        // no alpha channel: opaque, filled once the chunk's data is in hand
+        if !alpha {
+            rows.as_chunks_mut::<4>().0.iter_mut().for_each(|p| p[3] = 1.0);
+        }
         for (l, out) in rows.chunks_exact_mut(row).enumerate() {
             let src = raw.get(l * line..(l + 1) * line).unwrap_or_default();
             for ((c, &t), &o) in h.channels.iter().zip(&targets).zip(&offs) {

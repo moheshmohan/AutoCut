@@ -13,6 +13,12 @@ const HEADER: usize = 18;
 const FOOTER: &[u8] = b"TRUEVISION-XFILE.\0";
 /// Largest picture we decode (16384 × 16384): bounds the allocation a header can ask for.
 const MAX_PIXELS: usize = 1 << 28;
+/// Most bytes one decode may hold at once: the stored values, the RGBA8 picture and the colour
+/// map together, checked before anything is allocated. An 8192 × 8192 32-bit file needs 512 MiB
+/// (256 MiB stored + 256 MiB RGBA); 768 MiB leaves room for a colour map and for taller pictures of
+/// fewer bytes a pixel (8192 × 16384 grayscale is 640 MiB), while a header claiming 2^28 pixels
+/// (at least 1.25 GiB) is refused, however few run-length bytes back it.
+const MAX_DECODED_BYTES: usize = 768 << 20;
 
 fn err(name: &str, what: &str) -> MediaError {
     MediaError::Decode(format!("{name}: Targa: {what}"))
@@ -88,6 +94,26 @@ impl Layout {
 
 /// Decode a Targa file to straight-alpha RGBA8, top row first.
 pub fn decode(name: &str, bytes: &[u8]) -> Result<Raster> {
+    decode_within(name, bytes, MAX_DECODED_BYTES)
+}
+
+/// Bytes a decode holds at once: `pixels` stored values of `bpp` bytes, the RGBA8 picture and, when
+/// the file has one, a colour map of `map_len` entries.
+fn decoded_bytes(pixels: usize, bpp: usize, map_len: Option<usize>) -> Option<usize> {
+    let palette = map_len.map_or(Some(0), |n| n.checked_mul(4))?;
+    pixels.checked_mul(bpp)?.checked_add(pixels.checked_mul(4)?)?.checked_add(palette)
+}
+
+/// An empty buffer with room for `n` values, or an error when the allocation fails (instead of
+/// aborting the process).
+fn reserve<T>(name: &str, n: usize) -> Result<Vec<T>> {
+    let mut v = Vec::new();
+    v.try_reserve_exact(n).map_err(|_| err(name, "not enough memory to decode the picture"))?;
+    Ok(v)
+}
+
+/// [`decode`] with `budget` as the most bytes the decode may hold ([`MAX_DECODED_BYTES`]).
+fn decode_within(name: &str, bytes: &[u8], budget: usize) -> Result<Raster> {
     let h = bytes.first_chunk::<HEADER>().ok_or_else(|| err(name, "truncated header"))?;
     let (id_len, map_type, kind) = (usize::from(h[0]), h[1], h[2]);
     let map_first = usize::from(u16::from_le_bytes([h[3], h[4]]));
@@ -103,20 +129,11 @@ pub fn decode(name: &str, bytes: &[u8]) -> Result<Raster> {
     let pixels = w.checked_mul(ht).filter(|&n| n <= MAX_PIXELS).ok_or_else(|| err(name, "picture too large"))?;
     let rle = kind >= 9;
     // stored value layout and, for colour-mapped images, the palette
-    let mut palette: Vec<[u8; 4]> = Vec::new();
     let map_entry_layout = if map_type == 1 {
         Some(Layout::true_colour(map_depth, if map_depth == 16 { attr_bits.min(1) } else { 0 }).ok_or_else(|| err(name, "colour map entry size"))?)
     } else {
         None
     };
-    let mut at = HEADER.checked_add(id_len).ok_or_else(|| err(name, "header"))?;
-    if let Some(l) = map_entry_layout {
-        let size = map_len.checked_mul(l.bytes()).ok_or_else(|| err(name, "colour map"))?;
-        let end = at.checked_add(size).ok_or_else(|| err(name, "colour map"))?;
-        let map = bytes.get(at..end).ok_or_else(|| err(name, "truncated colour map"))?;
-        palette = map.chunks_exact(l.bytes()).map(|e| l.rgba(e)).collect();
-        at = end;
-    }
     let (layout, mapped) = match kind & 7 {
         1 => {
             if map_type != 1 || !matches!(depth, 8 | 16) {
@@ -132,16 +149,36 @@ pub fn decode(name: &str, bytes: &[u8]) -> Result<Raster> {
         },
         _ => return Err(MediaError::Unsupported(format!("{name}: Targa image type {kind}"))),
     };
-    let data = bytes.get(at..).unwrap_or_default();
     let bpp = layout.bytes();
+    // everything the decode holds at once, checked before any of it is allocated (a run-length
+    // file of a few MB can otherwise claim 2^28 pixels: 1 GiB stored, then 1 GiB of RGBA)
+    if decoded_bytes(pixels, bpp, map_entry_layout.map(|_| map_len)).is_none_or(|n| n > budget) {
+        return Err(err(name, "picture too large to decode"));
+    }
+    let mut at = HEADER.checked_add(id_len).ok_or_else(|| err(name, "header"))?;
+    let mut palette: Vec<[u8; 4]> = Vec::new();
+    if let Some(l) = map_entry_layout {
+        let size = map_len.checked_mul(l.bytes()).ok_or_else(|| err(name, "colour map"))?;
+        let end = at.checked_add(size).ok_or_else(|| err(name, "colour map"))?;
+        let map = bytes.get(at..end).ok_or_else(|| err(name, "truncated colour map"))?;
+        palette = reserve(name, map_len)?;
+        palette.extend(map.chunks_exact(l.bytes()).map(|e| l.rgba(e)));
+        at = end;
+    }
+    let data = bytes.get(at..).unwrap_or_default();
     // the stored values, in file order
     let stored: Vec<u8> = if rle {
         unpack_rle(name, data, pixels, bpp)?
     } else {
         let n = pixels.checked_mul(bpp).ok_or_else(|| err(name, "picture too large"))?;
-        data.get(..n).ok_or_else(|| err(name, "truncated pixel data"))?.to_vec()
+        let source = data.get(..n).ok_or_else(|| err(name, "truncated pixel data"))?;
+        let mut values = reserve(name, n)?;
+        values.extend_from_slice(source);
+        values
     };
-    let mut rgba = vec![0u8; pixels * 4];
+    let rgba_len = pixels.checked_mul(4).ok_or_else(|| err(name, "picture too large"))?;
+    let mut rgba = reserve(name, rgba_len)?;
+    rgba.resize(rgba_len, 0u8);
     for (i, v) in stored.chunks_exact(bpp).enumerate().take(pixels) {
         let (x, y) = (i % w, i / w);
         let x = if right_to_left { w - 1 - x } else { x };
@@ -180,7 +217,7 @@ fn unpack_rle(name: &str, mut data: &[u8], pixels: usize, bpp: usize) -> Result<
         return Err(err(name, "truncated run-length data"));
     }
     let total = pixels.checked_mul(bpp).ok_or_else(|| err(name, "picture too large"))?;
-    let mut out = Vec::with_capacity(total);
+    let mut out = reserve(name, total)?;
     while out.len() < total {
         let (&head, rest) = data.split_first().ok_or_else(|| err(name, "truncated run-length data"))?;
         let count = usize::from(head & 0x7F) + 1;
@@ -283,6 +320,63 @@ mod tests {
             f.truncate(n);
             let _ = decode("a.tga", &f);
         }
+    }
+
+    /// The error a decode ended with ("" when it succeeded).
+    fn refusal(r: Result<Raster>) -> String {
+        r.err().map(|e| e.to_string()).unwrap_or_default()
+    }
+
+    /// The budget covers the stored values and the RGBA picture before a run-length file is
+    /// expanded: 256 pixels of 32-bit BGRA hold 1024 + 1024 bytes.
+    #[test]
+    fn aggregate_decode_budget_applies_before_rle_expansion() {
+        let mut f = header(10, 16, 16, 32, 0x28);
+        f.extend_from_slice(&[255, 0, 0, 255, 255, 255, 0, 0, 255, 255]);
+        let e = refusal(decode_within("a.tga", &f, 2047));
+        assert!(e.contains("too large to decode"), "{e}");
+        assert_eq!(decode_within("a.tga", &f, 2048).unwrap().rgba.len(), 1024);
+    }
+
+    /// A header claiming 2^28 32-bit pixels is refused by the budget, before the run-length data
+    /// (here none) is looked at.
+    #[test]
+    fn default_budget_rejects_large_rle_header_without_large_fixture() {
+        let e = refusal(decode("a.tga", &header(10, 16384, 16384, 32, 0x28)));
+        assert!(e.contains("too large to decode"), "{e}");
+    }
+
+    /// 4 MiB of run-length packets (two bytes for 128 gray pixels) really do describe 16384 ×
+    /// 16384 pixels; decoding them took 256 MiB stored plus 1 GiB of RGBA. The budget refuses it.
+    #[test]
+    fn a_few_megabytes_of_rle_cannot_claim_a_quarter_gigapixel() {
+        let mut f = header(11, 16384, 16384, 8, 0x20);
+        f.extend_from_slice(&[0xFF, 7].repeat((16384 * 16384) / 128));
+        let e = refusal(decode("a.tga", &f));
+        assert!(e.contains("too large to decode"), "{e}");
+    }
+
+    /// The stored values of a raw file and the colour map count as well: one 8-bit index (1
+    /// byte), its RGBA (4) and a one-entry map (4) are 9 bytes.
+    #[test]
+    fn aggregate_decode_budget_counts_raw_and_palette_storage() {
+        let mut f = header(1, 1, 1, 8, 0x20);
+        f[1] = 1;
+        f[5] = 1;
+        f[7] = 24;
+        f.extend_from_slice(&[0, 0, 255, 0]);
+        let e = refusal(decode_within("a.tga", &f, 8));
+        assert!(e.contains("too large to decode"), "{e}");
+        assert_eq!(decode_within("a.tga", &f, 9).unwrap().rgba, [255, 0, 0, 255]);
+    }
+
+    /// 8K × 8K files still open: 32 bits a pixel, also with the largest colour map.
+    #[test]
+    fn an_8k_square_picture_fits_the_budget() {
+        let side = 8192;
+        assert!(decoded_bytes(side * side, 4, None).is_some_and(|n| n <= MAX_DECODED_BYTES));
+        assert!(decoded_bytes(side * side, 2, Some(65535)).is_some_and(|n| n <= MAX_DECODED_BYTES));
+        assert!(decoded_bytes(MAX_PIXELS, 1, None).is_some_and(|n| n > MAX_DECODED_BYTES));
     }
 
     #[test]
