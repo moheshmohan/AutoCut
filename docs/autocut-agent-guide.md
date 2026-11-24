@@ -91,7 +91,7 @@ Read these before you touch anything.
 
 | What | Where / value |
 |---|---|
-| CLI | `.mcp.json` and production workflows use `target/release/filmcraft-cli`, installed with the tested AutoCut app. `target/agent-main/release/filmcraft-cli` is the development candidate. The [November upstream/pipeline upgrade](../plan/pipeline-upgrades-2026-11.md) retains the AI features; the build of 20 November 2026 exposes 925 commands. Package and verify the candidate before replacing production; keep rollback copies. Builds still report `0.12.0`, so inspect the packaged commit and command catalogue too. |
+| CLI | `.mcp.json` and production workflows use `target/release/filmcraft-cli`, installed with the tested AutoCut app. `target/agent-main/release/filmcraft-cli` is the development candidate. The [November upstream/pipeline upgrade](../plan/pipeline-upgrades-2026-11.md) retains the AI features; the build of 20 November 2026 exposes 925 commands. Package and verify the candidate before replacing production; keep rollback copies. Builds report the workspace version (0.13.0 since the first tagged release, 24 November 2026; [releases](autocut-releases.md)); between releases, inspect the packaged commit and command catalogue too. |
 | Building your own CLI | `CARGO_TARGET_DIR=target/agent-<name> cargo build --release -p filmcraft-cli`, one target folder per worktree, never shared. |
 | The app | `target/macos-package/AutoCut.app`, control port **9877**: `open -n --env FILMCRAFT_CONTROL_PORT=9877 target/macos-package/AutoCut.app` |
 | RAEA | `~/.raea/versions/0.1.8/bin/raea` for local custom animations, 3D scenes and effects (0.1.0 kept beside it). [Render and import workflow](raea-workflow.md). |

@@ -302,3 +302,32 @@ A lane gate, not the full `cargo xtask ci` (that is the main session's, after th
   new function.
 
 The next upstream review starts at `ba6fe105`; the next craft-libs review at `249a41bd9`.
+
+## Ported for AutoCut 0.13.0 (AV78–AV90, 24 November 2026)
+
+The "Listed, not ported" correctness fixes 1–7 and the `port-small` speed items were ported the
+same day in three more lanes (own worktrees and targets, lane gates each), cherry-picked onto main
+after AV77, PX8.4 and AV91. HEVC 4:2:2 (`bb57d422d0`) waits for the next release (the user's
+decision); the other `list` items stay listed.
+
+| Commit | Port | craft-libs / upstream |
+|---|---|---|
+| AV78 | AAC: PCE speaker order, failed units leave no state, HE-AAC 481-sample SBR delay, LATM channels and PCE, strict element placement, 0x2b7 extension | `2b35d24324`, `555be7c20c`, `e98f3d47b3`, rest of `542ca365e2` / `ac8c5aae5d` |
+| AV79 | AAC encoder: fill inside the decoder buffer, exact CBR limits, writers return `Result`, export floor max(6000, rate/4) bit/s per channel | `ca99f91a18`, `098eb2e43a` (AAC), writer parts of `542ca365e2` / `ac8c5aae5d` |
+| AV80 | Opus concealment, damaged-FLAC timing, AIFF-C codes, FLAC wasted bits and rate codes | `861c5e172d`, `f19f131247`, `d26e89917a` (wav), `82f63f3a4f`, `7c88c201a5` |
+| AV81 | Drop-frame time code carry | `97080c57f8` |
+| AV82 | Compound files: chain loops, repeated FAT sectors, 1 GiB stream cap; strict root mini-stream chain | `f759a35db8`, craft-cfb extraction `06af3f2d4` |
+| AV83 | AAF source starts at the referenced slot's rate (old FilmCraft-written files recognised and read as before), master names, locator URLs, flattened-selector report | `3728fd1ffb`, `70fabd64dc`, `d6134e51cb`, `584d87f9e1` |
+| AV84 | Captions: TTML, WebVTT, SRT, SCC, MCC, EBU STL fixes | `86e59ebc08`, `fdbb9c2471`, `0dcef63a88` |
+| AV85 | MPEG-TS access units, recovery points, PCR_PID, damaged/scrambled/repeated packets; MXF writer edit rate | `471abca087` (= upstream `f2a01712`, `a76f1ab0`, `157cc6b5`, `cd531316`), `9a08c77871`, `45ddc4ffa6`, `9d21479d7a` |
+| AV86 | AVI decimal stream ids, idx1 recovery, bounded decoded-packet caches | upstream `53b937ab`, `e382b599`, `c5897a30`, `f99d53dd`, `9463ed6f` |
+| AV87 | Ogg lost pages, chained links reusing a serial, trailing Opus packets | rest of `6865897f14`, `27f2204603` |
+| AV88 | MP4 `roll` group for AAC; `FileReader` truncation and relative paths | `3dadce4d7c` (muxer), `e44720af47`, `a1f8141307` |
+| AV89 | Targa footer, DJI DNG strips, QuickTime 24-bit row padding, AVI BI_BITFIELDS masks, HEVC chroma bit depth | `1985afe943`, `60f7c5d74f`, `786c5571f0`, `f57db543da`, `c3ad96bfd8`, `77f244cb96` |
+| AV90 | Bit reader fast paths, Ogg CRC slice-by-16, Y4M frame times | `b25d6e4797`, `ee76ffe8d8`, `62eae4e4cc`, `44b4a23137` (= upstream `6763f9bf`), `3de39fd3a5` |
+
+Left out, with reasons in the commit messages: per-frame AAC encoder buffering and craft-libs
+builder APIs (no counterpart here), `frames_between`, craft-cfb's lenient-reading features, the
+`VideoFrame` refactor, Ogg FLAC/Speex/Theora handling. Noticed, not changed: the AAF tape
+timecode offset still converts at the file slot's rate (the fork writes 0 there), and
+`crates/captions/tests/it/ttml_clock_overflow.rs` is never compiled (no `main.rs`).

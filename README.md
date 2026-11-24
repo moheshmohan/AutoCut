@@ -49,6 +49,14 @@ do and do not show.
 
 ## Run it
 
+### Download (macOS, Apple silicon)
+
+The [latest release](https://github.com/moheshmohan/AutoCut/releases/latest) has the app
+(`autocut-<version>-macos-aarch64.dmg`) and the command line and MCP server
+(`filmcraft-cli-<version>-macos-aarch64.zip`); what changed is in
+[docs/autocut-releases.md](docs/autocut-releases.md). The app is ad-hoc signed, not notarized:
+the first time, right-click AutoCut.app and choose **Open**. Other systems build from source, below.
+
 ### What you need
 
 - **A Mac with Apple silicon** for the local AI pipeline (tested on an M3 Max with 36 GB). The editor
