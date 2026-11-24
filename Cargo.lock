@@ -1384,7 +1384,7 @@ source = "git+https://github.com/storytold/craft-libs?rev=5a7a63a21dd03dd1a2bc6c
 [[package]]
 name = "craft-docpath"
 version = "0.1.0"
-source = "git+https://github.com/storytold/craft-libs?rev=82a24b006eefa036b43c09a67fb9a3fbd17ffe63#82a24b006eefa036b43c09a67fb9a3fbd17ffe63"
+source = "git+https://github.com/storytold/craft-libs?rev=3c5e0201e03ebf3a5a2811bc2784d1ea9971ea88#3c5e0201e03ebf3a5a2811bc2784d1ea9971ea88"
 
 [[package]]
 name = "craft-ecproj-format"
