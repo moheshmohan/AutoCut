@@ -10,16 +10,38 @@ use crate::state::FrameState;
 /// equals CurrFrame). Bands of 64 luma rows (whole 8x8 blocks) are filtered in parallel: every
 /// block reads only CurrFrame and writes only its own samples.
 pub(crate) fn apply(fs: &FrameState, pool: &Pool) -> Option<FrameBuf> {
-    let fh = &fs.fh;
-    if fh.coded_lossless || fh.allow_intrabc || !fs.seq.enable_cdef {
+    if !enabled(fs) {
         return None;
     }
-    let (mi_rows, mi_cols) = (fh.mi_rows as usize, fh.mi_cols as usize);
     let mut out = fs.cur.clone();
-    let ranges = bands(pool, mi_rows * 4);
-    let mut planes = out.row_bands(&ranges);
+    let ranges = bands(pool, fs.fh.mi_rows as usize * 4);
+    let any = filter_bands(fs, pool, out.row_bands(&ranges), &ranges);
+    any.then_some(out)
+}
+
+/// Whether the frame header lets CDEF run at all.
+fn enabled(fs: &FrameState) -> bool {
+    let fh = &fs.fh;
+    !(fh.coded_lossless || fh.allow_intrabc || !fs.seq.enable_cdef)
+}
+
+/// Whether CDEF filters any 8x8 block of the frame (it reads only parse results): a block with
+/// a CDEF index and a coded (not skipped) 4x4 block.
+pub(crate) fn active(fs: &FrameState) -> bool {
+    if !enabled(fs) {
+        return false;
+    }
+    let (mi_rows, mi_cols) = (fs.fh.mi_rows as usize, fs.fh.mi_cols as usize);
+    (0..mi_rows).step_by(2).any(|r| (0..mi_cols).step_by(2).any(|c| fs.cdef_idx(r & !15, c & !15) >= 0 && !block_skipped(fs, r, c)))
+}
+
+/// Filter the bands `planes` covering luma rows `ranges` (whole 8x8 block rows), which hold
+/// CurrFrame; reads CurrFrame up to 2 rows beyond each band. Returns whether any block was
+/// filtered.
+pub(crate) fn filter_bands(fs: &FrameState, pool: &Pool, mut planes: Vec<[RowBand; 3]>, ranges: &[(usize, usize)]) -> bool {
+    let (mi_rows, mi_cols) = (fs.fh.mi_rows as usize, fs.fh.mi_cols as usize);
     let any = pool.map_mut(&mut planes, |b, band| {
-        let (start, end) = ranges[b];
+        let Some(&(start, end)) = ranges.get(b) else { return false };
         let mut any = false;
         let mut r = start / 4;
         while r < mi_rows.min(end / 4) {
@@ -35,15 +57,18 @@ pub(crate) fn apply(fs: &FrameState, pool: &Pool) -> Option<FrameBuf> {
         }
         any
     });
-    drop(planes);
-    any.contains(&true).then_some(out)
+    any.contains(&true)
+}
+
+/// Whether all four 4x4 blocks of the 8x8 block at (r, c) are skipped (or outside the frame).
+fn block_skipped(fs: &FrameState, r: usize, c: usize) -> bool {
+    let mi = &fs.mi;
+    let sk = |rr: usize, cc: usize| -> bool { if rr < mi.rows && cc < mi.cols { mi.skip[mi.idx(rr, cc)] } else { true } };
+    sk(r, c) && sk(r + 1, c) && sk(r, c + 1) && sk(r + 1, c + 1)
 }
 
 fn cdef_block(fs: &FrameState, out: &mut [RowBand; 3], r: usize, c: usize, idx: usize) -> bool {
-    let mi = &fs.mi;
-    let sk = |rr: usize, cc: usize| -> bool { if rr < mi.rows && cc < mi.cols { mi.skip[mi.idx(rr, cc)] } else { true } };
-    let skip = sk(r, c) && sk(r + 1, c) && sk(r, c + 1) && sk(r + 1, c + 1);
-    if skip {
+    if block_skipped(fs, r, c) {
         return false;
     }
     let coeff_shift = fs.bit_depth - 8;

@@ -1,7 +1,6 @@
 //! Hostile-input robustness: truncation, header-region sweeps and random mutation of small
 //! ffmpeg-generated AV1 streams (frame by frame) must never panic or run away. Skips without ffmpeg.
 
-use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -28,19 +27,30 @@ struct Seed {
     lavfi: &'static str,
     frames: u32,
     pix: &'static str,
+    /// Decoder thread counts, run side by side on every mutation.
+    threads: &'static [usize],
 }
 
 const SMALL: &str = "testsrc2=size=64x48:rate=25";
 const AOM: &str = "-cpu-used 8 -g 3";
+const PAIR: &[usize] = &[1, 3];
 
 const SEEDS: &[Seed] = &[
-    Seed { name: "av1_fz_default", encoder: "libsvtav1", args: "-g 4", lavfi: SMALL, frames: 6, pix: "yuv420p" },
-    Seed { name: "av1_fz_10bit", encoder: "libsvtav1", args: "-g 6", lavfi: SMALL, frames: 6, pix: "yuv420p10le" },
-    Seed { name: "av1_fz_444", encoder: "libaom-av1", args: AOM, lavfi: SMALL, frames: 3, pix: "yuv444p" },
-    Seed { name: "av1_fz_422_10bit", encoder: "libaom-av1", args: AOM, lavfi: SMALL, frames: 3, pix: "yuv422p10le" },
-    Seed { name: "av1_fz_12bit", encoder: "libaom-av1", args: AOM, lavfi: SMALL, frames: 3, pix: "yuv420p12le" },
-    Seed { name: "av1_fz_mono", encoder: "libaom-av1", args: AOM, lavfi: SMALL, frames: 3, pix: "gray" },
-    Seed { name: "av1_fz_screen", encoder: "libaom-av1", args: "-cpu-used 8 -g 3 -aom-params tune-content=screen", lavfi: SMALL, frames: 3, pix: "yuv420p" },
+    Seed { name: "av1_fz_default", encoder: "libsvtav1", args: "-g 4", lavfi: SMALL, frames: 6, pix: "yuv420p", threads: PAIR },
+    Seed { name: "av1_fz_10bit", encoder: "libsvtav1", args: "-g 6", lavfi: SMALL, frames: 6, pix: "yuv420p10le", threads: PAIR },
+    Seed { name: "av1_fz_444", encoder: "libaom-av1", args: AOM, lavfi: SMALL, frames: 3, pix: "yuv444p", threads: PAIR },
+    Seed { name: "av1_fz_422_10bit", encoder: "libaom-av1", args: AOM, lavfi: SMALL, frames: 3, pix: "yuv422p10le", threads: PAIR },
+    Seed { name: "av1_fz_12bit", encoder: "libaom-av1", args: AOM, lavfi: SMALL, frames: 3, pix: "yuv420p12le", threads: PAIR },
+    Seed { name: "av1_fz_mono", encoder: "libaom-av1", args: AOM, lavfi: SMALL, frames: 3, pix: "gray", threads: PAIR },
+    Seed {
+        name: "av1_fz_screen",
+        encoder: "libaom-av1",
+        args: "-cpu-used 8 -g 3 -aom-params tune-content=screen",
+        lavfi: SMALL,
+        frames: 3,
+        pix: "yuv420p",
+        threads: PAIR,
+    },
     Seed {
         name: "av1_fz_tiles",
         encoder: "libaom-av1",
@@ -48,6 +58,7 @@ const SEEDS: &[Seed] = &[
         lavfi: "testsrc2=size=256x128:rate=25",
         frames: 3,
         pix: "yuv420p",
+        threads: PAIR,
     },
     Seed {
         name: "av1_fz_superres",
@@ -56,6 +67,7 @@ const SEEDS: &[Seed] = &[
         lavfi: "testsrc2=size=128x64:rate=25",
         frames: 3,
         pix: "yuv420p",
+        threads: PAIR,
     },
     Seed {
         name: "av1_fz_grain",
@@ -64,6 +76,22 @@ const SEEDS: &[Seed] = &[
         lavfi: "testsrc2=size=64x48:rate=25,noise=alls=20:allf=t",
         frames: 3,
         pix: "yuv420p",
+        threads: PAIR,
+    },
+];
+
+/// Several superblock rows decoded with many frame threads, so corrupt references meet frames
+/// already predicting from their top rows (row wavefront); one of them in two tile columns.
+const ROW_SEEDS: &[Seed] = &[
+    Seed { name: "av1_fz_rows", encoder: "libsvtav1", args: "-g 6", lavfi: "testsrc2=size=64x136:rate=25", frames: 6, pix: "yuv420p", threads: &[1, 8] },
+    Seed {
+        name: "av1_fz_rows_tiles",
+        encoder: "libsvtav1",
+        args: "-g 6 -svtav1-params tile-columns=1",
+        lavfi: "testsrc2=size=192x136:rate=25",
+        frames: 3,
+        pix: "yuv420p",
+        threads: &[1, 4],
     },
 ];
 
@@ -112,25 +140,34 @@ fn count_panics() {
     });
 }
 
-fn run_all(frames: &[Vec<u8>], label: &str) {
+fn run_all(frames: &[Vec<u8>], threads: &[usize], label: &str) {
     filmcraft_testkit::set_progress(label);
     count_panics();
     let before = PANICS.load(Ordering::SeqCst);
-    let res = catch_unwind(AssertUnwindSafe(|| {
-        for threads in [1, 3] {
-            let mut dec = Decoder::with_threads(threads);
-            for (i, f) in frames.iter().enumerate() {
-                let _ = dec.decode_pts(f, i as i64);
-            }
-            let _ = dec.flush_result();
-        }
-    }));
-    assert!(res.is_ok() && PANICS.load(Ordering::SeqCst) == before, "panic: {label}");
+    // Every thread count decodes the stream at the same time, each on a thread of its own.
+    let ok = std::thread::scope(|s| {
+        let runs: Vec<_> = threads
+            .iter()
+            .map(|&threads| {
+                s.spawn(move || {
+                    let mut dec = Decoder::with_threads(threads);
+                    for (i, f) in frames.iter().enumerate() {
+                        let _ = dec.decode_pts(f, i as i64);
+                    }
+                    let _ = dec.flush_result();
+                })
+            })
+            .collect();
+        // Join every run (no short cut), then check them all.
+        let joined: Vec<bool> = runs.into_iter().map(|r| r.join().is_ok()).collect();
+        joined.into_iter().all(|ok| ok)
+    });
+    assert!(ok && PANICS.load(Ordering::SeqCst) == before, "panic: {label}");
 }
 
 /// The unmutated seed decodes without error, so the sweep starts from a stream that reaches every stage.
-fn decodes_cleanly(frames: &[Vec<u8>], name: &str) {
-    for threads in [1, 3] {
+fn decodes_cleanly(frames: &[Vec<u8>], threads: &[usize], name: &str) {
+    for &threads in threads {
         let mut dec = Decoder::with_threads(threads);
         let mut shown = 0;
         for (i, f) in frames.iter().enumerate() {
@@ -151,12 +188,18 @@ const DEADLINE_SECS: u64 = 600;
 
 #[test]
 fn hostile_streams_never_panic() {
-    filmcraft_testkit::with_deadline(DEADLINE_SECS, sweep);
+    filmcraft_testkit::with_deadline(DEADLINE_SECS, || sweep(SEEDS));
 }
 
-fn sweep() {
+/// The seeds with several superblock rows, in a test of their own so they run beside the others.
+#[test]
+fn hostile_streams_with_superblock_rows_never_panic() {
+    filmcraft_testkit::with_deadline(DEADLINE_SECS, || sweep(ROW_SEEDS));
+}
+
+fn sweep(seeds: &'static [Seed]) {
     let Some(ff) = filmcraft_testkit::ffmpeg_or_skip("AV1 fuzz") else { return };
-    for s in SEEDS {
+    for s in seeds {
         let name = s.name;
         if !filmcraft_testkit::ffmpeg_has_encoder(&ff, s.encoder) {
             filmcraft_testkit::skip("AV1 fuzz", &format!("this ffmpeg has no {} encoder (seed {name})", s.encoder));
@@ -169,14 +212,14 @@ fn sweep() {
             filmcraft_testkit::skip("AV1 fuzz", &format!("the {name} seed has no frames"));
             continue;
         }
-        decodes_cleanly(&seed, name);
+        decodes_cleanly(&seed, s.threads, name);
         // truncate each of the first frames at every length
         for fi in 0..seed.len().min(3) {
             let len = seed[fi].len();
             for n in (0..len).step_by((len / 200).max(1)) {
                 let mut d = seed.clone();
                 d[fi].truncate(n);
-                run_all(&d, &format!("{name} frame {fi} truncate {n}"));
+                run_all(&d, s.threads, &format!("{name} frame {fi} truncate {n}"));
             }
         }
         // header region of every frame: every byte to a few values, every bit
@@ -185,12 +228,12 @@ fn sweep() {
                 for v in [0u8, 0xff, 0x80, 0x01, 0x7f] {
                     let mut d = seed.clone();
                     d[fi][p] = v;
-                    run_all(&d, &format!("{name} frame {fi} byte {p}={v:#x}"));
+                    run_all(&d, s.threads, &format!("{name} frame {fi} byte {p}={v:#x}"));
                 }
                 for b in 0..8 {
                     let mut d = seed.clone();
                     d[fi][p] ^= 1 << b;
-                    run_all(&d, &format!("{name} frame {fi} flip {p}.{b}"));
+                    run_all(&d, s.threads, &format!("{name} frame {fi} flip {p}.{b}"));
                 }
             }
         }
@@ -209,7 +252,7 @@ fn sweep() {
                     d[fi][p] = rng.next() as u8;
                 }
             }
-            run_all(&d, &format!("{name} random {i}"));
+            run_all(&d, s.threads, &format!("{name} random {i}"));
         }
     }
 }

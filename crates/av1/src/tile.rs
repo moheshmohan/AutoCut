@@ -67,6 +67,218 @@ pub(crate) struct Block {
     pub local_warp_params: [i32; 6],
 }
 
+/// What a tile decoder does with the blocks it visits.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Pass {
+    /// Read the symbols and reconstruct each block right away (single-threaded decoding).
+    Full,
+    /// Read the symbols only, recording what reconstruction needs in a [`TileRecord`].
+    Parse,
+    /// Reconstruct from a [`TileRecord`], reading no symbols.
+    Reconstruct,
+}
+
+/// The per-block values reconstruction needs beyond the mode info (which is final after
+/// parsing): the block variables as parsed, its quantizer index and the warp samples / palette
+/// color maps when used.
+#[derive(Clone)]
+pub(crate) struct BlockRecord {
+    b: Block,
+    current_q_index: i32,
+    warp_samples: Option<Box<(usize, [[i32; 4]; LEAST_SQUARES_SAMPLES_MAX])>>,
+    color_maps: Option<Box<(Vec<u8>, Vec<u8>)>>,
+}
+
+/// A parsed tile: its blocks in decoding order, how many of them each superblock holds and the
+/// coefficients of every coded transform block as a stream of
+/// `eob, tx_type, count, (position, value) * count` (only non-zero values).
+#[derive(Default)]
+pub(crate) struct TileRecord {
+    blocks: Vec<BlockRecord>,
+    sb_blocks: Vec<u32>,
+    coeffs: Vec<i32>,
+    /// Read positions while reconstructing.
+    next_block: usize,
+    next_coeff: usize,
+    next_sb: usize,
+    next_sb_row: usize,
+    /// Bytes recorded and the most allowed.
+    pub bytes: usize,
+    pub limit: usize,
+    /// The decoder-wide budget the recorded bytes are reserved from, and how much is reserved.
+    pub budget: Option<std::sync::Arc<RecordBudget>>,
+    reserved: usize,
+}
+
+impl Drop for TileRecord {
+    fn drop(&mut self) {
+        if let Some(b) = &self.budget {
+            b.release(self.reserved);
+        }
+    }
+}
+
+/// The parse record bytes all frames of a decoder may hold at once (frames in flight decode in
+/// one pass once it is used up).
+pub(crate) struct RecordBudget {
+    used: std::sync::atomic::AtomicUsize,
+    max: usize,
+    /// Most bytes ever reserved at once (tests).
+    #[cfg(test)]
+    pub peak: std::sync::atomic::AtomicUsize,
+}
+
+/// Bytes reserved from a [`RecordBudget`] at a time.
+const RESERVE_STEP: usize = 1 << 20;
+
+impl RecordBudget {
+    pub fn new(max: usize) -> RecordBudget {
+        RecordBudget {
+            used: Default::default(),
+            max,
+            #[cfg(test)]
+            peak: Default::default(),
+        }
+    }
+
+    /// Reserve `n` bytes; false (nothing reserved) if that would go over the budget.
+    fn reserve(&self, n: usize) -> bool {
+        use std::sync::atomic::Ordering;
+        let ok = self.used.try_update(Ordering::AcqRel, Ordering::Acquire, |u| u.checked_add(n).filter(|&v| v <= self.max)).is_ok();
+        #[cfg(test)]
+        if ok {
+            self.peak.fetch_max(self.used.load(Ordering::Acquire), Ordering::AcqRel);
+        }
+        ok
+    }
+
+    fn release(&self, n: usize) {
+        use std::sync::atomic::Ordering;
+        // Never below zero, whatever the order of reservations and releases.
+        let _ = self.used.try_update(Ordering::AcqRel, Ordering::Acquire, |u| Some(u.saturating_sub(n)));
+    }
+
+    /// Bytes reserved now (tests).
+    #[cfg(test)]
+    pub fn used(&self) -> usize {
+        self.used.load(std::sync::atomic::Ordering::Acquire)
+    }
+}
+
+/// The motion of a recorded block (what a reference row wait depends on).
+pub(crate) struct BlockMotion {
+    pub mi_row: usize,
+    pub bh4: usize,
+    /// Inter prediction from reference frames (not intra block copy).
+    pub inter: bool,
+    pub ref_frame: [i8; 2],
+    /// The motion vectors prediction uses (row, col) in 1/8 samples: Mv[ list ] as stored in
+    /// the mode info.
+    pub mv: [[i32; 2]; 2],
+    pub motion_mode: u8,
+    pub y_mode: usize,
+}
+
+impl TileRecord {
+    /// Whether recording stopped at [`TileRecord::limit`] (the record is unusable).
+    pub fn over_limit(&self) -> bool {
+        self.bytes > self.limit
+    }
+
+    /// Account for `n` more recorded bytes; false once over the limit (nothing more is kept).
+    fn grow(&mut self, n: usize) -> bool {
+        self.bytes = self.bytes.saturating_add(n);
+        if self.bytes > self.limit {
+            return false;
+        }
+        if self.bytes > self.reserved
+            && let Some(b) = &self.budget
+        {
+            let step = (self.bytes - self.reserved).max(RESERVE_STEP);
+            if !b.reserve(step) {
+                // The decoder-wide budget is used up: this frame is decoded in one pass.
+                self.limit = 0;
+                return false;
+            }
+            self.reserved += step;
+        }
+        true
+    }
+
+    /// The recorded blocks of superblock rows [first, end), for a tile `sbs_per_row` superblocks
+    /// wide.
+    pub fn row_blocks(&self, sbs_per_row: usize, first: usize, end: usize) -> impl Iterator<Item = BlockMotion> + '_ {
+        let start: usize = self.sb_blocks.iter().take(first.saturating_mul(sbs_per_row)).map(|&n| n as usize).sum();
+        let count: usize = self
+            .sb_blocks
+            .iter()
+            .skip(first.saturating_mul(sbs_per_row))
+            .take(end.saturating_sub(first).saturating_mul(sbs_per_row))
+            .map(|&n| n as usize)
+            .sum();
+        self.blocks.iter().skip(start).take(count).map(|r| {
+            // The mode info keeps the motion vectors as 16-bit values (Mv::new), which is what
+            // prediction reads.
+            let mv = |l: usize| {
+                let m = Mv::new(r.b.mv_i[l][0], r.b.mv_i[l][1]);
+                [i32::from(m.row), i32::from(m.col)]
+            };
+            BlockMotion {
+                mi_row: r.b.mi_row,
+                bh4: r.b.bh4,
+                inter: r.b.is_inter && !r.b.use_intrabc,
+                ref_frame: r.b.ref_frame,
+                mv: [mv(0), mv(1)],
+                motion_mode: r.b.motion_mode,
+                y_mode: r.b.y_mode,
+            }
+        })
+    }
+
+    fn next_coeff(&mut self) -> Result<i32> {
+        let v = *self.coeffs.get(self.next_coeff).ok_or(crate::Error::Invalid("coefficient record exhausted"))?;
+        self.next_coeff += 1;
+        Ok(v)
+    }
+
+    /// Record a superblock holding one inter block (tests).
+    #[cfg(test)]
+    pub fn push_test_block(&mut self, mi_row: usize, bh4: usize, ref_frame: [i8; 2], mv_i: [[i32; 2]; 2]) {
+        let b = Block { mi_row, bh4, is_inter: true, ref_frame, mv_i, ..Default::default() };
+        self.blocks.push(BlockRecord { b, current_q_index: 0, warp_samples: None, color_maps: None });
+        self.sb_blocks.push(1);
+    }
+}
+
+/// The work buffers of a [`TileDecoder`].
+pub(crate) struct Buffers {
+    quant: Vec<i32>,
+    dequant: Vec<i32>,
+    residual: Vec<i32>,
+    color_map_y: Vec<u8>,
+    color_map_uv: Vec<u8>,
+    pred_buf: [Vec<i32>; 2],
+    mask: Vec<i32>,
+    mc_tmp: Vec<i32>,
+    levels: Vec<u8>,
+}
+
+impl Buffers {
+    pub fn new() -> Buffers {
+        Buffers {
+            quant: vec![0; 1024],
+            dequant: vec![0; 64 * 64],
+            residual: vec![0; 64 * 64],
+            color_map_y: vec![0; 64 * 64],
+            color_map_uv: vec![0; 64 * 64],
+            pred_buf: [vec![0; 128 * 128], vec![0; 128 * 128]],
+            mask: vec![0; 128 * 128],
+            mc_tmp: vec![0; (2 * 128 + 8) * 128],
+            levels: vec![0; (32 + TX_PAD) * (32 + TX_PAD)],
+        }
+    }
+}
+
 /// Decoder for one tile.
 pub(crate) struct TileDecoder<'a, 'f> {
     pub fs: &'f FrameShared,
@@ -100,6 +312,9 @@ pub(crate) struct TileDecoder<'a, 'f> {
     pub mc_tmp: Vec<i32>,
     /// Coefficient levels of the current transform block, padded (see TX_PAD).
     levels: Vec<u8>,
+    pub pass: Pass,
+    /// Written by [`Pass::Parse`], read by [`Pass::Reconstruct`].
+    pub record: TileRecord,
 }
 
 const SB_MAX: usize = 32; // superblock size in 4x4 units (128 / 4)
@@ -113,6 +328,13 @@ fn block_height(bs: usize) -> usize {
 
 impl<'a, 'f> TileDecoder<'a, 'f> {
     pub fn new(fs: &'f FrameShared, t: &'f mut TileState, data: &'a [u8], cdf: Box<Cdfs>, tile_row: usize, tile_col: usize) -> Self {
+        Self::with_buffers(fs, t, data, cdf, tile_row, tile_col, Buffers::new())
+    }
+
+    /// [`TileDecoder::new`] reusing the work buffers of an earlier decoder of the same frame (see
+    /// [`TileDecoder::into_buffers`]).
+    pub fn with_buffers(fs: &'f FrameShared, t: &'f mut TileState, data: &'a [u8], cdf: Box<Cdfs>, tile_row: usize, tile_col: usize, bufs: Buffers) -> Self {
+        let Buffers { quant, dequant, residual, color_map_y, color_map_uv, pred_buf, mask, mc_tmp, levels } = bufs;
         let ti = &fs.fh.tile_info;
         let (rs, re) = (ti.mi_row_starts[tile_row] as usize, ti.mi_row_starts[tile_row + 1] as usize);
         let (cs, ce) = (ti.mi_col_starts[tile_col] as usize, ti.mi_col_starts[tile_col + 1] as usize);
@@ -136,17 +358,25 @@ impl<'a, 'f> TileDecoder<'a, 'f> {
             b: Block::default(),
             mvs: Default::default(),
             nb: Default::default(),
-            quant: vec![0; 1024],
-            dequant: vec![0; 64 * 64],
-            residual: vec![0; 64 * 64],
-            color_map_y: vec![0; 64 * 64],
-            color_map_uv: vec![0; 64 * 64],
+            quant,
+            dequant,
+            residual,
+            color_map_y,
+            color_map_uv,
             plane_tx_type: 0,
-            pred_buf: [vec![0; 128 * 128], vec![0; 128 * 128]],
-            mask: vec![0; 128 * 128],
-            mc_tmp: vec![0; (2 * 128 + 8) * 128],
-            levels: vec![0; (32 + TX_PAD) * (32 + TX_PAD)],
+            pred_buf,
+            mask,
+            mc_tmp,
+            levels,
+            pass: Pass::Full,
+            record: TileRecord::default(),
         }
+    }
+
+    /// The work buffers and CDFs, for [`TileDecoder::with_buffers`].
+    pub fn into_buffers(self) -> (Buffers, Box<Cdfs>) {
+        let TileDecoder { quant, dequant, residual, color_map_y, color_map_uv, pred_buf, mask, mc_tmp, levels, cdf, .. } = self;
+        (Buffers { quant, dequant, residual, color_map_y, color_map_uv, pred_buf, mask, mc_tmp, levels }, cdf)
     }
 
     fn seq(&self) -> &SequenceHeader {
@@ -161,8 +391,11 @@ impl<'a, 'f> TileDecoder<'a, 'f> {
         c >= self.mi_col_start as isize && c < self.mi_col_end as isize && r >= self.mi_row_start as isize && r < self.mi_row_end as isize
     }
 
-    /// decode_tile( )
+    /// decode_tile( ), or its reconstruction from [`TileDecoder::record`] in [`Pass::Reconstruct`].
     pub fn decode_tile(&mut self) -> Result<()> {
+        if self.pass == Pass::Reconstruct {
+            return self.reconstruct_sb_rows(usize::MAX);
+        }
         // clear_above_context( )
         let t = &mut *self.t;
         for p in 0..3 {
@@ -195,12 +428,84 @@ impl<'a, 'f> TileDecoder<'a, 'f> {
                 self.clear_cdef(r, c);
                 self.clear_block_decoded_flags(r, c, sb4);
                 self.read_lr(r, c, sb_size);
+                let before = self.record.blocks.len();
                 self.decode_partition(r, c, sb_size)?;
+                if self.pass == Pass::Parse {
+                    let n = u32::try_from(self.record.blocks.len().saturating_sub(before)).unwrap_or(u32::MAX);
+                    self.record.sb_blocks.push(n);
+                }
                 c += sb4;
             }
             r += sb4;
         }
         Ok(())
+    }
+
+    /// The reconstruction half of decode_tile( ) for the next `rows` superblock rows of the tile
+    /// (the record keeps the position): the superblocks in the same order, each block predicted
+    /// and reconstructed from its record.
+    pub fn reconstruct_sb_rows(&mut self, rows: usize) -> Result<()> {
+        let sb4 = if self.seq().use_128x128_superblock { 32 } else { 16 };
+        let mut r = self.mi_row_start.saturating_add(self.record.next_sb_row.saturating_mul(sb4));
+        let mut done = 0;
+        while r < self.mi_row_end && done < rows {
+            let mut c = self.mi_col_start;
+            while c < self.mi_col_end {
+                self.clear_block_decoded_flags(r, c, sb4);
+                let n = *self.record.sb_blocks.get(self.record.next_sb).ok_or(crate::Error::Invalid("block record exhausted"))?;
+                self.record.next_sb += 1;
+                for _ in 0..n {
+                    self.reconstruct_block()?;
+                }
+                c += sb4;
+            }
+            r += sb4;
+            done += 1;
+            self.record.next_sb_row += 1;
+        }
+        Ok(())
+    }
+
+    fn reconstruct_block(&mut self) -> Result<()> {
+        let rec = self.record.blocks.get(self.record.next_block).ok_or(crate::Error::Invalid("block record exhausted"))?;
+        self.record.next_block += 1;
+        self.b = rec.b.clone();
+        self.current_q_index = rec.current_q_index;
+        if let Some(w) = &rec.warp_samples {
+            self.mvs.num_samples = w.0;
+            self.mvs.cand_list = w.1;
+        }
+        if let Some(maps) = &rec.color_maps {
+            if let Some(d) = self.color_map_y.get_mut(..maps.0.len()) {
+                d.copy_from_slice(&maps.0);
+            }
+            if let Some(d) = self.color_map_uv.get_mut(..maps.1.len()) {
+                d.copy_from_slice(&maps.1);
+            }
+        }
+        self.compute_prediction()?;
+        self.residual()
+    }
+
+    /// Records the block for [`Pass::Reconstruct`] (its variables as parsed).
+    fn record_block(&mut self) {
+        let b = &self.b;
+        // The rows of the color maps (stride 64) the block's palette prediction reads.
+        let map_rows = |n: usize, h: usize| if n > 0 { (h + 2).min(64) * 64 } else { 0 };
+        let rows_y = map_rows(b.palette_size_y, block_height(b.mi_size));
+        let rows_uv = map_rows(b.palette_size_uv, block_height(b.mi_size) >> self.fs.ssy);
+        let warp = b.motion_mode as usize == LOCALWARP;
+        let size = std::mem::size_of::<BlockRecord>() + rows_y + rows_uv + if warp { 160 } else { 0 };
+        if !self.record.grow(size) {
+            return;
+        }
+        let warp_samples = warp.then(|| Box::new((self.mvs.num_samples, self.mvs.cand_list)));
+        let color_maps = (rows_y + rows_uv > 0).then(|| {
+            let y = self.color_map_y.get(..rows_y).unwrap_or_default().to_vec();
+            let uv = self.color_map_uv.get(..rows_uv).unwrap_or_default().to_vec();
+            Box::new((y, uv))
+        });
+        self.record.blocks.push(BlockRecord { b: b.clone(), current_q_index: self.current_q_index, warp_samples, color_maps });
     }
 
     fn clear_cdef(&mut self, r: usize, c: usize) {
@@ -461,7 +766,11 @@ impl<'a, 'f> TileDecoder<'a, 'f> {
                 }
             }
         }
-        self.compute_prediction()?;
+        if self.pass == Pass::Parse {
+            self.record_block();
+        } else {
+            self.compute_prediction()?;
+        }
         self.residual()?;
         let b = &self.b;
         let delta_lf = self.delta_lf;
@@ -1336,7 +1645,8 @@ impl<'a, 'f> TileDecoder<'a, 'f> {
         if start_x >= max_x || start_y >= max_y {
             return Ok(());
         }
-        if !self.b.is_inter {
+        // Parsing reads no samples: the prediction is made when the block is reconstructed.
+        if !self.b.is_inter && self.pass != Pass::Parse {
             let palette = if plane == 0 { self.b.palette_size_y } else { self.b.palette_size_uv };
             if palette > 0 {
                 self.predict_palette(plane, start_x, start_y, x, y, tx_sz);
@@ -1389,9 +1699,22 @@ impl<'a, 'f> TileDecoder<'a, 'f> {
             }
         }
         if !self.b.skip {
-            let eob = self.coeffs(plane, start_x, start_y, tx_sz);
-            if eob > 0 {
-                self.reconstruct(plane, start_x, start_y, tx_sz);
+            match self.pass {
+                Pass::Full => {
+                    let eob = self.coeffs(plane, start_x, start_y, tx_sz);
+                    if eob > 0 {
+                        self.reconstruct(plane, start_x, start_y, tx_sz);
+                    }
+                }
+                Pass::Parse => {
+                    let eob = self.coeffs(plane, start_x, start_y, tx_sz);
+                    self.record_coeffs(eob, tx_sz);
+                }
+                Pass::Reconstruct => {
+                    if self.replay_coeffs(tx_sz)? > 0 {
+                        self.reconstruct(plane, start_x, start_y, tx_sz);
+                    }
+                }
             }
         }
         for i in 0..step_y {
@@ -1659,7 +1982,7 @@ impl<'a, 'f> TileDecoder<'a, 'f> {
         let h4 = TX_HEIGHT[tx_sz] as usize >> 2;
         let tx_sz_ctx = (TX_SIZE_SQR[tx_sz] as usize + TX_SIZE_SQR_UP[tx_sz] as usize + 1) >> 1;
         let ptype = (plane > 0) as usize;
-        let seg_eob = if tx_sz == TX_16X64 || tx_sz == TX_64X16 { 512 } else { 1024.min(TX_WIDTH[tx_sz] as usize * TX_HEIGHT[tx_sz] as usize) };
+        let seg_eob = Self::seg_eob(tx_sz);
         self.quant[..seg_eob].iter_mut().for_each(|q| *q = 0);
         let mut eob = 0usize;
         let mut cul_level = 0u32;
@@ -1802,6 +2125,60 @@ impl<'a, 'f> TileDecoder<'a, 'f> {
             }
         }
         eob
+    }
+
+    /// Coefficients a transform block may hold (Quant[] entries coeffs( ) clears first).
+    fn seg_eob(tx_sz: usize) -> usize {
+        if tx_sz == TX_16X64 || tx_sz == TX_64X16 { 512 } else { 1024.min(TX_WIDTH[tx_sz] as usize * TX_HEIGHT[tx_sz] as usize) }
+    }
+
+    /// Records the coefficients coeffs( ) left in `quant` (eob, transform type and the non-zero
+    /// values) for [`Pass::Reconstruct`].
+    fn record_coeffs(&mut self, eob: usize, tx_sz: usize) {
+        let scan = if eob > 0 { self.get_scan(tx_sz) } else { &[] };
+        let scan = scan.get(..eob).unwrap_or(scan);
+        if !self.record.grow(4 * (3 + 2 * scan.len())) {
+            // Over the limit: the record is dropped (the frame is decoded again in one pass).
+            return;
+        }
+        let rec = &mut self.record.coeffs;
+        rec.push(eob as i32);
+        if eob == 0 {
+            return;
+        }
+        rec.push(self.plane_tx_type as i32);
+        let count_at = rec.len();
+        rec.push(0);
+        let mut count = 0;
+        for &pos in scan {
+            let v = self.quant.get(pos as usize).copied().unwrap_or(0);
+            if v != 0 {
+                rec.push(i32::from(pos));
+                rec.push(v);
+                count += 1;
+            }
+        }
+        if let Some(c) = rec.get_mut(count_at) {
+            *c = count;
+        }
+    }
+
+    /// The next transform block's coefficients from the record into `quant` (cleared first, as
+    /// coeffs( ) does) and its type; returns its eob.
+    fn replay_coeffs(&mut self, tx_sz: usize) -> Result<usize> {
+        let eob = self.record.next_coeff()?;
+        if eob <= 0 {
+            return Ok(0);
+        }
+        self.plane_tx_type = usize::try_from(self.record.next_coeff()?).map_err(|_| crate::Error::Invalid("coefficient record"))?;
+        self.quant.get_mut(..Self::seg_eob(tx_sz)).ok_or(crate::Error::Invalid("coefficient record"))?.fill(0);
+        let count = self.record.next_coeff()?;
+        for _ in 0..count {
+            let pos = usize::try_from(self.record.next_coeff()?).map_err(|_| crate::Error::Invalid("coefficient record"))?;
+            let v = self.record.next_coeff()?;
+            *self.quant.get_mut(pos).ok_or(crate::Error::Invalid("coefficient record"))? = v;
+        }
+        Ok(eob as usize)
     }
 
     fn all_zero_ctx(&self, plane: usize, tx_sz: usize, x4: usize, y4: usize, w4: usize, h4: usize) -> usize {

@@ -3,7 +3,7 @@
 
 use std::sync::OnceLock;
 
-use crate::frame::Plane;
+use crate::frame::PlaneRef;
 use crate::mvpred::round2_signed64;
 use crate::spec_tables::*;
 use crate::tile::TileDecoder;
@@ -179,12 +179,9 @@ impl TileDecoder<'_, '_> {
         (start_x as i32, start_y as i32, step_x as i32, step_y as i32)
     }
 
-    fn ref_plane(&self, ref_idx: i32, plane: usize) -> &Plane {
+    fn ref_plane(&self, ref_idx: i32, plane: usize) -> PlaneRef<'_> {
         // A missing reference (rejected earlier for valid streams) predicts from the current frame.
-        match usize::try_from(ref_idx).ok().and_then(|i| self.fs.refs.get(i)).and_then(|r| r.as_ref()) {
-            Some(r) => &r.buf.planes[plane],
-            None => &self.t.cur.planes[plane],
-        }
+        self.fs.ref_samples(ref_idx, plane).unwrap_or(PlaneRef::Whole(&self.t.cur.planes[plane]))
     }
 
     /// Block inter prediction process (7.11.3.4) into `pred` (stride PRED_STRIDE); `tmp` holds
@@ -716,7 +713,7 @@ fn vpass<const W: usize>(rows: &[i32], vf: &[i16; 8], out: &mut [i32], half: i32
 /// phase, so the filters run over whole rows (bit-identical to the per-sample process).
 #[allow(clippy::too_many_arguments)]
 fn mc_unscaled(
-    refp: &Plane,
+    refp: PlaneRef,
     last_x: i32,
     last_y: i32,
     x: i32,

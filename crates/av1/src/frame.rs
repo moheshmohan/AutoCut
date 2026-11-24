@@ -28,6 +28,22 @@ fn zeroed(len: usize) -> Vec<u16> {
     vec![0; len]
 }
 
+/// A copy of `src` (recycled memory for large ones, without zeroing it first).
+fn copied(src: &[u16]) -> Vec<u16> {
+    if src.len() >= POOL_MIN_LEN {
+        let found = {
+            let mut pool = PLANE_POOL.lock().unwrap_or_else(|e| e.into_inner());
+            pool.iter().position(|v| v.capacity() >= src.len() && v.capacity() <= 2 * src.len()).map(|i| pool.swap_remove(i))
+        };
+        if let Some(mut v) = found {
+            v.clear();
+            v.extend_from_slice(src);
+            return v;
+        }
+    }
+    src.to_vec()
+}
+
 /// One plane of samples (u16 at every bit depth), or a rectangular region of one.
 #[derive(Default)]
 pub struct Plane {
@@ -216,6 +232,174 @@ impl FrameBuf {
 
     pub fn plane_height(&self, plane: usize) -> usize {
         if plane == 0 { self.height } else { (self.height + self.subsampling_y) >> self.subsampling_y }
+    }
+
+    /// Copy luma rows [y0, y1) (chroma rows scaled down; clipped to the stored rows) of `src`, a
+    /// frame of the same geometry.
+    pub fn copy_rows_from(&mut self, src: &FrameBuf, y0: usize, y1: usize) {
+        for p in 0..self.num_planes.min(3) {
+            let sy = if p == 0 { 0 } else { self.subsampling_y };
+            let (d, s) = (&mut self.planes[p], &src.planes[p]);
+            if d.stride != s.stride {
+                continue;
+            }
+            let a = (y0 >> sy).min(d.rows).min(s.rows).saturating_mul(d.stride);
+            let b = (y1 >> sy).min(d.rows).min(s.rows).saturating_mul(d.stride);
+            if let (Some(dst), Some(src)) = (d.data.get_mut(a..b), s.data.get(a..b)) {
+                dst.copy_from_slice(src);
+            }
+        }
+    }
+
+    /// Copies of luma rows [y0, y1) (chroma rows scaled down; clipped to the stored rows), one
+    /// plane region each.
+    pub fn rows_copy(&self, y0: usize, y1: usize) -> [Plane; 3] {
+        std::array::from_fn(|p| {
+            if p >= self.num_planes {
+                return Plane::default();
+            }
+            let sy = if p == 0 { 0 } else { self.subsampling_y };
+            let s = &self.planes[p];
+            let (a, b) = ((y0 >> sy).min(s.rows), (y1 >> sy).min(s.rows));
+            let rows = b.saturating_sub(a);
+            let src = s.data.get(a.saturating_mul(s.stride)..b.saturating_mul(s.stride)).unwrap_or_default();
+            Plane { data: copied(src), stride: s.stride, rows, ox: 0, oy: a }
+        })
+    }
+
+    /// A frame of this geometry (samples not copied: zero).
+    pub fn same_geometry(&self) -> FrameBuf {
+        let planes = std::array::from_fn(|p| {
+            let pl = &self.planes[p];
+            Plane { data: zeroed(pl.data.len()), stride: pl.stride, rows: pl.rows, ox: pl.ox, oy: pl.oy }
+        });
+        FrameBuf { planes, ..*self }
+    }
+}
+
+/// Luma rows per published band of a [`BandFrame`] (log2).
+pub const BAND_LOG2: u32 = 6;
+
+/// One plane of a frame's final samples, published band by band while the rest of the frame
+/// is still being decoded (see [`BandFrame`]). A band is written once and then only read.
+pub struct BandPlane {
+    bands: Vec<std::sync::OnceLock<Plane>>,
+    stride: usize,
+    rows: usize,
+    log2: u32,
+    /// Returned for rows of a band that is not published: zeros instead of a panic. Readers wait
+    /// for the row progress first and references of another chroma format are refused, so this
+    /// only happens through a scheduling bug.
+    missing: Box<[u16]>,
+}
+
+impl BandPlane {
+    fn new(stride: usize, rows: usize, log2: u32) -> BandPlane {
+        let n = rows.div_ceil(1 << log2);
+        BandPlane { bands: (0..n).map(|_| std::sync::OnceLock::new()).collect(), stride, rows, log2, missing: vec![0; stride].into_boxed_slice() }
+    }
+
+    /// Row `y` (`stride` samples) of a published band.
+    #[inline(always)]
+    pub fn row(&self, y: usize) -> &[u16] {
+        let o = (y & ((1 << self.log2) - 1)) * self.stride;
+        match self.bands.get(y >> self.log2).and_then(|b| b.get()).and_then(|b| b.data.get(o..o + self.stride)) {
+            Some(r) => r,
+            None => &self.missing,
+        }
+    }
+
+    /// Whether band `band` is published (tests).
+    #[cfg(test)]
+    pub fn is_published(&self, band: usize) -> bool {
+        self.bands.get(band).is_some_and(|b| b.get().is_some())
+    }
+
+    /// Publish band `band` copied from the rows of the whole plane `src` (same geometry); a band
+    /// is published once.
+    fn publish(&self, band: usize, src: &Plane) {
+        let y0 = band << self.log2;
+        let y1 = ((band + 1) << self.log2).min(self.rows);
+        let mut p = Plane::region(0, y0, self.stride, y1.saturating_sub(y0));
+        let w = self.stride.min(src.stride);
+        for (y, out) in (y0..y1).zip(p.data.chunks_exact_mut(self.stride.max(1))) {
+            if let (Some(r), Some(o)) = (src.data.get(y * src.stride..y * src.stride + w), out.get_mut(..w)) {
+                o.copy_from_slice(r);
+            }
+        }
+        self.publish_owned(band, p);
+    }
+
+    /// Publish band `band` as `p`, whose rows start at the band's first row (stride `stride`;
+    /// rows past the band are ignored).
+    fn publish_owned(&self, band: usize, p: Plane) {
+        if let Some(slot) = self.bands.get(band)
+            && p.stride == self.stride
+        {
+            let _ = slot.set(p);
+        }
+    }
+}
+
+/// A frame's final samples (every in-loop filter applied) in bands of 64 luma rows, so later
+/// frames can predict from the top of a reference while its bottom is still being decoded.
+/// Each band is published once, before the frame's row progress says it is final.
+pub struct BandFrame {
+    pub planes: [BandPlane; 3],
+    pub num_planes: usize,
+    pub subsampling_x: usize,
+    pub subsampling_y: usize,
+}
+
+impl BandFrame {
+    /// Bands for the visible rows of a `width` x `height` frame stored like [`FrameBuf::new`].
+    pub fn new(width: usize, height: usize, num_planes: usize, subsampling_x: usize, subsampling_y: usize) -> BandFrame {
+        let aw = width.div_ceil(128) * 128 + 160;
+        let (subsampling_x, subsampling_y) = (subsampling_x.min(1), subsampling_y.min(1));
+        let planes = std::array::from_fn(|p| {
+            if p >= num_planes {
+                return BandPlane::new(0, 0, BAND_LOG2);
+            }
+            let (sx, sy) = if p == 0 { (0, 0) } else { (subsampling_x, subsampling_y) };
+            BandPlane::new(aw >> sx, (height + sy) >> sy, BAND_LOG2 - sy as u32)
+        });
+        BandFrame { planes, num_planes, subsampling_x, subsampling_y }
+    }
+
+    /// Number of bands (of 64 luma rows).
+    pub fn bands(&self) -> usize {
+        self.planes[0].bands.len()
+    }
+
+    /// Publish luma band `band` (and the chroma rows it covers) copied from `src`.
+    pub fn publish(&self, band: usize, src: &FrameBuf) {
+        for p in 0..self.num_planes.min(3) {
+            self.planes[p].publish(band, &src.planes[p]);
+        }
+    }
+
+    /// Publish luma band `band` from per-plane buffers starting at the band's first row.
+    pub fn publish_owned(&self, band: usize, planes: [Plane; 3]) {
+        for (p, pl) in planes.into_iter().enumerate().take(self.num_planes) {
+            self.planes[p].publish_owned(band, pl);
+        }
+    }
+}
+
+/// A plane to predict from: a whole stored plane or the published bands of a reference.
+#[derive(Clone, Copy)]
+pub enum PlaneRef<'a> {
+    Whole(&'a Plane),
+    Bands(&'a BandPlane),
+}
+
+impl<'a> PlaneRef<'a> {
+    #[inline(always)]
+    pub fn row(&self, y: usize) -> &'a [u16] {
+        match *self {
+            PlaneRef::Whole(p) => p.row(y),
+            PlaneRef::Bands(b) => b.row(y),
+        }
     }
 }
 

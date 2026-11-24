@@ -75,16 +75,22 @@ impl LrCtx<'_> {
 /// Bands of 64 luma rows are restored in parallel: every unit reads only the two input frames
 /// and writes only its own samples.
 pub(crate) fn loop_restoration(fs: &FrameState, cur: &FrameBuf, cdef: &FrameBuf, pool: &Pool) -> FrameBuf {
-    let fh = &fs.fh;
     let mut lr = cdef.clone();
+    let ranges = bands(pool, fs.fh.frame_height as usize);
+    restore_bands(fs, cur, cdef, lr.row_bands(&ranges), pool, &ranges);
+    lr
+}
+
+/// Restore the bands `planes` covering luma rows `ranges`, which hold UpscaledCdefFrame; reads
+/// both inputs up to 3 rows beyond each band.
+pub(crate) fn restore_bands(fs: &FrameState, cur: &FrameBuf, cdef: &FrameBuf, mut planes: Vec<[RowBand; 3]>, pool: &Pool, ranges: &[(usize, usize)]) {
+    let fh = &fs.fh;
     let up_w = fh.upscaled_width as i32;
     let fr_h = fh.frame_height as i32;
     let bd = fs.bit_depth;
-    let ranges = bands(pool, fh.frame_height as usize);
-    let mut planes = lr.row_bands(&ranges);
     pool.map_mut(&mut planes, |b, band| {
         // Rows of 4 luma samples in this band.
-        let (start, end) = ranges[b];
+        let Some(&(start, end)) = ranges.get(b) else { return };
         let (row0, row1) = ((start / 4) as i32, (end / 4).min(fh.frame_height as usize) as i32);
         for (plane, out) in band.iter_mut().enumerate().take(fs.num_planes) {
             let rtype_frame = fh.lr.frame_restoration_type[plane];
@@ -126,8 +132,6 @@ pub(crate) fn loop_restoration(fs: &FrameState, cur: &FrameBuf, cdef: &FrameBuf,
             }
         }
     });
-    drop(planes);
-    lr
 }
 
 #[allow(clippy::too_many_arguments)]

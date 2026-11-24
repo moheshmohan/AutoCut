@@ -73,14 +73,23 @@ with libdav1d: **bit-exact** on all 6 fixtures.
 ## Threading and performance
 
 `Decoder::new()` uses all cores (`Decoder::with_threads(1)` decodes on the calling thread; on
-wasm32, or without the default `threads` feature, everything runs on the calling thread). Headers are parsed in order; each frame is
-then decoded by a frame worker once the reference frames it reads are finished, so independent
-frames (hierarchical GOP layers) decode concurrently; tiles of a frame decode in parallel into
-private buffers that are merged afterwards; the in-loop filters (deblocking, CDEF, loop
-restoration) each run in parallel bands of 64 rows (`postfilter.rs` explains why the bands are
-independent). Results never depend on scheduling (the oracle tests compare 1 thread, many threads
-and libdav1d). With frame threads, pictures may be returned by a
-later `decode_pts` call or by `flush`; each carries the `pts` of the temporal unit that showed it.
+wasm32, or without the default `threads` feature, everything runs on the calling thread; at most
+64 threads are started). Headers are parsed in order; each frame is then decoded by a frame
+worker. With worker threads it first reads the symbols of all its tiles, which needs only the
+parse results of its references (CDFs, segment ids, saved motion vectors), publishes its own,
+and then reconstructs from the recorded blocks. Frames with several tiles read the symbols of
+their tiles in parallel into private buffers (one after another with intra block copy). A frame
+reconstructs superblock row by superblock row (that row of every tile), each row waiting only
+for the reference rows its motion vectors reach (row wavefront), and the in-loop filters
+(deblocking, CDEF, loop restoration) follow a few 64-row bands behind and publish each final
+band for the frames predicting from it (`decoder.rs` and `postfilter.rs` give the dependency
+rules). Super-resolution frames wait for their whole references and filter the whole frame.
+There is one frame worker per thread (at most 16), and the frames in flight are bounded by their
+size. On one thread each block is reconstructed as it is read, as before. Results never depend
+on scheduling (the oracle tests compare 1 thread, many threads and libdav1d; `tests/wavefront.rs`
+and the decoder's unit tests compare thread counts repeatedly, with random delays in the row
+waits). With frame threads, pictures may be returned by a later `decode_pts` call or by `flush`;
+each carries the `pts` of the temporal unit that showed it.
 
 `tests/perf.rs` (ignored) prints single-threaded fps (thread CPU time), per-stage ms/frame
 (`Decoder::stats()`) and all-core fps with its per-stage ms/frame for 1080p fixtures (key frames,
@@ -130,6 +139,49 @@ frames whose `refresh_frame_flags` is 0 — no reference slot keeps them, so nei
 motion vectors nor CDFs reach another frame — skip deblocking, CDEF and loop restoration
 (super-resolution still runs, it sets the output size) and are flagged `Picture::draft`. In
 SVT-AV1's hierarchical GOPs that is the top layer, half of the frames.
+
+### Row wavefront across frames (2026-11-25)
+
+Parsing split from reconstruction, the row wavefront and one frame worker per thread (ported from
+craft-libs `62e09222f1`, FilmCraft #4542). Wall time for the whole file, release
+`examples/av1dec`, median of 5 alternating runs on a 14-core Apple Silicon Mac at load average
+7–10; SVT-AV1 preset 8, CRF 30, `testsrc2` with noise:
+
+| Stream | Threads | Before | After | Speed-up |
+|---|---|---|---|---|
+| 1080p GOP (60 frames) | 1 | 56.6 fps | 56.5 fps | 1.00x |
+| 1080p GOP | 4 | 90.8 fps | 176.5 fps | 1.94x |
+| 1080p GOP | 14 | 163.7 fps | 298.9 fps | 1.83x |
+| 1080p GOP, 10-bit | 1 | 49.3 fps | 49.3 fps | 1.00x |
+| 1080p GOP, 10-bit | 4 | 85.9 fps | 162.8 fps | 1.90x |
+| 1080p GOP, 10-bit | 14 | 137.4 fps | 223.5 fps | 1.63x |
+| 1080p GOP, 4x2 tiles (9 runs) | 1 | 61.4 fps | 61.6 fps | 1.00x |
+| 1080p GOP, 4x2 tiles (9 runs) | 14 | 224.1 fps | 296.5 fps | 1.32x |
+| 2160p GOP (30 frames) | 1 | 16.7 fps | 16.8 fps | 1.01x |
+| 2160p GOP | 4 | 25.9 fps | 54.4 fps | 2.10x |
+| 2160p GOP | 14 | 46.4 fps | 79.5 fps | 1.71x |
+
+Peak RSS at 14 threads goes from 265 to 540 MB (1080p) and from 1011 to 1223 MB (2160p): every
+frame in flight holds its parse record, and its final samples are kept in 64-row bands. On one
+thread it is unchanged (126 / 121 MB, 433 / 396 MB). The pictures are bit-identical to the
+decoder before at 1, 2, 4 and 14 threads, repeated, on 32 streams (libsvtav1 8- and 10-bit,
+odd sizes, 1–16 tiles, 128x128 superblocks, film grain, intra-only, super-resolution, low delay,
+screen content with palette and intra block copy, and the five default conformance vectors),
+and equal to libdav1d.
+
+Known limitations of the frame threading (the output is the same in every case, only the
+overlap is smaller):
+
+- A frame whose parse record would pass 32 bytes per luma sample of a tile (pathological
+  streams: tiny blocks, large palettes, every coefficient coded), or that cannot reserve its
+  record from the decoder-wide budget of 1 GiB shared by the frames in flight, is decoded again
+  in one pass.
+- A superblock row using local warped motion, global motion beyond translation or a scaled
+  reference waits for the whole reference instead of the rows its motion vectors reach.
+- Super-resolution frames do not use the row wavefront: they wait for their whole references
+  and filter the whole frame.
+- The tile columns of a superblock row are reconstructed one after another on the frame's
+  worker (their symbols are still read in parallel).
 
 ## Limits
 
