@@ -247,6 +247,29 @@ filmcraft-cli autocut "make a 60-second highlight reel about the launch" --dry-r
   sounds from one list (`generate.assets`). Window ▸ Generate in the app, `generate.*`
   commands from the CLI and over MCP. The app bundles and downloads no model: you list your
   tools in one file ([docs/generation.md](docs/generation.md)).
+- **Pick by meaning with [FrameAtlas](https://github.com/moheshmohan/FrameAtlas)**: `filmcraft-cli
+  photos pick --meaning "birthday cake with candles"` asks the footage catalogue what in your Google
+  Photos looks like that and has the picker tick exactly those items, day by day (MCP:
+  `googlephotos_pick` with `items`).
+- **Motion graphics as code**: [RAEA](docs/raea-workflow.md) compositions rendered, checked and
+  placed (`motion.render`) or brought in as an editable edit (`composition.import`), and EffectCraft
+  `.ectemplate` lower thirds and cards rendered with alpha inside the app
+  (`effectcraft.renderTemplate`). Keyframes gain springs, steps, wiggle and custom curves, and
+  `keyframes.choreograph` staggers entrances with GSAP-style timing.
+- **Craft checks before delivery**: how the film moves (`qa.motionEnergy`), text that is on screen
+  too briefly, too small or low in contrast (`sequence.checkCraft`), stock phrases and unchecked
+  figures in the copy (`copy.lint`), titles that overshoot or enter too fast (`sequence.checkMotion`,
+  with filmstrips to look at), all sorted into Floor / Reflex / Finish tiers by `delivery.preflight`.
+- **Music fitted to the film**: the track's downbeats, sections, drops and ending are read, and the
+  remix lands its lifts on the film's moments and ends with it (`clip.remix` events); Direct, Quick
+  Short and Showcase do it for you.
+- **Taste memory**: each video's fingerprint is recorded so consecutive videos come out different,
+  and what you dislike is retired for good (`autocut.fingerprint`, `autocut.deal`,
+  `autocut.feedback`; `filmcraft-cli eval` scores it).
+- **Review pointed at frames**: **Comment on Frame** in the Program monitor pins a note to a frame and
+  a box; agents work through the inbox (`review_*` MCP tools, `filmcraft-cli review`), and a fresh
+  finish reviewer answers ship, fix, rebuild or recapture
+  ([docs/finish-reviewer.md](docs/finish-reviewer.md)).
 
 <br>
 

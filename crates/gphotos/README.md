@@ -118,6 +118,12 @@ filmcraft-cli photos pick --auto "October 30 2026" --all --photos --since 2026-1
 # (--month-days 10-21: one per day of those days in each month instead); implies --all
 filmcraft-cli photos pick --sweep 2017-10..2025-12 --bridge 127.0.0.1:9877
 
+# exactly what FrameAtlas (the footage catalogue, loopback port 7318) finds by meaning: the agent
+# types each item's day into the picker's search and ticks only the tiles whose capture time and
+# kind match (needs Chrome's View ▸ Developer ▸ Allow JavaScript from Apple Events; --photos
+# adds photos to the videos; items not found come back as `left`)
+filmcraft-cli photos pick --meaning "birthday cake with candles" --photos --max-items 12 --project my.fcproj --save
+
 # close the picker tabs earlier runs left in Chrome (and nothing else)
 filmcraft-cli photos tidy
 ```
@@ -263,6 +269,19 @@ albums "are not shown directly" — users search for an album's title. So the sc
 `--videos-only` grounds the range on video tiles and skips any photo in between when
 downloading (it is listed in `skipped`). `--album` and `--auto` are exclusive. Selecting every
 item only ever happens inside a search result or an opened album, never the whole library.
+
+### Exact items: `photos pick --meaning` and MCP `items`
+
+Google's picker has no search by name or id, but a typed date shows that day, and each tile's
+checkbox in the picker's page says when the item was taken, to the second, in local time. Given
+items as `{captured (UTC), kind (video|photo)}`, the screen agent searches each item's day, reads
+the day's whole grid and ticks only the tiles of the right kind whose local time is the item's UTC
+time moved by a real time-zone offset; the offset seen most in the pick settles tiles that fit by
+chance, an item two tiles fit equally is left unticked, and an item not on its day is looked for
+on the next one (three days at most). `filmcraft-cli photos pick --meaning "text"` gets the items
+from FrameAtlas's search by meaning (`--catalog-port`, default 7318; 24 items by default, at most
+200); over MCP, `googlephotos_pick` takes them as `items`. It needs Chrome's JavaScript from Apple
+Events and refuses without it, and like every agent pick it stops if Chrome leaves the front.
 
 ### Big libraries: many searches, few sessions, few tabs
 

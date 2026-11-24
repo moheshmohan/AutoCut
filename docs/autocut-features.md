@@ -714,3 +714,26 @@ sessions; FrameAtlas/screen-protection/render-cache/delivery-gate upgrades; the 
   answer.
 - **PX8.5**: the agent guide's "Review comments and the finish reviewer" (§9), and the credits
   for the rules adapted from impeccable, hallmark, taste-skill and huashu-motion (ATTRIBUTION.md).
+
+## Update 2026-11-24 (release 0.13.0 and after)
+
+AutoCut's first tagged release, `autocut-v0.13.0`, with the macOS download and notes in
+[autocut-releases.md](autocut-releases.md). Besides the PX work above and the upstream and
+craft-libs fixes (AV62–AV90, recorded in `plan/upstream-sync-2026-11-24.md`):
+
+- **AV77**: `photos pick --meaning "text"` picks exactly what FrameAtlas finds by meaning, day by
+  day in Google's picker (the screen agent's exact-item mode, `screenagent::items`); MCP
+  `googlephotos_pick` takes the found items as `items: [{captured, kind}]` (at most 200). It needs
+  Chrome's View ▸ Developer ▸ Allow JavaScript from Apple Events. Live-tested on 24 November
+  (3 of 3 picked and imported).
+- **AV91**: the screen agent clicks and types only while its app is in front; if another app comes
+  to the front it stops the run (`NotInFront`) instead of typing into it.
+- **AV92**: `packaging/macos/package.sh` keeps the builder's home folder and checkout paths out of
+  the binaries (`remap_build_paths` in `packaging/env.sh`; `PACKAGE_KEEP_PATHS=1` skips it).
+- **AV93**: `filmcraft-cli insta360 list|import|download --folder F --until D` take their values;
+  the folder was read as a recording name and the import fell back to Studio's downloads.
+- **AV94**: the agent guide (FrameAtlas, the pick by meaning, Chrome in front, folder imports,
+  `composition.import`), the MCP server's instructions (craft and motion checks, delivery tiers,
+  keyframes, music fitted to the film, exact-item picks), the README's feature list and the
+  Google Photos README describe the 0.13.0 features. 954 commands.
+

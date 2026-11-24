@@ -91,10 +91,11 @@ Read these before you touch anything.
 
 | What | Where / value |
 |---|---|
-| CLI | `.mcp.json` and production workflows use `target/release/filmcraft-cli`, installed with the tested AutoCut app. `target/agent-main/release/filmcraft-cli` is the development candidate. The [November upstream/pipeline upgrade](../plan/pipeline-upgrades-2026-11.md) retains the AI features; the build of 20 November 2026 exposes 925 commands. Package and verify the candidate before replacing production; keep rollback copies. Builds report the workspace version (0.13.0 since the first tagged release, 24 November 2026; [releases](autocut-releases.md)); between releases, inspect the packaged commit and command catalogue too. |
+| CLI | `.mcp.json` and production workflows use `target/release/filmcraft-cli`, installed with the tested AutoCut app. `target/agent-main/release/filmcraft-cli` is the development candidate. The [November upstream/pipeline upgrade](../plan/pipeline-upgrades-2026-11.md) retains the AI features; the 0.13.0 build exposes 954 commands. Package and verify the candidate before replacing production; keep rollback copies. Builds report the workspace version (0.13.0 since the first tagged release, 24 November 2026; [releases](autocut-releases.md)); between releases, inspect the packaged commit and command catalogue too. |
 | Building your own CLI | `CARGO_TARGET_DIR=target/agent-<name> cargo build --release -p filmcraft-cli`, one target folder per worktree, never shared. |
 | The app | `target/macos-package/AutoCut.app`, control port **9877**: `open -n --env FILMCRAFT_CONTROL_PORT=9877 target/macos-package/AutoCut.app` |
 | RAEA | `~/.raea/versions/0.1.8/bin/raea` for local custom animations, 3D scenes and effects (0.1.0 kept beside it). [Render and import workflow](raea-workflow.md). |
+| FrameAtlas | The footage catalogue beside this checkout (`../FrameAtlas`, `./run.sh serve`, loopback port 7318): the user's Google Photos and Insta360 recordings by what they show (search by meaning), people, places and trips, ideas and the footage each video used. AutoCut reads it for `photos pick --meaning` (§4) and its own MCP tools hand an idea to AutoCut (`idea_to_autocut`). [FrameAtlas README](https://github.com/moheshmohan/FrameAtlas#readme). |
 | EffectCraft | Linked into the installed AutoCut app: `effectcraft.templateInfo` and `effectcraft.renderTemplate` (§6.8). A workspace build without `--features effectcraft` answers that it lacks it. |
 | Generation tools | The user's own local models, listed in `~/Library/Application Support/FilmCraft/generation/providers.json`: `h3-image` (MiniMax-H3-Image, pictures and edits), `ltx-video` (LTX-2.3, clips up to 10 s; with the Union-Control adapter in `testground/ltxenv/adapters/` it also makes a clip again, `generate.restyle`), `sa3-sfx` and `sa3-music` (Stable Audio 3 small, up to 30 s). `filmcraft-cli exec generate.providers` says which are installed. Never edit that file or download a model without the user's OK. [generation.md](generation.md). |
 | Projects and exports | `~/Movies/AutoCut/<Video name>/`: the `.fcproj`, the exports, and a `build/` folder (scripts, logs, a `README.txt` recipe) |
@@ -235,6 +236,8 @@ class FC:
 | a repeatable chain | `recipe_run` / `exec recipe.run` | `recipe.record` turns edits into a recipe |
 | blur faces and plates | `redact` | `--dry-run` lists tracks first |
 | clean up a voice recording file | `audio enhance` / `audio isolate` | DeepFilterNet with `--download`, else DSP |
+| "the clips of X" from the whole library (birthday cake, a beach day, the red car) | `photos pick --meaning "X"` | FrameAtlas finds them by meaning, the picker ticks exactly those (§4) |
+| a RAEA composition brought in as an editable edit | `exec composition.import {source, output, place?, wait: true}` | its footage and sounds become real clips, each drawn layer a clip of its own ([raea-workflow.md](raea-workflow.md)) |
 | a picture, b-roll clip, sound or music that does not exist yet | `exec generate.image` / `generate.video` / `generate.sound` | the user's local tools (§6.9); `wait: true`; one at a time |
 | "fill this empty stretch" | `exec generate.fillGap {track, atSeconds, from}` or `{all: true}` | `from: "motion"` carries the movement on, `"both"` goes from the frame before to the frame after, `"before"` (default) continues one frame; `uncovered` says what is left |
 | "make this shot a bit longer" | `exec generate.extend {atSeconds, seconds}` | continues the movement past the end of a clip; needs 1.4 s of picture before it |
@@ -267,6 +270,22 @@ Picking from an album the user curated (the best seed for a big video):
 filmcraft-cli --project "P.fcproj" photos pick --album "Exact Album Title" --save
 ```
 
+Picking exactly what FrameAtlas finds by meaning, across the whole library (videos; `--photos`
+adds photos):
+
+```bash
+filmcraft-cli --project "P.fcproj" photos pick --meaning "birthday cake with candles" --photos --max-items 12 --save
+```
+
+FrameAtlas (§1; `--catalog-port` if it is not on 7318) returns each item's capture time and kind,
+best first (24 by default, at most 200). The agent types each item's day into the picker's search
+and ticks only the tiles whose time and kind match, trying up to three days per item; items it
+cannot find come back as `left`. It reads the picker's page, so Chrome needs **View ▸ Developer ▸
+Allow JavaScript from Apple Events** ticked in the window signed in to Google Photos, and it refuses
+without it. It goes without `--auto`, `--queries`, `--album`, `--all`, `--session` and
+`--no-browser`. Over MCP, pass the found items to `googlephotos_pick` as `items: [{captured,
+kind}]` (from FrameAtlas's `catalog_search_meaning`).
+
 Many searches in one session, then re-importing items already downloaded:
 
 ```bash
@@ -292,6 +311,9 @@ Watch for these:
   `<data dir>/google-photos/left-searches.txt`.
 - **Dates.** Creation times are UTC. If a late-evening or early-morning item is missing, widen
   `--since` by a day.
+- **Chrome in front.** The agent clicks and types only while Chrome is the front app. If another
+  app comes to the front, it stops instead of typing into it: keep Chrome in front, then run it
+  again.
 - **Tabs.** The agent closes its tab. If tabs pile up, `filmcraft-cli photos tidy` closes only
   picker tabs.
 - **Locations.** Google strips them from downloads. `photos locations --album "<title>"` reads
@@ -309,6 +331,12 @@ filmcraft-cli insta360 list --since 2026-10-01
 
 ```bash
 filmcraft-cli --project "P.fcproj" --save insta360 import VID_093 VID_096
+```
+
+From a folder of recordings (a camera card, or `.insv` copies with their `.lrv`):
+
+```bash
+filmcraft-cli --project "P.fcproj" --save insta360 import --all --folder "/Volumes/X5/DCIM/Camera01"
 ```
 
 ### Look before you plan
@@ -1096,5 +1124,7 @@ says otherwise, the brief wins; when in doubt, ask or offer a sample.
 | Custom animations, rendered scenes and transitions | [raea-workflow.md](raea-workflow.md) |
 | Generated pictures, clips, sounds; filling gaps; changing a frame | [generation.md](generation.md), plan: [generation-2026-11.md](../plan/generation-2026-11.md) |
 | Google Photos setup | [crates/gphotos/README.md](../crates/gphotos/README.md) |
+| The footage catalogue (search by meaning, people, places, ideas) | [FrameAtlas README](https://github.com/moheshmohan/FrameAtlas#readme) |
+| What changed in each release | [autocut-releases.md](autocut-releases.md) |
 | AutoCut's planner and showcases | [crates/autocut/README.md](../crates/autocut/README.md) |
 | Building on the app (rules, gates, layering) | [AGENTS.md](../AGENTS.md), [CLAUDE.md](../CLAUDE.md), [architecture.md](architecture.md) |
