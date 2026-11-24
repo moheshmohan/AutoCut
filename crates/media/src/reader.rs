@@ -210,26 +210,35 @@ impl FileReader {
     }
 
     pub(crate) fn open_in(path: &std::path::Path, pool: &Arc<FilePool>) -> io::Result<Self> {
+        // resolved once against this process's working directory, so a later change of it cannot
+        // make a reopen after eviction open another file of the same length
+        let path = std::path::absolute(path)?;
         // checked before opening: opening a named pipe with no writer blocks the caller for good
-        if !std::fs::metadata(path)?.is_file() {
+        if !std::fs::metadata(&path)?.is_file() {
             return Err(io::Error::new(io::ErrorKind::NotFound, format!("{} is not a file", path.display())));
         }
-        let file = open_nonblocking(path)?;
+        let file = open_nonblocking(&path)?;
         let m = file.metadata()?;
         if !m.is_file() {
             return Err(io::Error::new(io::ErrorKind::NotFound, format!("{} is not a file", path.display())));
         }
         let id = pool.next_id();
         pool.insert(id, file);
-        Ok(Self { path: path.to_path_buf(), len: m.len(), id, pool: pool.clone() })
+        Ok(Self { path, len: m.len(), id, pool: pool.clone() })
     }
 
     /// The open file, reopened when the pool closed it. A file now shorter than when it was opened
-    /// (replaced or truncated) is refused rather than read as the old one; a longer one (still
-    /// being written) is read up to the opened length, as before.
+    /// (replaced or truncated) is refused rather than read as the old one, whether its handle is
+    /// still pooled or was closed; a longer one (still being written) is read up to the opened
+    /// length, as before.
     fn file(&self) -> io::Result<Arc<std::fs::File>> {
         if let Some(file) = self.pool.get(self.id) {
-            return Ok(file);
+            let m = file.metadata()?;
+            if m.is_file() && m.len() >= self.len {
+                return Ok(file);
+            }
+            self.pool.remove(self.id);
+            return Err(io::Error::other(format!("{} changed since it was opened", self.path.display())));
         }
         let file = open_nonblocking(&self.path)?;
         let m = file.metadata()?;
@@ -445,6 +454,71 @@ mod tests {
         drop(readers);
         assert_eq!(pool.open_count(), 0, "dropped readers close their files");
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A file truncated while its handle is still in the pool is refused, as after eviction.
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn a_truncated_file_is_refused_while_still_pooled() {
+        let dir = std::env::temp_dir().join(format!("filmcraft-file-trunc-hit-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("clip.bin");
+        std::fs::write(&path, b"0123456789").unwrap();
+        let pool = Arc::new(FilePool::new(2));
+        let reader = FileReader::open_in(&path, &pool).unwrap();
+        assert_eq!(pool.open_count(), 1);
+        let mut b = [0u8; 5];
+        reader.read_at(0, &mut b).unwrap();
+        assert_eq!(&b, b"01234");
+        std::fs::write(&path, b"short").unwrap();
+        assert!(reader.read_at(0, &mut b).is_err(), "truncation must be refused on a cache hit too");
+        assert_eq!(pool.open_count(), 0, "the stale handle leaves the pool");
+        drop(reader);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// After eviction, a reader opened with a relative path still reads the original file when
+    /// the working directory has changed (a file of the same length waits in the new one). The
+    /// check runs in a subprocess so that this process's working directory stays as it is.
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn reopening_a_relative_path_stays_on_the_original_file() {
+        const FLAG: &str = "FILMCRAFT_MEDIA_FILE_READER_CWD_TEST";
+        const ROOT: &str = "FILMCRAFT_MEDIA_FILE_READER_CWD_ROOT";
+        const NAME: &str = "reader::tests::reopening_a_relative_path_stays_on_the_original_file";
+        if let Some(root) = std::env::var_os(ROOT).filter(|_| std::env::var_os(FLAG).is_some()) {
+            let root = std::path::PathBuf::from(root);
+            std::env::set_current_dir(root.join("a")).unwrap();
+            let pool = Arc::new(FilePool::new(1));
+            let reader = FileReader::open_in(std::path::Path::new("clip.bin"), &pool).unwrap();
+            let _evict = FileReader::open_in(std::path::Path::new("other.bin"), &pool).unwrap();
+            std::env::set_current_dir(root.join("b")).unwrap();
+            let mut buf = [0u8; 4];
+            reader.read_at(0, &mut buf).unwrap();
+            assert_eq!(&buf, b"AAAA", "the reopen must not follow the new working directory to b/clip.bin");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("filmcraft-file-cwd-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("a")).unwrap();
+        std::fs::create_dir_all(dir.join("b")).unwrap();
+        std::fs::write(dir.join("a").join("clip.bin"), b"AAAA").unwrap();
+        std::fs::write(dir.join("a").join("other.bin"), b"XXXX").unwrap();
+        std::fs::write(dir.join("b").join("clip.bin"), b"BBBB").unwrap();
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .env(FLAG, "1")
+            .env(ROOT, &dir)
+            .env("RUST_TEST_THREADS", "1")
+            .args(["--exact", NAME])
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            out.status.success() && stdout.contains(&format!("test {NAME} ... ok")),
+            "subprocess failed\nstatus: {:?}\nstdout:\n{stdout}\nstderr:\n{stderr}",
+            out.status
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// A reader that counts the bytes read from it.

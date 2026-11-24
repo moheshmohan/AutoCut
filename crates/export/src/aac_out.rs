@@ -135,8 +135,7 @@ pub(crate) fn export(
         let mut opts = WriterOptions::new(Brand::Mp4);
         opts.metadata = settings.metadata.udta();
         let mut mux = Mp4Writer::new(Out::create(settings)?, opts).map_err(|e| ExportError::Io(e.to_string()))?;
-        let mut track = TrackConfig::new(entry, a.sr);
-        track.media_start = Some(i64::from(enc.priming()));
+        let track = coded_audio_track(entry, a.sr, enc.priming());
         let track = mux.add_track(track).map_err(|e| ExportError::Io(e.to_string()))?;
         Sink::Mp4 { mux, track, frame: enc.frame_size() }
     };
@@ -155,6 +154,21 @@ pub(crate) fn export(
         progress.done.store(1, Ordering::Relaxed);
     }
     Ok((n, frames))
+}
+
+/// The MP4 track of an encoded audio stream: the encoder's priming skipped by an edit (media
+/// time `priming`), and for AAC a `roll` sample group of -1 (each access unit decodes right only
+/// after the one before it, ISO/IEC 14496-3 overlap). Apple's decoders read the priming from the
+/// edit only when the track has that group; without it they assume 2112 priming frames and drop
+/// the first 1088 frames of the sound.
+pub(crate) fn coded_audio_track(entry: filmcraft_isobmff::SampleEntry, sample_rate: u32, priming: u32) -> TrackConfig {
+    let aac = matches!(entry.codec, CodecConfig::Aac(_));
+    let mut track = TrackConfig::new(entry, sample_rate);
+    track.media_start = Some(i64::from(priming));
+    if aac && priming > 0 {
+        track.roll_distance = Some(-1);
+    }
+    track
 }
 
 /// Most channels [`encode_m4a`] takes.
@@ -180,8 +194,7 @@ pub fn encode_m4a(path: &str, channels: &[Vec<f32>], sample_rate: u32, bitrate_k
         .ok_or_else(|| ExportError::Unsupported("AAC encoder not available".into()))??;
     let entry = enc.sample_entry();
     let mut mux = Mp4Writer::new(Out::create(&settings)?, WriterOptions::new(Brand::Mp4)).map_err(|e| ExportError::Io(e.to_string()))?;
-    let mut track = TrackConfig::new(entry, sample_rate);
-    track.media_start = Some(i64::from(enc.priming()));
+    let track = coded_audio_track(entry, sample_rate, enc.priming());
     let track = mux.add_track(track).map_err(|e| ExportError::Io(e.to_string()))?;
     let mut sink = Sink::Mp4 { mux, track, frame: enc.frame_size() };
     let n = channels.iter().map(Vec::len).min().unwrap_or(0);
@@ -223,6 +236,32 @@ mod tests {
         assert!(encode_m4a(&path, &vec![vec![0.0; 10]; 9], rate, 64).is_err());
         assert!(encode_m4a(&path, &[vec![f32::NAN; 3000]], rate, 64).is_ok());
         assert!(encode_m4a(&path, &[vec![]], rate, 64).is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The priming is skipped by an edit and announced by a `roll` group of -1 over every
+    /// access unit: without the group Apple's decoders assume 2112 priming frames and drop the
+    /// first 1088 frames of the sound (afinfo showed 47040 of 48000 frames, 2112 priming).
+    #[test]
+    fn an_m4a_signals_its_priming_with_an_edit_and_a_roll_group() {
+        let dir = std::env::temp_dir().join(format!("filmcraft-m4a-roll-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("roll.m4a").to_string_lossy().into_owned();
+        let x: Vec<f32> = (0..48_000).map(|i| 0.3 * (i as f32 * 0.05).sin()).collect();
+        encode_m4a(&path, &[x.clone(), x], 48_000, 128).unwrap();
+        let data = std::fs::read(&path).unwrap();
+        let f = filmcraft_isobmff::open(data.as_slice()).unwrap();
+        let t = &f.tracks[0];
+        assert_eq!(t.edits.first().map(|e| e.media_time), Some(1024));
+        assert_eq!(t.sample_groups.len(), 1);
+        let g = &t.sample_groups[0];
+        assert_eq!(g.grouping_type, filmcraft_isobmff::FourCc(*b"roll"));
+        assert_eq!(g.runs, [(t.samples.len() as u32, 1)]);
+        assert_eq!(g.descriptions, [(-1i16).to_be_bytes().to_vec()]);
+        // a track without priming (and so without overlap to announce) gets no group
+        let entry = filmcraft_isobmff::SampleEntry::aac(vec![0x11, 0x90], 2, 48_000);
+        assert_eq!(coded_audio_track(entry.clone(), 48_000, 0).roll_distance, None);
+        assert_eq!(coded_audio_track(entry, 48_000, 1024).roll_distance, Some(-1));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

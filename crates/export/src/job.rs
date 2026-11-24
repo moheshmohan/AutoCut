@@ -637,8 +637,7 @@ impl Exporter {
         self.at = match (&self.audio, &self.aenc) {
             (None, _) => None,
             (Some(a), Some(enc)) => {
-                let mut c = TrackConfig::new(enc.sample_entry(), a.sr);
-                c.media_start = Some(enc.priming() as i64);
+                let c = crate::aac_out::coded_audio_track(enc.sample_entry(), a.sr, enc.priming());
                 Some(mux.add_track(c).map_err(|e| ExportError::Io(e.to_string()))?)
             }
             (Some(a), None) => {
