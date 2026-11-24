@@ -753,6 +753,43 @@ fn a_sequence_cut_off_by_the_depth_limit_is_complete_when_reached_higher_up() {
     assert_eq!(s63.video_tracks[0].items.len(), 1, "sequence-63 keeps its nested sequence-64");
 }
 
+/// `count` sequences in a ring: sequence-i nests sequence-(i + 1), the last one nests sequence-0.
+fn sequence_ring(count: usize) -> String {
+    let mut doc = String::from("<?xml version=\"1.0\"?><!DOCTYPE xmeml><xmeml version=\"4\"><project><name>P</name><children>");
+    for i in 0..count {
+        doc.push_str(&format!(
+            "<sequence id=\"sequence-{i}\"><name>S{i}</name><rate><timebase>24</timebase></rate><duration>24</duration><media><video><track>\
+             <clipitem id=\"clipitem-{i}\"><name>nest</name><start>0</start><end>24</end><in>0</in><out>24</out><sequence id=\"sequence-{}\"/></clipitem>\
+             </track></video></media></sequence>",
+            (i + 1) % count
+        ));
+    }
+    doc.push_str("</children></project></xmeml>");
+    doc
+}
+
+/// A sequence's item is listed before its tracks are read, so a clip of the sequence that refers
+/// to the sequence itself got its own item back: the imported sequence contained itself (and the
+/// editor then refused the whole import).
+#[test]
+fn a_sequence_that_refers_to_itself_is_imported_without_a_nest_cycle() {
+    let (imp, rep) = filmcraft_interchange::import(sequence_ring(1).as_bytes(), Format::Fcp7Xml, None).unwrap();
+    assert_eq!(imp.project.nest_cycle(), None);
+    assert!(rep.mentions("recursive nested sequence"), "{rep:?}");
+    let s0 = imp.project.sequences().find(|i| i.name == "S0").and_then(|i| imp.project.sequence(i.id)).unwrap();
+    assert_eq!(s0.video_tracks[0].items.len(), 1, "the clip stays, as an offline placeholder");
+}
+
+/// A ring longer than the depth limit: sequence-0's chain is cut off, the next sequences listed
+/// are imported again higher up, and a sequence imported earlier (sequence-0, which nests the one
+/// being imported again) must not be reused inside it.
+#[test]
+fn a_ring_of_sequences_imported_again_has_no_nest_cycle() {
+    let (imp, rep) = filmcraft_interchange::import(sequence_ring(66).as_bytes(), Format::Fcp7Xml, None).unwrap();
+    assert!(rep.mentions("nested too deeply"), "{rep:?}");
+    assert_eq!(imp.project.nest_cycle(), None);
+}
+
 #[test]
 fn a_nested_clip_left_out_by_the_depth_limit_stays_as_an_offline_placeholder_with_its_extent() {
     let n = 400;

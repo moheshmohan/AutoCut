@@ -173,6 +173,67 @@ fn media_cut_off_by_xml_layout_is_complete_when_revisited_at_the_same_media_dept
 }
 
 #[test]
+fn flat_resource_chain_is_bounded_even_when_xml_is_shallow() {
+    let mut media = String::new();
+    for i in 0..512 {
+        media.push_str(&format!(r#"<media id="m{i}" name="M{i}"><sequence><spine><ref-clip ref="m{}" duration="1s"/></spine></sequence></media>"#, i + 1));
+    }
+    let xml = format!(
+        r#"<fcpxml version="1.10"><resources>{media}</resources><project name="P"><sequence><spine><ref-clip ref="m0" duration="1s"/></spine></sequence></project></fcpxml>"#
+    );
+    let (imp, rep) = import(xml.as_bytes(), Format::Fcpxml, None).unwrap();
+    assert!(rep.mentions("nested too deeply"), "{rep:?}");
+    assert!(imp.project.items.len() <= 65, "the flat resource graph is not expanded beyond the semantic limit");
+}
+
+/// A ring of 64 resources is cut off by the depth limits when reached from project A, then partly
+/// imported again from project B, shallower. The cached M0 reaches M62, which is being rebuilt
+/// (it keeps its item), so reusing M0 under M63 used to close the ring into a nest cycle.
+#[test]
+fn shallower_retry_does_not_link_a_cached_ancestor_back_to_the_rebuilt_item() {
+    let mut media = String::new();
+    for i in 0..64 {
+        media.push_str(&format!(
+            r#"<media id="m{i}" name="M{i}"><sequence><spine><ref-clip ref="m{}" duration="1s"/></spine></sequence></media>"#,
+            (i + 1) % 64
+        ));
+    }
+    let xml = format!(
+        r#"<fcpxml version="1.10"><resources>{media}</resources>
+        <project name="A"><sequence><spine><ref-clip ref="m0" duration="1s"/></spine></sequence></project>
+        <project name="B"><sequence><spine><ref-clip ref="m62" duration="1s"/></spine></sequence></project></fcpxml>"#
+    );
+    let (imp, rep) = import(xml.as_bytes(), Format::Fcpxml, None).unwrap();
+    // the final graph, not just the resource ids active during the import
+    assert_eq!(imp.project.nest_cycle(), None, "cached media introduced a nest cycle");
+    assert!(rep.mentions("cached media"), "{rep:?}");
+}
+
+/// M0 is cut off by the depth limit when reached through W, then imported again from project B,
+/// where it fits. Its own reference to itself found M0's (already cached) item before the
+/// recursion check, so the re-imported M0 contained itself.
+#[test]
+fn media_imported_again_does_not_contain_itself() {
+    let mut media = String::from(
+        r#"<media id="w" name="W"><sequence><spine><ref-clip ref="m0" duration="1s"/></spine></sequence></media>
+        <media id="m0" name="M0"><sequence><spine><ref-clip ref="m1" duration="1s"/><ref-clip ref="m0" offset="1s" duration="1s"/></spine></sequence></media>"#,
+    );
+    for i in 1..63 {
+        media.push_str(&format!(r#"<media id="m{i}" name="M{i}"><sequence><spine><ref-clip ref="m{}" duration="1s"/></spine></sequence></media>"#, i + 1));
+    }
+    media.push_str(r#"<media id="m63" name="M63"><sequence><spine/></sequence></media>"#);
+    let xml = format!(
+        r#"<fcpxml version="1.10"><resources>{media}</resources>
+        <project name="A"><sequence><spine><ref-clip ref="w" duration="1s"/></spine></sequence></project>
+        <project name="B"><sequence><spine><ref-clip ref="m0" duration="1s"/></spine></sequence></project></fcpxml>"#
+    );
+    let (imp, rep) = import(xml.as_bytes(), Format::Fcpxml, None).unwrap();
+    assert!(rep.mentions("nested too deeply") || rep.mentions("XML"), "the first visit is cut off: {rep:?}");
+    assert_eq!(imp.project.nest_cycle(), None, "M0 contains itself");
+    assert!(rep.mentions("recursive FCPXML media"), "{rep:?}");
+}
+
+#[test]
 fn golden_connected_clips() {
     let d = doc();
     assert_eq!(detect(d.as_bytes(), Some("fcpxml")), Some(Format::Fcpxml));

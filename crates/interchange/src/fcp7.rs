@@ -124,6 +124,8 @@ struct Imp<'a, 'i, 'r> {
     truncated_at: HashMap<String, usize>,
     /// Re-imports of truncated sequences still allowed.
     reimports_left: usize,
+    /// Nested references cached sequences may still be checked through ([`crate::common::reaches_active`]).
+    cache_edges_left: usize,
     links: Vec<PendingLink>,
     xml_clip_ids: HashMap<(ItemId, String), ClipId>,
     /// `(sequence key, file key)` pairs where some audio clip item of that file uses `sourcetrack/trackindex` > 1,
@@ -173,6 +175,7 @@ pub(crate) fn import(text_in: &str, opts: &ImportOptions, report: &mut Report) -
         depth_hits: 0,
         truncated_at: HashMap::new(),
         reimports_left: MAX_REIMPORTS,
+        cache_edges_left: crate::common::MAX_CACHE_EDGES,
         links: Vec::new(),
         xml_clip_ids: HashMap::new(),
         split_files: HashSet::new(),
@@ -330,24 +333,43 @@ impl<'a, 'i> Imp<'a, 'i, '_> {
         Some(id)
     }
 
+    /// Whether the cached sequence item `root` reaches a sequence being imported right now (a
+    /// sequence imported again keeps its item, which a sequence imported earlier may contain).
+    fn cache_reaches_active(&mut self, root: ItemId) -> bool {
+        let active: HashSet<ItemId> = self.in_progress.iter().filter_map(|k| self.seq_items.get(k).copied()).collect();
+        crate::common::reaches_active(&self.b.p, root, &active, &mut self.cache_edges_left)
+    }
+
     /// Sequence item for a `<sequence>` element (definition or reference).
     fn sequence(&mut self, n: Node<'a, 'i>, bin: Option<BinId>) -> Option<ItemId> {
         let key = node_key(n);
+        // A sequence's item is listed before its tracks are read, so a reference to it from inside
+        // itself is refused before that lookup, or the sequence would contain itself.
+        if self.in_progress.contains(&key) {
+            self.report.warn("recursive nested sequence ignored");
+            return None;
+        }
         let depth = self.in_progress.len();
         // A sequence imported with a nested sequence cut off is imported again (into the same
         // item) when it is reached higher up the chain, where its nested sequence now fits.
         let mut again = None;
-        if let Some(id) = self.seq_items.get(&key) {
-            let shallower = self.truncated_at.get(&key).is_some_and(|d| depth < *d) && !self.in_progress.contains(&key);
-            if !shallower {
-                return Some(*id);
-            }
-            if self.reimports_left == 0 {
+        if let Some(id) = self.seq_items.get(&key).copied() {
+            let shallower = self.truncated_at.get(&key).is_some_and(|d| depth < *d);
+            if shallower && self.reimports_left == 0 {
                 self.report.warn("truncated nested sequence kept incomplete after the re-import limit was reached");
-                return Some(*id);
+            }
+            if !shallower || self.reimports_left == 0 {
+                // one imported earlier that contains a sequence being imported again (higher up
+                // the chain) would put that sequence inside itself
+                if self.cache_reaches_active(id) {
+                    self.depth_hits += 1;
+                    self.report.warn("nested sequence could contain itself through one imported earlier; imported as a gap");
+                    return None;
+                }
+                return Some(id);
             }
             self.reimports_left -= 1;
-            again = Some(*id);
+            again = Some(id);
         }
         let def = if child(n, "media").is_some() { n } else { *self.seq_defs.get(&key)? };
         if depth >= crate::MAX_NESTING_DEPTH {

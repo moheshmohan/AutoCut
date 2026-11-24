@@ -154,6 +154,8 @@ struct Imp<'a, 'i, 'r> {
     media_truncated_at: HashMap<String, (usize, usize)>,
     /// Re-imports of truncated media still allowed.
     reimports_left: usize,
+    /// Nested references cached media may still be checked through ([`crate::common::reaches_active`]).
+    cache_edges_left: usize,
     effects: HashMap<String, String>,
     /// Current storyline/element nesting, checked against [`MAX_XML_DEPTH`].
     depth: usize,
@@ -191,6 +193,7 @@ pub(crate) fn import(text: &str, opts: &ImportOptions, report: &mut Report) -> R
         depth_hits: 0,
         media_truncated_at: HashMap::new(),
         reimports_left: MAX_REIMPORTS,
+        cache_edges_left: crate::common::MAX_CACHE_EDGES,
         effects: HashMap::new(),
         depth: 0,
     };
@@ -309,21 +312,40 @@ impl<'a, 'i> Imp<'a, 'i, '_> {
         Some(a)
     }
 
+    /// Whether the cached media item `root` reaches media being imported right now: an item
+    /// imported again keeps its id, so a cached ancestor that already points to it must not be put
+    /// inside it, even when no resource id on the way is active.
+    fn cache_reaches_active(&mut self, root: ItemId) -> bool {
+        let active: HashSet<ItemId> = self.media_active.iter().filter_map(|id| self.media_items.get(id).copied()).collect();
+        crate::common::reaches_active(&self.b.p, root, &active, &mut self.cache_edges_left)
+    }
+
     /// Nested sequence from a `<media>` resource.
     fn media(&mut self, id: &str) -> Option<ItemId> {
+        // Checked before the cache: a truncated resource being imported again already has an
+        // item, and a reference back to it must never make that item contain itself.
+        if self.media_active.contains(id) {
+            self.report.warn(format!("recursive FCPXML media resource {id:?} ignored"));
+            return None;
+        }
         let depth = self.media_active.len();
         let mut again = None;
-        if let Some(i) = self.media_items.get(id) {
+        if let Some(i) = self.media_items.get(id).copied() {
             // Imported with a nested one cut off: import it again (into the same item) where that
             // one now fits.
             let shallower =
-                self.media_truncated_at.get(id).is_some_and(|&(media, xml)| depth <= media && self.depth <= xml && (depth < media || self.depth < xml))
-                    && !self.media_active.contains(id);
+                self.media_truncated_at.get(id).is_some_and(|&(media, xml)| depth <= media && self.depth <= xml && (depth < media || self.depth < xml));
             if !shallower || self.reimports_left == 0 {
-                return Some(*i);
+                if self.cache_reaches_active(i) {
+                    self.depth_hits += 1;
+                    self.report
+                        .warn(format!("FCPXML cached media {id:?} could form a recursive graph or exceeds the cache traversal budget; imported as a gap"));
+                    return None;
+                }
+                return Some(i);
             }
             self.reimports_left -= 1;
-            again = Some(*i);
+            again = Some(i);
         }
         let n = *self.media_nodes.get(id)?;
         let s = child(n, "sequence")?;

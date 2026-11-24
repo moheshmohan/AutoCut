@@ -1,7 +1,7 @@
 //! Shared helpers: fragment builder, track placement, media paths/URLs, effect and transition
 //! mapping, frame/tick conversion.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use filmcraft_color::ColorInfo;
 use filmcraft_media::{AudioStreamInfo, Generator, MediaInfo, MediaKind, VideoStreamInfo};
@@ -17,6 +17,42 @@ use crate::{Imported, Report};
 /// labels. This remains well above common editorial timelines while keeping
 /// hostile lane/channel numbers from allocating every intervening track.
 pub(crate) const MAX_IMPORTED_TRACKS: usize = 256;
+
+/// Nested references one import may follow, over the whole document, to show that reusing a
+/// sequence it already built cannot put a sequence inside itself. A hostile document can refer to
+/// the same large imported graph many times, so the work is bounded in total, not per walk.
+pub(crate) const MAX_CACHE_EDGES: usize = 1_000_000;
+
+/// Whether the already built sequence `root` is, or contains (directly or through the sequences
+/// nested in it), one of `active`: the sequences being imported right now. Reusing `root` inside
+/// them would then nest a sequence inside itself. Every reference followed spends one of
+/// `edges_left`; when they run out the answer is `true`, since reuse cannot be shown to be safe.
+pub(crate) fn reaches_active(p: &Project, root: ItemId, active: &HashSet<ItemId>, edges_left: &mut usize) -> bool {
+    if active.is_empty() {
+        return false;
+    }
+    let mut seen = HashSet::from([root]);
+    let mut pending = vec![root];
+    while let Some(id) = pending.pop() {
+        if active.contains(&id) {
+            return true;
+        }
+        let Some(seq) = p.sequence(id) else { continue };
+        for item in seq.all_tracks().flat_map(|track| &track.items) {
+            if *edges_left == 0 {
+                return true;
+            }
+            *edges_left -= 1;
+            if active.contains(&item.item) {
+                return true;
+            }
+            if seen.insert(item.item) {
+                pending.push(item.item);
+            }
+        }
+    }
+    false
+}
 
 // ---------------------------------------------------------------------------------------------
 // Paths and URLs
