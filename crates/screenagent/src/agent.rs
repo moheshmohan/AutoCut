@@ -61,11 +61,26 @@ pub struct Plan {
     /// nothing new, a grid that never ends within the budget, or more than `max_items` selected
     /// is an error, and Done is never pressed. `queries` is ignored; `select_all` is implied.
     pub album: Option<String>,
+    /// Pick exactly these items instead — ones a catalogue found, say by what they look like:
+    /// each is searched by its day and ticked by its tile in the picker's page, matched by when it
+    /// was taken ([`crate::items`]); no other tile is ticked. Needs the page (Chrome with View ▸
+    /// Developer ▸ Allow JavaScript from Apple Events): by eyes the tiles' times cannot be read.
+    /// `queries`, `album` and `select_all` are then unused.
+    pub items: Vec<crate::items::Wanted>,
 }
 
 impl Default for Plan {
     fn default() -> Self {
-        Self { queries: Vec::new(), max_items: 6, videos_only: true, max_actions: 40, timeout: Duration::from_secs(300), select_all: false, album: None }
+        Self {
+            queries: Vec::new(),
+            max_items: 6,
+            videos_only: true,
+            max_actions: 40,
+            timeout: Duration::from_secs(300),
+            select_all: false,
+            album: None,
+            items: Vec::new(),
+        }
     }
 }
 
@@ -94,6 +109,8 @@ pub struct Request {
     /// Only videos: searches ask Google for videos. An album is selected whole, photos too (the
     /// picker cannot select by type): the caller skips its photos when it downloads.
     pub videos_only: bool,
+    /// Pick exactly these items instead (see [`Plan::items`]); the rest is then unused.
+    pub items: Vec<crate::items::Wanted>,
 }
 
 /// How one search of a session went.
@@ -248,6 +265,19 @@ pub fn clean_queries(queries: Vec<String>) -> Vec<String> {
 /// actions to get there); otherwise the queries are searched, one after another, with a budget
 /// that grows with each.
 pub fn plan_for(req: Request) -> Plan {
+    if !req.items.is_empty() {
+        let items: Vec<crate::items::Wanted> = req.items.into_iter().take(crate::items::MAX_ITEMS).collect();
+        let searches = item_searches(&items);
+        let n = u32::try_from(searches).unwrap_or(u32::MAX);
+        return Plan {
+            max_items: u32::try_from(items.len()).unwrap_or(MAX_PICK).min(MAX_PICK),
+            items,
+            videos_only: false,
+            max_actions: ITEM_ACTIONS_PER_SEARCH.saturating_mul(n).saturating_add(DONE_RESERVE_ACTIONS),
+            timeout: ITEM_BASE_TIME.saturating_add(ITEM_TIME_PER_SEARCH.saturating_mul(n)).min(MAX_SESSION_TIME),
+            ..Plan::default()
+        };
+    }
     match req.album {
         Some(album) => Plan {
             queries: Vec::new(),
@@ -269,7 +299,16 @@ pub fn plan_for(req: Request) -> Plan {
                 let more = TIME_PER_SEARCH.saturating_mul(n.saturating_sub(1));
                 (ACTIONS_PER_SEARCH.saturating_mul(n).saturating_add(DONE_RESERVE_ACTIONS), d.timeout.saturating_add(more).min(MAX_SESSION_TIME))
             };
-            Plan { queries, max_items: req.max_items, select_all: req.select_all, videos_only: req.videos_only, max_actions, timeout, album: None }
+            Plan {
+                queries,
+                max_items: req.max_items,
+                select_all: req.select_all,
+                videos_only: req.videos_only,
+                max_actions,
+                timeout,
+                album: None,
+                items: Vec::new(),
+            }
         }
     }
 }
@@ -335,6 +374,15 @@ fn drive_inner<A: Act, G: Ground>(
     actor.activate()?;
     actor.sleep(600);
     let mut cap = actor.capture()?;
+
+    // exact items: by their days and their tiles' times, in the page only
+    if !plan.items.is_empty() {
+        let Some(page) = open_page(actor, driven, progress) else {
+            return Err(ScreenError::Other(ITEMS_NEED_PAGE.into()));
+        };
+        pick_items(actor, grounder, plan, &mut summary, &mut cap, &page, started, progress)?;
+        return finish(actor, grounder, plan, summary, cap, started, progress);
+    }
 
     // 1–2. the album's search result, selected whole (or an error with nothing selected): tile by
     // tile in the picker's page where the browser runs scripts in it, else by eyes that never see
@@ -1794,6 +1842,114 @@ fn range_once<A: Act, G: Ground>(
 }
 
 /// Count an action; `Ok(true)` = budget exhausted.
+/// Day searches an item pick is budgeted for: one per UTC day its items were taken on, half as
+/// many again for items found on the day next to it, at most [`MAX_ITEM_SEARCHES`].
+fn item_searches(items: &[crate::items::Wanted]) -> usize {
+    let days: std::collections::BTreeSet<chrono::NaiveDate> = items.iter().map(|w| w.taken.date_naive()).collect();
+    days.len().saturating_add(days.len() / 2).clamp(1, MAX_ITEM_SEARCHES)
+}
+
+/// The most day searches one item pick makes (the rest of its items are [`Summary::left`]).
+pub const MAX_ITEM_SEARCHES: usize = 30;
+/// Actions and time per day search of an item pick, and the time it starts with.
+const ITEM_ACTIONS_PER_SEARCH: u32 = 4;
+const ITEM_TIME_PER_SEARCH: Duration = Duration::from_secs(75);
+const ITEM_BASE_TIME: Duration = Duration::from_secs(120);
+/// Seconds the page is watched for a day search's results.
+const ITEM_PAGE_LOOKS: u32 = 20;
+
+const ITEMS_NEED_PAGE: &str = "picking exact items needs the picker's page — Chrome with View ▸ Developer ▸ Allow JavaScript from Apple Events ticked — to read when each tile was taken; nothing was selected";
+
+/// The Mac's offset from UTC at `t`, in minutes: each item's first guess at its zone.
+fn home_offset(t: chrono::DateTime<chrono::Utc>) -> i32 {
+    use chrono::{Offset, TimeZone};
+    chrono::Local.offset_from_utc_datetime(&t.naive_utc()).fix().local_minus_utc() / 60
+}
+
+/// Search each wanted item's day and tick its tile in the page ([`crate::items::Matcher`] says
+/// which tile is which item), until every item has a tile, has had its days, or the budget ends.
+/// Items with no tile are [`Summary::left`] (their RFC 3339 times).
+#[allow(clippy::too_many_arguments)]
+fn pick_items<A: Act, G: Ground>(
+    actor: &mut A,
+    grounder: &G,
+    plan: &Plan,
+    summary: &mut Summary,
+    cap: &mut crate::capture::Capture,
+    page: &Page,
+    started: Instant,
+    progress: &mut dyn FnMut(&str),
+) -> Result<(), ScreenError> {
+    use crate::dom::{self, Results, Step};
+    let out_of_time = || started.elapsed() >= plan.timeout;
+    let mut m = crate::items::Matcher::new(plan.items.clone(), &home_offset);
+    let Some(field) = find_search_field(actor, grounder, cap, progress)? else {
+        return Err(ScreenError::Other("the picker's search field never appeared, so no day could be searched; nothing was selected".into()));
+    };
+    let Some(mut shown) = dom::settled_tiles(actor, &page.tab)? else {
+        return Err(ScreenError::Other("the picker's page shows no settled grid; nothing was selected".into()));
+    };
+    progress(&format!("screenagent: picking {} item(s) by the days they were taken", m.len()));
+    let mut typed: Option<usize> = None;
+    let mut searches = 0usize;
+    while let Some(day) = m.next_day() {
+        let left = plan.timeout.saturating_sub(started.elapsed());
+        if searches >= MAX_ITEM_SEARCHES || left < SEARCH_MIN_TIME.saturating_add(DONE_RESERVE_TIME) || spend(summary, plan)? {
+            progress("screenagent: out of budget for more day searches; the items not found are left for another pick");
+            break;
+        }
+        let text = crate::items::day_text(day);
+        type_search(actor, cap, &field, &text, typed, progress)?;
+        typed = Some(text.chars().count());
+        summary.searched = true;
+        searches += 1;
+        let before = m.found();
+        let (outcome, note) = match dom::wait_for_results(actor, &page.tab, &shown, ITEM_PAGE_LOOKS)? {
+            Results::Shown(_) => {
+                let labels = dom::grid_labels(actor, &page.tab, &out_of_time)?;
+                let tick = m.choose(day, &labels);
+                if !tick.is_empty() {
+                    let ticked = dom::tick_labels(actor, &page.tab, &tick, &out_of_time)?;
+                    for l in tick.iter().filter(|l| !ticked.contains(*l)) {
+                        progress(&format!("screenagent: the tile `{l}` would not tick"));
+                        m.untick(l);
+                    }
+                }
+                let got = m.found().saturating_sub(before);
+                (if got > 0 { Outcome::Selected } else { Outcome::NothingNew }, format!("{got} of its {} tile(s) ticked", labels.len()))
+            }
+            Results::Empty => {
+                m.choose(day, &[]);
+                (Outcome::NoResults, String::new())
+            }
+            Results::Unchanged => {
+                m.choose(day, &[]);
+                (Outcome::Failed, format!("the grid did not change in the {ITEM_PAGE_LOOKS} s after Return"))
+            }
+        };
+        // the next search's results are told from the grid as it is now, at its top
+        let top = dom::run(actor, &page.tab, Step::Top)?;
+        shown = top.labels();
+        let selected = top.selected();
+        progress(&format!("screenagent: `{text}`: {}", outcome_line(outcome, selected, &note)));
+        summary.searches.push(Searched { query: text, outcome, selected, note });
+    }
+    let look = dom::run(actor, &page.tab, Step::Look)?;
+    let found = m.found();
+    summary.selected = look.selected().unwrap_or(u32::try_from(found).unwrap_or(u32::MAX));
+    summary.left = m.left();
+    let mut note = format!("ticked {found} of {} item(s) over {searches} day search(es)", m.len());
+    if !m.ambiguous.is_empty() {
+        note.push_str(&format!("; {} had two tiles that fitted equally and were left", m.ambiguous.len()));
+    }
+    if found < m.len() {
+        note.push_str(&format!("; {} not found (in `left`)", m.len().saturating_sub(found)));
+    }
+    summary.note = note;
+    *cap = actor.capture()?;
+    Ok(())
+}
+
 fn spend(summary: &mut Summary, plan: &Plan) -> Result<bool, ScreenError> {
     summary.actions += 1;
     if summary.actions > plan.max_actions {
@@ -2346,9 +2502,9 @@ mod tests {
 
     #[test]
     fn requests_become_plans() {
-        let p = plan_for(Request { queries: vec!["beach".into()], max_items: 4, select_all: true, album: None, videos_only: true });
+        let p = plan_for(Request { items: Vec::new(), queries: vec!["beach".into()], max_items: 4, select_all: true, album: None, videos_only: true });
         assert_eq!((p.queries.as_slice(), p.max_items, p.select_all, p.videos_only, p.album), (["beach".to_string()].as_slice(), 4, true, true, None));
-        let p = plan_for(Request { queries: vec![], max_items: 0, select_all: false, album: Some("Robots".into()), videos_only: false });
+        let p = plan_for(Request { items: Vec::new(), queries: vec![], max_items: 0, select_all: false, album: Some("Robots".into()), videos_only: false });
         assert_eq!((p.queries.is_empty(), p.select_all, p.videos_only, p.album.as_deref()), (true, true, false, Some("Robots")));
         assert!(p.max_actions >= Plan::default().max_actions);
     }
@@ -2591,7 +2747,14 @@ mod tests {
     }
 
     fn many(queries: &[&str], max_items: u32) -> Plan {
-        plan_for(Request { queries: queries.iter().map(|q| q.to_string()).collect(), max_items, select_all: true, album: None, videos_only: true })
+        plan_for(Request {
+            items: Vec::new(),
+            queries: queries.iter().map(|q| q.to_string()).collect(),
+            max_items,
+            select_all: true,
+            album: None,
+            videos_only: true,
+        })
     }
 
     fn outcomes(s: &Summary) -> Vec<(Outcome, Option<u32>)> {
@@ -2719,12 +2882,12 @@ mod tests {
     #[test]
     fn many_queries_get_a_budget_that_grows_with_them() {
         let qs = |n: usize| (0..n).map(|i| format!("q{i}")).collect::<Vec<_>>();
-        let p = plan_for(Request { queries: qs(5), max_items: MAX_PICK, select_all: true, album: None, videos_only: true });
+        let p = plan_for(Request { items: Vec::new(), queries: qs(5), max_items: MAX_PICK, select_all: true, album: None, videos_only: true });
         assert_eq!((p.max_actions, p.timeout), (ACTIONS_PER_SEARCH * 5 + DONE_RESERVE_ACTIONS, Duration::from_secs(300 + 4 * 180)));
-        let p = plan_for(Request { queries: qs(500), max_items: MAX_PICK, select_all: true, album: None, videos_only: true });
+        let p = plan_for(Request { items: Vec::new(), queries: qs(500), max_items: MAX_PICK, select_all: true, album: None, videos_only: true });
         assert_eq!(p.timeout, MAX_SESSION_TIME, "bounded");
         // one query keeps the single-search budget
-        let p = plan_for(Request { queries: qs(1), max_items: 6, select_all: false, album: None, videos_only: true });
+        let p = plan_for(Request { items: Vec::new(), queries: qs(1), max_items: 6, select_all: false, album: None, videos_only: true });
         assert_eq!((p.max_actions, p.timeout), (Plan::default().max_actions, Plan::default().timeout));
         // queries are cleaned: no control characters, no blanks, no repeats, bounded
         let q = clean_queries(vec![" a\tb\nc ".into(), "".into(), "   ".into(), "A B C".into(), "x".repeat(500), "d\u{7}".into()]);
@@ -2739,7 +2902,14 @@ mod tests {
         // without select-all: up to max_items tiles in all, over the searches
         let w = world();
         let eyes = Eyes::new(&w, &[]);
-        let plan = plan_for(Request { queries: vec!["a".into(), "b".into(), "c".into()], max_items: 4, select_all: false, album: None, videos_only: true });
+        let plan = plan_for(Request {
+            items: Vec::new(),
+            queries: vec!["a".into(), "b".into(), "c".into()],
+            max_items: 4,
+            select_all: false,
+            album: None,
+            videos_only: true,
+        });
         let s = drive(&mut Hands(Rc::clone(&w)), &eyes, &plan, &mut |_| {}).unwrap();
         assert_eq!(s.selected, 4, "{s:?}");
         assert_eq!(s.left, ["c"], "{s:?}");
@@ -3418,6 +3588,16 @@ mod tests {
                 let next = (self.dom_top + DOM_STEP).min(end);
                 moved = next != self.dom_top;
                 self.dom_top = next;
+            } else if let Some(list) = js.split("var want=[").nth(1).and_then(|r| r.split(']').next()) {
+                // a tick script: the tiles in the page whose labels hash to one of its numbers
+                let want: Vec<u32> = list.split(',').filter_map(|n| n.parse().ok()).collect();
+                for item in self.in_page() {
+                    let label = crate::dom::tile_label(&self.aria(item)).unwrap_or_default();
+                    if !self.selected.contains(&item) && !self.wont_tick.contains(&item) && want.contains(&crate::items::label_hash(&label)) {
+                        self.selected.insert(item);
+                        clicked += 1;
+                    }
+                }
             } else if js != script(Step::Look) {
                 return Err(ScreenError::Other(format!("unexpected page script: {js}")));
             }
@@ -3641,7 +3821,7 @@ mod tests {
     }
 
     fn album_plan(title: &str, videos_only: bool) -> Plan {
-        plan_for(Request { album: Some(title.into()), videos_only, queries: vec!["ignored".into()], max_items: 0, select_all: false })
+        plan_for(Request { items: Vec::new(), album: Some(title.into()), videos_only, queries: vec!["ignored".into()], max_items: 0, select_all: false })
     }
 
     const ROBOTS: &str = "Every Robot I've Met";
@@ -3730,7 +3910,7 @@ mod tests {
         // a grid that ends, with more than this run's maximum selected: not confirmed either
         let w = Shelf::new(300, &[(ROBOTS, robots())]);
         w.borrow_mut().results = (7..107).collect();
-        let plan = plan_for(Request { album: Some("robots".into()), videos_only: true, queries: vec![], max_items: 50, select_all: true });
+        let plan = plan_for(Request { items: Vec::new(), album: Some("robots".into()), videos_only: true, queries: vec![], max_items: 50, select_all: true });
         let (s, lines) = drive_shelf(&w, &plan);
         let err = s.unwrap_err().to_string();
         assert!(err.contains("selected 100, more than this run's 50-item maximum") && err.contains("Done was not pressed"), "{err} {lines:#?}");
@@ -3862,7 +4042,7 @@ mod tests {
             w.js = Some(true);
             w.results = (7..107).collect();
         }
-        let plan = plan_for(Request { album: Some("robots".into()), videos_only: true, queries: vec![], max_items: 50, select_all: true });
+        let plan = plan_for(Request { items: Vec::new(), album: Some("robots".into()), videos_only: true, queries: vec![], max_items: 50, select_all: true });
         let (s, lines) = drive_shelf(&w, &plan);
         let err = s.unwrap_err().to_string();
         assert!(err.contains("more than this run's 50-item maximum") && err.contains("Done was not pressed"), "{err} {lines:#?}");
@@ -3895,5 +4075,74 @@ mod tests {
         let (s, _) = drive_shelf(&w, &album_plan("akku tesla", true));
         let s = s.unwrap();
         assert!(s.album_shown && !s.done_pressed && s.selected == 0 && s.note.contains("showed no item to select"), "{s:?}");
+    }
+
+    /// What a catalogue knows of the shelf's item `item`: its UTC time (the Mac's zone taken off
+    /// the local time its tile shows) and its kind.
+    fn wanted_of(w: &Rc<RefCell<Shelf>>, item: usize) -> crate::items::Wanted {
+        use chrono::TimeZone;
+        let label = crate::dom::tile_label(&w.borrow().aria(item)).unwrap();
+        let (video, local) = crate::items::tile_time(&label).unwrap();
+        let off = home_offset(chrono::Utc.from_utc_datetime(&local));
+        crate::items::Wanted { taken: chrono::Utc.from_utc_datetime(&(local - chrono::Duration::minutes(i64::from(off)))), video }
+    }
+
+    fn day_search(item: usize) -> &'static str {
+        let label = Shelf::day_label(item);
+        let day = chrono::NaiveDate::parse_from_str(&label, "%b %d, %Y").unwrap();
+        Box::leak(crate::items::day_text(day).into_boxed_str())
+    }
+
+    #[test]
+    fn exact_items_are_searched_by_day_and_only_their_tiles_ticked() {
+        // two days' grids, as the picker answers their dates; the items wanted are a video of
+        // the first, and a photo and a video of the second
+        let w = Shelf::new(40, &[]);
+        w.borrow_mut().albums = vec![(day_search(4), vec![4, 5, 6, 7]), (day_search(8), vec![8, 9, 10, 11])];
+        w.borrow_mut().js = Some(true);
+        let items = vec![wanted_of(&w, 5), wanted_of(&w, 9), wanted_of(&w, 10)];
+        let plan = plan_for(Request { items, ..Request::default() });
+        assert_eq!((plan.max_items, plan.select_all, plan.videos_only), (3, false, false));
+        let (s, lines) = drive_shelf(&w, &plan);
+        let s = s.unwrap_or_else(|e| panic!("{e}\n{}", lines.join("\n")));
+        let picked: Vec<usize> = w.borrow().selected.iter().copied().collect();
+        assert_eq!(picked, [5, 9, 10], "only the wanted tiles\n{}", lines.join("\n"));
+        assert!(s.done_pressed && w.borrow().done);
+        assert_eq!(s.searches.len(), 2, "one search per day: {:?}", s.searches);
+        assert!(s.left.is_empty());
+        assert!(s.note.starts_with("ticked 3 of 3 item(s) over 2 day search(es)"), "{}", s.note);
+    }
+
+    #[test]
+    fn an_item_no_day_shows_is_left_and_the_rest_are_picked() {
+        let w = Shelf::new(40, &[]);
+        w.borrow_mut().albums = vec![(day_search(4), vec![4, 5, 6, 7])];
+        w.borrow_mut().js = Some(true);
+        // item 20's day is never answered (its search shows nothing): it is looked for on its
+        // days, then left with its time
+        let lost = wanted_of(&w, 20);
+        let plan = plan_for(Request { items: vec![wanted_of(&w, 6), lost], ..Request::default() });
+        let (s, lines) = drive_shelf(&w, &plan);
+        let s = s.unwrap_or_else(|e| panic!("{e}\n{}", lines.join("\n")));
+        assert_eq!(w.borrow().selected.iter().copied().collect::<Vec<_>>(), [6]);
+        assert!(s.done_pressed);
+        assert_eq!(s.left, [lost.rfc3339()]);
+        assert!(s.searches.len() >= 2 && s.searches.len() <= 4, "{:?}", s.searches);
+        assert!(s.searches.iter().any(|q| q.outcome == Outcome::NoResults));
+    }
+
+    #[test]
+    fn exact_items_need_the_page_and_nothing_is_selected_without_it() {
+        let w = Shelf::new(12, &[]);
+        let plan = plan_for(Request { items: vec![wanted_of(&w, 5)], ..Request::default() });
+        let (s, _) = drive_shelf(&w, &plan);
+        let e = s.unwrap_err().to_string();
+        assert!(e.contains("Allow JavaScript from Apple Events"), "{e}");
+        assert!(w.borrow().selected.is_empty() && !w.borrow().done);
+        // and an item pick's budget grows with its days, within the session's
+        let many: Vec<crate::items::Wanted> = (0..400).map(|i| wanted_of(&w, i % 12)).collect();
+        let p = plan_for(Request { items: many, ..Request::default() });
+        assert_eq!(p.items.len(), crate::items::MAX_ITEMS);
+        assert!(p.timeout <= MAX_SESSION_TIME && p.max_actions > 0);
     }
 }

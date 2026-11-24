@@ -250,6 +250,33 @@ fn retrieve(client: &Client, selection: &Value, folder: &Path) -> Result<Value, 
     Ok(json!({"plan":path,"receipt":receipt,"entries":entries.len(),"ready":true}))
 }
 
+/// The most items one `photos pick --meaning` asks FrameAtlas for.
+pub const MAX_MEANING: u32 = 200;
+
+/// FrameAtlas's search by meaning over the user's Google Photos (`search_meaning`): each found
+/// item's `(captured, kind)`, best first — videos only unless `photos`. Blocking HTTP.
+pub fn meaning_items(port: u16, query: &str, photos: bool, limit: u32) -> Result<Vec<(String, String)>, String> {
+    let client = Client::new(port).map_err(|e| format!("not reachable on port {port} ({e}); is FrameAtlas running?"))?;
+    let mut args = json!({"query": query, "limit": limit.clamp(1, MAX_MEANING), "provider": "google_photos"});
+    if !photos {
+        args["kind"] = json!("video");
+    }
+    Ok(meaning_rows(&client.call("search_meaning", &args)?, limit))
+}
+
+/// The `(captured, kind)` of a `search_meaning` answer's items: only those with a time and a kind
+/// of `video` or `photo`, at most `limit` (and [`MAX_MEANING`]).
+fn meaning_rows(answer: &Value, limit: u32) -> Vec<(String, String)> {
+    let take = usize::try_from(limit.clamp(1, MAX_MEANING)).unwrap_or(1);
+    let Some(items) = answer.get("items").and_then(Value::as_array) else { return Vec::new() };
+    items
+        .iter()
+        .filter_map(|i| Some((i.get("captured")?.as_str()?.to_string(), i.get("kind")?.as_str()?.to_string())))
+        .filter(|(c, k)| !c.is_empty() && c.len() <= 64 && matches!(k.as_str(), "video" | "photo"))
+        .take(take)
+        .collect()
+}
+
 pub async fn run(a: &Args) {
     if let Some(option) = a.unknown_opt(&["--project", "--save", "--save-as", "--bridge", "--data-dir", "--json", "--compact", "--catalog-port"]) {
         fail(format!("catalog: unknown option {option}"));
@@ -289,6 +316,26 @@ pub async fn run(a: &Args) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn meaning_answers_are_read_defensively() {
+        let answer = json!({"items": [
+            {"captured": "2024-10-02T06:54:35Z", "kind": "video", "cosine": 0.12},
+            {"captured": "2024-10-03T06:54:35Z", "kind": "audio"},
+            {"kind": "photo"},
+            {"captured": 5, "kind": "photo"},
+            {"captured": "x".repeat(500), "kind": "photo"},
+            {"captured": "2024-10-04T06:54:35Z", "kind": "photo"},
+            "garbage"
+        ]});
+        let rows = meaning_rows(&answer, 10);
+        assert_eq!(rows, [("2024-10-02T06:54:35Z".to_string(), "video".to_string()), ("2024-10-04T06:54:35Z".to_string(), "photo".to_string())]);
+        assert_eq!(meaning_rows(&answer, 1).len(), 1);
+        assert!(meaning_rows(&json!({"error": "no vectors"}), 10).is_empty());
+        assert!(meaning_rows(&json!({"items": "all"}), 10).is_empty());
+        let many = json!({"items": vec![json!({"captured": "2024-10-02T06:54:35Z", "kind": "video"}); 5000]});
+        assert_eq!(meaning_rows(&many, u32::MAX).len(), MAX_MEANING as usize);
+    }
+
     #[test]
     fn hostile_selection_fails_before_network() {
         for value in [json!({"entries":[]}), json!({"entries":[{"id":"x","evil":true}]}), json!({"entries":[{}]})] {

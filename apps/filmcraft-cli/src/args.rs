@@ -177,6 +177,8 @@ const VALUED_IN: &[(&str, &[&str])] = &[
     ("trailer", &["--plan", "--robots", "--hook", "--hook-at", "--logo", "--end-text", "--link", "--include", "--seed"]),
     ("captions", &["--track", "--words", "--active-color", "--keyword-color", "--keywords", "--emoji", "--position", "--font", "--from"]),
     ("scenes", &["--detail", "--limit", "--purpose", "--count", "--sheet"]),
+    // photos pick --meaning: what FrameAtlas should find by meaning
+    ("photos", &["--meaning"]),
     ("quick", &["--template", "--full-detail"]),
     // the taste-memory eval: where its briefs are, which runs, which brief, which judge
     ("eval", &["--briefs", "--modes", "--only", "--judge-model"]),

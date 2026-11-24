@@ -305,6 +305,24 @@ pub struct PhotosPickParams {
     /// picker cannot select by type — and its photos are skipped).
     #[serde(default)]
     pub videos_only: Option<bool>,
+    /// Instead of `query`/`album`: pick exactly these items — ones FrameAtlas found by meaning
+    /// (its `catalog_search_meaning` tool) or any catalogue of the user's Google Photos — each
+    /// `{captured, kind}` as the catalogue gives it. The agent searches each item's day in the
+    /// picker and ticks only its tile, matched to the second by when it was taken; items it
+    /// could not find come back as `autopick.left` (their times). At most 200. Needs Chrome with
+    /// View ▸ Developer ▸ Allow JavaScript from Apple Events (the tiles' times are read from the
+    /// page), besides `query`'s prerequisites.
+    #[serde(default)]
+    pub items: Option<Vec<PickItem>>,
+}
+
+/// One item of an exact pick.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct PickItem {
+    /// When it was taken, UTC, RFC 3339 (`2024-10-02T06:54:35Z`).
+    pub captured: String,
+    /// `video` or `photo`.
+    pub kind: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -2051,7 +2069,7 @@ impl FilmcraftMcp {
 
     #[tool(
         title = "Google Photos: pick and import",
-        description = "Open the Google Photos picker in the user's browser, wait for a selection and press Done, download the picks (cached under the app's data dir) and import them into the open project with file.import (a file the project already holds is reused, not imported twice). Google offers apps no server-side search of the library (retired 2025-03-31): the choice happens in the picker. Either the user chooses (tell them what to pick), or — pass `query` — a local vision agent (Qwen2.5-VL via Ollama) drives the picker itself: it types the query into the picker's own search, selects matching video tiles (`photos`: photos too, the search typed as given — a day's pictures and clips) and presses Done; needs `ollama pull qwen2.5vl:7b` plus Screen Recording and Accessibility for this process, and its report comes back as `autopick`. Pass `queries` (and `all`) to run many searches — a list, or a sweep of a whole history such as one \"videos <Month> <Year>\" per month — in ONE picking session and ONE browser tab (the selection accumulates across searches; date searches are selected by the picker's date groups; a search with no results is skipped; Done once), in as few sessions as the item cap allows; searches that did not fit come back as `left`. The agent closes the picker tab when it finishes, and a session it gave up on is deleted. Pass `album` instead to use a whole Google Photos album as the seed (the user curates it in Google Photos): the agent searches the picker for that exact title (Google's picker answers an album's exact title with the album's items) and selects that whole result (`videos_only` downloads only its videos); a search that shows nothing new, or a result too big for an album, selects nothing. Items a user adds to an album are reachable only this way (the Library API shows apps only what they uploaded). If the wait runs out the result is `status: pending` with a `session` and `pickerUri`; call again with that `session` to keep waiting (with short client tool timeouts, start with wait_seconds 0, then resume). Videos download whole, so they can take a while. One-time setup: `filmcraft-cli photos auth` (see crates/gphotos/README.md).",
+        description = "Open the Google Photos picker in the user's browser, wait for a selection and press Done, download the picks (cached under the app's data dir) and import them into the open project with file.import (a file the project already holds is reused, not imported twice). Google offers apps no server-side search of the library (retired 2025-03-31): the choice happens in the picker. Either the user chooses (tell them what to pick), or — pass `query` — a local vision agent (Qwen2.5-VL via Ollama) drives the picker itself: it types the query into the picker's own search, selects matching video tiles (`photos`: photos too, the search typed as given — a day's pictures and clips) and presses Done; needs `ollama pull qwen2.5vl:7b` plus Screen Recording and Accessibility for this process, and its report comes back as `autopick`. Pass `queries` (and `all`) to run many searches — a list, or a sweep of a whole history such as one \"videos <Month> <Year>\" per month — in ONE picking session and ONE browser tab (the selection accumulates across searches; date searches are selected by the picker's date groups; a search with no results is skipped; Done once), in as few sessions as the item cap allows; searches that did not fit come back as `left`. The agent closes the picker tab when it finishes, and a session it gave up on is deleted. Pass `album` instead to use a whole Google Photos album as the seed (the user curates it in Google Photos): the agent searches the picker for that exact title (Google's picker answers an album's exact title with the album's items) and selects that whole result (`videos_only` downloads only its videos); a search that shows nothing new, or a result too big for an album, selects nothing. Items a user adds to an album are reachable only this way (the Library API shows apps only what they uploaded). If the wait runs out the result is `status: pending` with a `session` and `pickerUri`; call again with that `session` to keep waiting (with short client tool timeouts, start with wait_seconds 0, then resume). Videos download whole, so they can take a while. To pick by meaning (“kids laughing on a boat”), find the items with FrameAtlas's `catalog_search_meaning` and pass them as `items` (each `{captured, kind}`): the agent picks exactly those, by the day and second each was taken. One-time setup: `filmcraft-cli photos auth` (see crates/gphotos/README.md).",
         annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = false, open_world_hint = true)
     )]
     async fn googlephotos_pick(&self, Parameters(p): Parameters<PhotosPickParams>) -> Result<CallToolResult, McpError> {
@@ -2059,6 +2077,18 @@ impl FilmcraftMcp {
         if p.album.as_deref().is_some_and(|a| !a.trim().is_empty()) && searching {
             return Ok(fail("pass `query`/`queries` (searches) or `album` (a whole album), not both"));
         }
+        let exact = match p.items.as_deref() {
+            Some([]) | None => None,
+            Some(items) => {
+                if searching || p.album.as_deref().is_some_and(|a| !a.trim().is_empty()) || p.all.is_some() || p.photos.is_some() || p.videos_only.is_some() {
+                    return Ok(fail("`items` picks exactly those items; it goes without `query`, `queries`, `album`, `all`, `photos` and `videos_only`"));
+                }
+                match crate::photos::items_request(items.iter().map(|i| (i.captured.as_str(), i.kind.as_str()))) {
+                    Ok(r) => Some(r),
+                    Err(e) => return Ok(fail(format!("`items`: {e}"))),
+                }
+            }
+        };
         let asked = p.query.iter().count().saturating_add(p.queries.as_ref().map_or(0, Vec::len));
         if asked > MAX_PICK_QUERIES {
             return Ok(fail(format!("at most {MAX_PICK_QUERIES} searches per call (got {asked}); the rest can go in the next call")));
@@ -2125,16 +2155,29 @@ impl FilmcraftMcp {
             let ok = imported.is_ok() && swept.picked.failed.is_empty() && swept.stopped.is_none();
             return Ok(if ok { ok_json(&v) } else { CallToolResult::error(vec![Content::text(v.to_string())]) });
         }
+        let wait = match &exact {
+            Some(r) => p.wait_seconds.map_or_else(|| crate::photos::items_wait(r), std::time::Duration::from_secs),
+            None => std::time::Duration::from_secs(p.wait_seconds.unwrap_or(if !queries.is_empty() || album.is_some() { 900 } else { 300 })),
+        };
         let opts = filmcraft_gphotos::PickOptions {
-            max_items: p.max_items,
-            wait: std::time::Duration::from_secs(p.wait_seconds.unwrap_or(if !queries.is_empty() || album.is_some() { 900 } else { 300 })),
+            // an exact pick's session takes its items and no more
+            max_items: exact.as_ref().map_or(p.max_items, |r| u32::try_from(r.items.len()).ok()),
+            wait,
             resume: p.session.filter(|s| !s.trim().is_empty()),
             open_browser: true,
             since,
             videos_only,
         };
         let request = match (queries.first(), album) {
-            (Some(_), _) => Some(filmcraft_screenagent::agent::Request { queries, max_items: max_items(6), select_all, album: None, videos_only: !photos }),
+            _ if exact.is_some() => exact,
+            (Some(_), _) => Some(filmcraft_screenagent::agent::Request {
+                items: Vec::new(),
+                queries,
+                max_items: max_items(6),
+                select_all,
+                album: None,
+                videos_only: !photos,
+            }),
             (None, Some(title)) => Some(filmcraft_screenagent::agent::Request {
                 max_items: p.max_items.unwrap_or(filmcraft_gphotos::api::MAX_PICK),
                 ..crate::photos::album_request(&title, videos_only)
@@ -2162,10 +2205,12 @@ impl FilmcraftMcp {
         let picked = match driven.outcome {
             filmcraft_gphotos::PickOutcome::Done(picked) => picked,
             filmcraft_gphotos::PickOutcome::Pending(_) if driven.abandoned => {
-                return Ok(fail(json!({
-                    "status": "done", "error": "the agent did not finish the pick in time; its picking session was deleted and its tab closed",
-                    "autopick": autopick,
-                })));
+                // an agent that failed says why (it gave up at once, say), not "in time"
+                let error = match &driven.agent {
+                    Some(Err(e)) => format!("nothing was picked: {e}; its picking session was deleted and its tab closed"),
+                    _ => "the agent did not finish the pick in time; its picking session was deleted and its tab closed".to_string(),
+                };
+                return Ok(fail(json!({"status": "done", "error": error, "autopick": autopick})));
             }
             filmcraft_gphotos::PickOutcome::Pending(s) => {
                 return Ok(ok_json(&json!({
@@ -3112,6 +3157,28 @@ mod tests {
         let r = c.call(3, "googlephotos_pick", json!({"queries": many})).await;
         assert_eq!(r["result"]["isError"], true, "{r}");
         assert!(r.to_string().contains("at most"), "{r}");
+    }
+
+    #[tokio::test]
+    async fn googlephotos_pick_items_are_checked_before_the_sign_in() {
+        let mut c = Client::start(Session::default());
+        c.init().await;
+        let one = json!([{"captured": "2024-10-02T06:54:35Z", "kind": "video"}]);
+        for (id, args, said) in [
+            (1, json!({"items": one, "query": "robots"}), "goes without"),
+            (2, json!({"items": one, "album": "Robot showcase"}), "goes without"),
+            (3, json!({"items": one, "all": true}), "goes without"),
+            (4, json!({"items": [{"captured": "soon", "kind": "video"}]}), "item 1"),
+            (5, json!({"items": [{"captured": "2024-10-02T06:54:35Z", "kind": "gif"}]}), "`video` or `photo`"),
+            (6, json!({"items": vec![json!({"captured": "2024-10-02T06:54:35Z", "kind": "photo"}); 201]}), "at most 200"),
+        ] {
+            let r = c.call(id, "googlephotos_pick", args).await;
+            assert_eq!(r["result"]["isError"], true, "{r}");
+            assert!(r.to_string().contains(said), "{said}: {r}");
+        }
+        // a missing field is the schema's refusal, not a crash
+        let r = c.call(7, "googlephotos_pick", json!({"items": [{"captured": "2024-10-02T06:54:35Z"}]})).await;
+        assert!(r.get("error").is_some() || r["result"]["isError"] == true, "{r}");
     }
 
     /// `googlephotos_upload` takes a required `path` and an optional `description` and `album`,

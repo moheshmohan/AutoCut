@@ -3244,6 +3244,7 @@ name = "filmcraft-screenagent"
 version = "0.12.0"
 dependencies = [
  "base64 0.22.1",
+ "chrono",
  "image",
  "rustls",
  "rustls-rustcrypto",

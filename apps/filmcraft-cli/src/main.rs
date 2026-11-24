@@ -700,8 +700,8 @@ SUBCOMMANDS
   photos albums [--json]         the albums FilmCraft made: title, item count, link (Google shows
                                  apps no other albums, and not the items you add to them by hand)
   photos pick [--auto query]... [--queries file] [--sweep FROM..TO [--month-days D-D]] [--all]
-              [--photos] [--album <title> [--videos-only]] [--since YYYY-MM-DD] [--max-items n]
-              [--timeout secs] [--session id] [--no-browser]
+              [--photos] [--album <title> [--videos-only]] [--meaning text [--photos]]
+              [--since YYYY-MM-DD] [--max-items n] [--timeout secs] [--session id] [--no-browser]
                                  open the Google Photos picker in the browser, wait (default
                                  600 s, at most 3600) for your selection, download it into the
                                  cache and import it (a file the project already holds is
@@ -748,7 +748,15 @@ SUBCOMMANDS
                                  nothing. --videos-only downloads only its videos (the album
                                  is selected whole, photos too; how many were left out is
                                  said). Items you add to an album by hand are reachable only
-                                 this way (Google shows apps only what they uploaded)
+                                 this way (Google shows apps only what they uploaded).
+                                 With --meaning \"kids laughing on a boat\" FrameAtlas (running
+                                 on --catalog-port, default 7318, with its vectors built) finds
+                                 the --max-items (default 24, most 200) videos that look most
+                                 like the words — photos too with --photos — and the agent
+                                 picks exactly those: it searches each one's day and ticks its
+                                 tile, matched to the second by when it was taken (needs Chrome
+                                 with View > Developer > Allow JavaScript from Apple Events).
+                                 Items it could not find are listed by their times
   youtube auth [--default] [--playlists]
                                  connect a YouTube channel: the browser opens Google's consent,
                                  whose account chooser lists your Google account and the channels
@@ -2109,9 +2117,20 @@ async fn cli() {
                     if videos_only && album.is_none() {
                         usage("photos pick: --videos-only is for --album (--auto picks videos unless --photos)");
                     }
+                    // --meaning: what FrameAtlas finds by meaning, picked item by item
+                    let meaning = a.opt("--meaning").map(str::trim).map(str::to_string);
+                    if meaning.as_deref().is_some_and(str::is_empty) {
+                        usage("photos pick: --meaning wants the words to look for");
+                    }
+                    if meaning.is_some() && (searching || album.is_some() || a.flag("--all") || a.opt("--session").is_some()) {
+                        usage("photos pick: --meaning picks what FrameAtlas finds; it goes without --auto/--queries/--sweep, --album, --all and --session");
+                    }
+                    if meaning.is_some() && a.flag("--no-browser") {
+                        usage("photos pick: --meaning drives the picker in a browser itself; drop --no-browser");
+                    }
                     // --photos: the searches find photos as well as videos
                     let photos = a.flag("--photos");
-                    if photos && !searching {
+                    if photos && !searching && meaning.is_none() {
                         usage("photos pick: --photos is for --auto/--queries/--sweep (an album is picked whole, photos too)");
                     }
                     let many = searches.len() > 1 || sweep;
@@ -2121,15 +2140,46 @@ async fn cli() {
                     if searching && searches.is_empty() && (a.opt("--queries").is_some() || sweep) {
                         usage("photos pick: no searches to run (the --queries file is empty?)");
                     }
-                    let agent_drives = searching || album.is_some();
+                    let agent_drives = searching || album.is_some() || meaning.is_some();
                     let since = a.opt("--since").map(str::to_string);
                     if let Some(d) = since.as_deref().filter(|d| !filmcraft_gphotos::is_day(d)) {
                         usage(format!("photos pick: --since wants a date like 2020-01-01, not `{d}`"));
                     }
                     let max_items = parse_num("--max-items").map(|n| u32::try_from(n).unwrap_or(u32::MAX));
+                    // the items FrameAtlas finds by meaning, as the agent's request
+                    let exact = match meaning.clone() {
+                        Some(q) => {
+                            let port = a
+                                .opt("--catalog-port")
+                                .unwrap_or("7318")
+                                .parse::<u16>()
+                                .ok()
+                                .filter(|p| *p > 0)
+                                .unwrap_or_else(|| usage("photos pick: --catalog-port wants a port number"));
+                            let limit = max_items.unwrap_or(24).clamp(1, catalog::MAX_MEANING);
+                            let found = tokio::task::spawn_blocking(move || catalog::meaning_items(port, &q, photos, limit))
+                                .await
+                                .unwrap_or_else(|e| fail(format!("photos pick: {e}")))
+                                .unwrap_or_else(|e| fail(format!("photos pick: FrameAtlas: {e}")));
+                            if found.is_empty() {
+                                fail("photos pick: FrameAtlas found nothing that looks like that among your Google Photos");
+                            }
+                            diag(format_args!("photos pick: FrameAtlas found {} item(s); picking them by the days they were taken", found.len()));
+                            Some(
+                                filmcraft_automation::photos::items_request(found.iter().map(|(c, k)| (c.as_str(), k.as_str())))
+                                    .unwrap_or_else(|e| fail(format!("photos pick: {e}"))),
+                            )
+                        }
+                        None => None,
+                    };
                     let opts = filmcraft_gphotos::PickOptions {
-                        max_items,
-                        wait: std::time::Duration::from_secs(parse_num("--timeout").unwrap_or(if agent_drives { 900 } else { 600 })),
+                        // an exact pick's session takes its items and no more
+                        max_items: exact.as_ref().map_or(max_items, |r| u32::try_from(r.items.len()).ok()),
+                        wait: match (parse_num("--timeout"), &exact) {
+                            (Some(t), _) => std::time::Duration::from_secs(t),
+                            (None, Some(r)) => filmcraft_automation::photos::items_wait(r),
+                            (None, None) => std::time::Duration::from_secs(if agent_drives { 900 } else { 600 }),
+                        },
                         resume: a.opt("--session").map(str::to_string),
                         open_browser: !a.flag("--no-browser"),
                         since,
@@ -2205,7 +2255,9 @@ async fn cli() {
                             // picker: it types the query, clicks matching video tiles, presses Done;
                             // with --album it opens that album and selects all of it instead
                             let request = match (searching, album) {
+                                _ if exact.is_some() => exact,
                                 (true, _) => Some(filmcraft_screenagent::agent::Request {
+                                    items: Vec::new(),
                                     queries: searches,
                                     max_items: agent_items,
                                     select_all,
@@ -2243,9 +2295,14 @@ async fn cli() {
                                 Some(t) => fail(format!("photos pick: the album `{t}` had nothing to pick")),
                                 None => fail("photos pick: the search matched nothing to pick"),
                             },
-                            filmcraft_gphotos::PickOutcome::Pending(_) if driven.abandoned => fail(
-                                "photos pick: the agent did not finish the pick in time; its picking session was deleted and its tab closed (run it again)",
-                            ),
+                            // an agent that failed says why (it gave up at once, say), not "in time"
+                            filmcraft_gphotos::PickOutcome::Pending(_) if driven.abandoned => fail(match &driven.agent {
+                                Some(Err(e)) => format!("photos pick: nothing was picked: {e}; its picking session was deleted and its tab closed"),
+                                _ => {
+                                    "photos pick: the agent did not finish the pick in time; its picking session was deleted and its tab closed (run it again)"
+                                        .to_string()
+                                }
+                            }),
                             filmcraft_gphotos::PickOutcome::Pending(s) => {
                                 outln!("{}", json!({"status": "pending", "session": s.id, "pickerUri": s.autoclose_uri(), "expires": s.expire_time}));
                                 fail(format!("photos pick: no selection yet; finish in the browser, then run `photos pick --session {}`", s.id));

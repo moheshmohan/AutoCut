@@ -10,6 +10,8 @@
 //! - [`capture`]: the target window's bounds and a screenshot of it (subprocess, macOS).
 //! - [`act`]: input synthesis into the target app, clamped to the window's rectangle.
 //! - [`ground`]: the vision model call — `inventory` lists elements, `find` locates one.
+//! - [`items`]: exact items a catalogue found, matched to the picker's tiles by when they were
+//!   taken (searched by day, ticked in the page).
 //! - [`verify`]: pixel-diff of two captures, so the agent knows a click landed.
 //! - [`picker`]: the Google Photos picker's visual semantics (duration badges, Done).
 //! - [`agent`]: the budgeted see–decide–act loop that selects media and presses Done — over
@@ -32,6 +34,7 @@ pub mod agent;
 pub mod capture;
 pub mod dom;
 pub mod ground;
+pub mod items;
 pub mod locations;
 pub mod picker;
 pub mod tabs;

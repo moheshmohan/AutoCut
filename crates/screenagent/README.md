@@ -158,11 +158,27 @@ capture (screencapture -R)  →  ground (Qwen2.5-VL via Ollama)  →  act (osasc
     The picker cannot select by type, so `--videos-only` takes the album whole and its photos
     are skipped when downloading (`filmcraft_gphotos::keep_picked`); the CLI and the album
     source say how many photos were left out.
+  - **Exact items** (`items`: each a `Wanted`, when it was taken in UTC and whether it is a
+    video): ones a catalogue found, FrameAtlas by meaning say. The picker cannot search by name
+    or id, but a date typed into its search shows that day, and each tile's checkbox in its page
+    says when it was taken, to the second, in local time. So the agent searches each item's day
+    (`items::day_text`: `October 30 2026`), reads that day's whole grid (`dom::grid_labels`) and
+    ticks only the tiles that are the items (`dom::tick_labels`, by a hash of the label so only
+    numbers go into a script). A tile is an item's when its kind matches and its local time is
+    the item's UTC time moved by a real time-zone offset (`items::OFFSETS`); another tile of the
+    day can fit that by chance (about one in 2,300), so `items::Matcher` takes the offset the
+    pick has seen most (the Mac's own zone is each item's first guess), ticks nothing for an
+    item two tiles fit equally, and looks for an item not on its first day on the day next to
+    it (three days at most). Items it could not find are `left`, as their times. It needs the
+    page: by eyes the times cannot be read, so without it nothing is selected.
   - **Done is checked**: after the press the agent re-captures; the press took when the
     window closed, the button is gone, or "N selected" is gone. Otherwise it presses again
     (at most twice more, from the budget), then reports that the picker did not accept Done.
 - `dom.rs` — the picker's page (above): the scripts of each step (`dom::script`), what a media
-  tile's label is (`dom::tile_label`), waiting for an album's results and ticking every tile.
+  tile's label is (`dom::tile_label`), waiting for an album's results and ticking every tile,
+  reading a whole grid and ticking given tiles by their labels' hashes (`dom::tick_script`).
+- `items.rs` — exact items: their times, the tiles' times, the day searches and which tile is
+  which item (`items::Matcher`), as pure, unit-tested functions.
 - `picker.rs` — the picker's visual semantics (the tile-enumeration prompts, what a video
   tile looks like, where to click one — its left third, since grounded boxes start where
   the tile starts but can run on into the next — what the confirm button is called, what a
@@ -234,7 +250,9 @@ requires.
 
 CLI: `filmcraft-cli photos pick --auto "beach sunset videos" --max-items 5 --bridge …`, or a
 whole album: `filmcraft-cli photos pick --album "Robot showcase" [--videos-only] --bridge …`,
-or many searches in one session: `--auto "q1" --auto "q2" --all`, `--queries file --all`, or a
+exactly what FrameAtlas finds by meaning: `filmcraft-cli photos pick --meaning "kids laughing on
+a boat" [--max-items 24] [--photos] --bridge …`, or many searches in one session: `--auto "q1"
+--auto "q2" --all`, `--queries file --all`, or a
 sweep of a whole history: `--sweep 2017-10..2025-12 [--month-days 10-21]`. `filmcraft-cli
 photos tidy` closes picker tabs left in Chrome.
 
@@ -244,7 +262,9 @@ Places: `filmcraft-cli photos locations --album "Every Robot I've Met" [--max-it
 
 MCP: `googlephotos_pick { query: "beach sunset videos", max_items: 5 }`,
 `googlephotos_pick { queries: ["videos October 2022", "videos November 2022"], all: true }` or
-`googlephotos_pick { album: "Robot showcase" }` — the result carries an `autopick` report of
+`googlephotos_pick { album: "Robot showcase" }`, or the items FrameAtlas's
+`catalog_search_meaning` found: `googlephotos_pick { items: [{captured:
+"2020-11-15T13:38:02Z", kind: "video"}, …] }` — the result carries an `autopick` report of
 what the agent did (`album_shown`, `selected`, `done_pressed`, `searches`, `left`,
 `tab_closed`, `note`), or for many searches the `sessions` and the searches `left`.
 

@@ -13,6 +13,8 @@ workspace = true
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+# capture times: the catalogue's UTC, the picker's local; the Mac's zone is the first guess
+chrono = { workspace = true, features = ["clock"] }
 base64 = "0.22"
 image = { version = "0.25", default-features = false, features = ["png"] }
 ureq = { version = "3", default-features = false, features = ["rustls-no-provider", "platform-verifier", "json"] }

@@ -128,7 +128,12 @@ pub fn tile_label(raw: &str) -> Option<String> {
 
 /// Run one step and read its answer; only media tiles are kept.
 pub fn run<A: Act + ?Sized>(actor: &mut A, tab: &Tab, step: Step) -> Result<Look, ScreenError> {
-    let answer = actor.run_js(tab, &script(step))?;
+    run_script(actor, tab, &script(step))
+}
+
+/// Run one step's script and read its answer.
+fn run_script<A: Act + ?Sized>(actor: &mut A, tab: &Tab, js: &str) -> Result<Look, ScreenError> {
+    let answer = actor.run_js(tab, js)?;
     let mut look: Look = serde_json::from_str(answer.trim())
         .map_err(|e| ScreenError::Parse(format!("the picker page answered `{}`: {e}", answer.chars().take(120).collect::<String>())))?;
     look.tiles.truncate(MAX_TILES);
@@ -298,6 +303,96 @@ pub fn tick_all<A: Act + ?Sized>(
     Ok(out)
 }
 
+/// The most label hashes one tick script carries.
+pub const MAX_HASHES: usize = 64;
+
+/// The script that clicks every unticked media tile in the page whose label hashes
+/// ([`crate::items::label_hash`], FNV-1a over its UTF-16 units) to one of `hashes`: only numbers
+/// go into it, never a label.
+pub fn tick_script(hashes: &[u32]) -> String {
+    let want: Vec<String> = hashes.iter().take(MAX_HASHES).map(u32::to_string).collect();
+    format!(
+        "(function(){{{PRELUDE}var fnv=function(s){{var x=0x811c9dc5;for(var i=0;i<s.length;i++){{x=Math.imul(x^s.charCodeAt(i),16777619)>>>0;}}return x>>>0;}};var want=[{}];var n=0;tiles().forEach(function(b){{if(b.getAttribute('aria-checked')!=='true'&&want.indexOf(fnv(norm(b.getAttribute('aria-label'))))>=0){{b.click();n++;}}}});var l=look();l.clicked=n;return JSON.stringify(l);}})()",
+        want.join(",")
+    )
+}
+
+/// Every media tile's label in the grid, top to bottom (each once), walking it from the top a
+/// screen at a time until two moves change nothing.
+pub fn grid_labels<A: Act + ?Sized>(actor: &mut A, tab: &Tab, out_of_time: &dyn Fn() -> bool) -> Result<Vec<String>, ScreenError> {
+    let mut out: Vec<String> = Vec::new();
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    let mut look = run(actor, tab, Step::Top)?;
+    actor.sleep(SCROLL_SETTLE_MS);
+    let mut still = 0u32;
+    for _ in 0..MAX_STEPS {
+        for t in look.tiles.iter().take(MAX_TILES) {
+            if out.len() < MAX_TILES && seen.insert(t.label.clone()) {
+                out.push(t.label.clone());
+            }
+        }
+        if out_of_time() {
+            return Err(ScreenError::Stalled(format!("ran out of time reading the grid ({} tile(s) so far)", out.len())));
+        }
+        let next = run(actor, tab, Step::Next)?;
+        actor.sleep(SCROLL_SETTLE_MS);
+        still = if next.moved { 0 } else { still + 1 };
+        look = run(actor, tab, Step::Look)?;
+        if still >= 2 {
+            for t in look.tiles.iter().take(MAX_TILES) {
+                if out.len() < MAX_TILES && seen.insert(t.label.clone()) {
+                    out.push(t.label.clone());
+                }
+            }
+            break;
+        }
+    }
+    Ok(out)
+}
+
+/// Tick exactly the tiles labelled `labels` (and no other), walking the grid from the top:
+/// answers those seen ticked. A label never seen, or seen but never ticked, is not in it.
+pub fn tick_labels<A: Act + ?Sized>(actor: &mut A, tab: &Tab, labels: &[String], out_of_time: &dyn Fn() -> bool) -> Result<BTreeSet<String>, ScreenError> {
+    let wanted: BTreeSet<&String> = labels.iter().collect();
+    let mut ticked: BTreeSet<String> = BTreeSet::new();
+    if wanted.is_empty() {
+        return Ok(ticked);
+    }
+    run(actor, tab, Step::Top)?;
+    actor.sleep(SCROLL_SETTLE_MS);
+    let mut still = 0u32;
+    for _ in 0..MAX_STEPS {
+        if out_of_time() {
+            return Err(ScreenError::Stalled(format!("ran out of time ticking the items ({} of {} ticked)", ticked.len(), wanted.len())));
+        }
+        let look = run(actor, tab, Step::Look)?;
+        let due: Vec<u32> = look
+            .tiles
+            .iter()
+            .filter(|t| !t.checked && wanted.contains(&t.label) && !ticked.contains(&t.label))
+            .map(|t| crate::items::label_hash(&t.label))
+            .collect();
+        let look = if due.is_empty() {
+            look
+        } else {
+            run_script(actor, tab, &tick_script(&due))?;
+            actor.sleep(TICK_SETTLE_MS);
+            run(actor, tab, Step::Look)?
+        };
+        ticked.extend(look.tiles.iter().filter(|t| t.checked && wanted.contains(&t.label)).map(|t| t.label.clone()));
+        if ticked.len() >= wanted.len() {
+            break;
+        }
+        let next = run(actor, tab, Step::Next)?;
+        actor.sleep(SCROLL_SETTLE_MS);
+        still = if next.moved { 0 } else { still + 1 };
+        if still >= 2 {
+            break;
+        }
+    }
+    Ok(ticked)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -384,5 +479,116 @@ mod tests {
         assert!(matches!(run(&mut One("missing value".into()), &tab, Step::Look), Err(ScreenError::Parse(_))));
         let many = format!(r#"{{"tiles":[{}]}}"#, vec![r#"{"label":"Photo - Portrait - Mar 10, 2024, 1:42:31 AM","checked":false}"#; MAX_TILES + 50].join(","));
         assert_eq!(run(&mut One(many), &tab, Step::Look).unwrap().tiles.len(), MAX_TILES);
+    }
+
+    /// A picker page in miniature: a grid of tiles, six on screen, that the step scripts scroll,
+    /// read and tick (a tick script by the hashes in it, as the page's fnv() does).
+    struct Grid {
+        tiles: Vec<(String, bool)>,
+        top: usize,
+        scripts: Vec<String>,
+    }
+
+    impl Grid {
+        fn new(n: usize) -> Self {
+            let tiles = (0..n).map(|i| (format!("Photo - Portrait - Jan 5, 2024, 2:{:02}:{:02} PM", i / 60, i % 60), false)).collect();
+            Self { tiles, top: 0, scripts: Vec::new() }
+        }
+        fn answer(&self, moved: bool, clicked: u32) -> String {
+            let shown: Vec<serde_json::Value> = self.tiles.iter().skip(self.top).take(6).map(|(l, c)| serde_json::json!({"label": l, "checked": c})).collect();
+            let n = self.tiles.iter().filter(|t| t.1).count();
+            serde_json::json!({"tiles": shown, "header": (n > 0).then(|| format!("{n} selected")), "top": self.top, "height": self.tiles.len(), "moved": moved, "clicked": clicked}).to_string()
+        }
+    }
+
+    impl Act for Grid {
+        fn activate(&mut self) -> Result<(), ScreenError> {
+            Ok(())
+        }
+        fn click_png(&mut self, _: &crate::capture::Capture, _: u32, _: u32) -> Result<(), ScreenError> {
+            Ok(())
+        }
+        fn shift_click_png(&mut self, _: &crate::capture::Capture, _: u32, _: u32) -> Result<(), ScreenError> {
+            Ok(())
+        }
+        fn type_text(&mut self, _: &str) -> Result<(), ScreenError> {
+            Ok(())
+        }
+        fn key_return(&mut self) -> Result<(), ScreenError> {
+            Ok(())
+        }
+        fn key_escape(&mut self) -> Result<(), ScreenError> {
+            Ok(())
+        }
+        fn scroll(&mut self, _: i32) -> Result<(), ScreenError> {
+            Ok(())
+        }
+        fn sleep(&mut self, _: u64) {}
+        fn capture(&mut self) -> Result<crate::capture::Capture, ScreenError> {
+            Err(ScreenError::Other("no screen".into()))
+        }
+        fn run_js(&mut self, _: &Tab, js: &str) -> Result<String, ScreenError> {
+            self.scripts.push(js.to_string());
+            if let Some(list) = js.split("var want=[").nth(1).and_then(|r| r.split(']').next()) {
+                let want: Vec<u32> = list.split(',').filter_map(|n| n.parse().ok()).collect();
+                let mut clicked = 0;
+                for (label, checked) in self.tiles.iter_mut().skip(self.top).take(6) {
+                    if !*checked && want.contains(&crate::items::label_hash(label)) {
+                        *checked = true;
+                        clicked += 1;
+                    }
+                }
+                return Ok(self.answer(false, clicked));
+            }
+            if js.contains("sc.scrollTop=0") {
+                self.top = 0;
+                return Ok(self.answer(false, 0));
+            }
+            if js.contains("l.moved=") {
+                let next = (self.top + 4).min(self.tiles.len().saturating_sub(6));
+                let moved = next != self.top;
+                self.top = next;
+                return Ok(self.answer(moved, 0));
+            }
+            Ok(self.answer(false, 0))
+        }
+    }
+
+    #[test]
+    fn tick_scripts_carry_only_numbers() {
+        let s = tick_script(&[1, 4_294_967_295, 42]);
+        assert!(s.contains("var want=[1,4294967295,42]") && s.ends_with("})()"), "{s}");
+        assert!(!s.chars().any(char::is_control));
+        let many: Vec<u32> = (0..500).collect();
+        let s = tick_script(&many);
+        let list = s.split("var want=[").nth(1).and_then(|r| r.split(']').next()).unwrap_or("");
+        assert_eq!(list.split(',').count(), MAX_HASHES, "a script carries at most {MAX_HASHES} hashes");
+        assert!(tick_script(&[]).contains("var want=[]"));
+    }
+
+    #[test]
+    fn the_whole_grid_is_read_and_only_the_wanted_tiles_ticked() {
+        let tab = Tab { window: 1, id: 2, url: "https://photos.google.com/picker/x".into() };
+        let mut page = Grid::new(23);
+        let all = grid_labels(&mut page, &tab, &|| false).unwrap();
+        assert_eq!(all.len(), 23, "every tile once, past the first screen");
+        assert_eq!(all.first(), page.tiles.first().map(|t| &t.0));
+        assert_eq!(all.last(), page.tiles.last().map(|t| &t.0));
+
+        let want: Vec<String> = [1usize, 9, 22].iter().map(|&i| page.tiles[i].0.clone()).collect();
+        let ticked = tick_labels(&mut page, &tab, &want, &|| false).unwrap();
+        assert_eq!(ticked.len(), 3);
+        let checked: Vec<usize> = page.tiles.iter().enumerate().filter(|(_, t)| t.1).map(|(i, _)| i).collect();
+        assert_eq!(checked, [1, 9, 22], "nothing else was ticked");
+        assert!(page.scripts.iter().all(|s| !s.contains("Photo - ")), "no label ever went into a script");
+
+        // a label the grid does not have is not reported ticked; nothing wanted, nothing run
+        let ghost = vec!["Photo - Portrait - Jan 6, 2024, 2:00:00 PM".to_string()];
+        assert!(tick_labels(&mut page, &tab, &ghost, &|| false).unwrap().is_empty());
+        let before = page.scripts.len();
+        assert!(tick_labels(&mut page, &tab, &[], &|| false).unwrap().is_empty());
+        assert_eq!(page.scripts.len(), before);
+        // out of time is an error, not a silent partial pick
+        assert!(matches!(tick_labels(&mut page, &tab, &ghost, &|| true), Err(ScreenError::Stalled(_))));
     }
 }

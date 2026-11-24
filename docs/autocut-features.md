@@ -1,6 +1,6 @@
 # AutoCut vs FilmCraft — features we added
 
-> **Last updated:** 2026-11-11 · **documented-through:** bbefc3f11797120154f6955ea034bed8aee99bbf
+> **Last updated:** 2026-11-23 · **documented-through:** bbefc3f11797120154f6955ea034bed8aee99bbf
 >
 > AutoCut is the private layer built on top of upstream FilmCraft (storytold/filmcraft): a
 > local-first, agent-drivable video production pipeline. Everything here runs on the machine —
@@ -296,7 +296,10 @@ reframing (`clip.reframe360` with tiny-planet/rabbit-hole presets, `clip.stabili
 
 OAuth installed-app flow; picker sessions driven by the vision-model agent with many searches
 per session, sweeps across date ranges, picker-tab find/reuse/close handling, `photos tidy`,
-`photos pick --photos`, analysis caches, and resumable uploads. The showcase can be seeded from
+`photos pick --photos`, `photos pick --meaning` (FrameAtlas finds items by what they look like —
+SigLIP 2 vectors through `media.embed`/`media.nearest` — and the agent picks exactly those by the
+day and second each was taken; MCP `googlephotos_pick` `items`), analysis caches, and resumable
+uploads. The showcase can be seeded from
 an album, and location data becomes chapter **places**. MCP `googlephotos_pick/add/upload/
 cached`.
 

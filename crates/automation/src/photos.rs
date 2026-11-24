@@ -9,6 +9,9 @@
 //! session and closes the tab when it is done, and a session the agent gave up on is deleted.
 //! Many searches — a list, or a sweep of a whole history — run in as few sessions as the item
 //! cap allows ([`pick_searches`]): what one session could not take goes to the next.
+//!
+//! Exact items — ones a catalogue found, say FrameAtlas by what they look like — are picked by
+//! when they were taken ([`items_request`]): the agent searches each one's day and ticks its tile.
 
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
@@ -49,9 +52,47 @@ impl Driven {
     }
 }
 
+/// The agent request that picks exactly these items, each `(captured, kind)` as a catalogue
+/// gives it: the UTC time it was taken (RFC 3339, `2024-10-02T06:54:35Z`) and `video` or `photo`.
+/// An unreadable time or kind is an error naming the item; more than
+/// [`filmcraft_screenagent::items::MAX_ITEMS`] is an error too.
+pub fn items_request<'a>(items: impl IntoIterator<Item = (&'a str, &'a str)>) -> Result<Request, String> {
+    let max = filmcraft_screenagent::items::MAX_ITEMS;
+    let mut wanted = Vec::new();
+    for (k, (captured, kind)) in items.into_iter().enumerate() {
+        if wanted.len() >= max {
+            return Err(format!("at most {max} items per pick; pass the rest in another"));
+        }
+        let shown: String = captured.chars().take(40).collect();
+        if !matches!(kind.trim().to_ascii_lowercase().as_str(), "video" | "photo") {
+            return Err(format!("item {}: kind is `video` or `photo`, not `{}`", k + 1, kind.chars().take(20).collect::<String>()));
+        }
+        let w = filmcraft_screenagent::items::Wanted::parse(captured, kind)
+            .ok_or_else(|| format!("item {}: `{shown}` is not an RFC 3339 time like 2024-10-02T06:54:35Z", k + 1))?;
+        wanted.push(w);
+    }
+    if wanted.is_empty() {
+        return Err("no items to pick".into());
+    }
+    Ok(Request { items: wanted, ..Request::default() })
+}
+
+/// How long a pick of `req`'s items waits for its selection: the agent's budget (it grows with
+/// the days to search), and the grace Google has to report it after Done.
+pub fn items_wait(req: &Request) -> Duration {
+    filmcraft_screenagent::agent::plan_for(req.clone()).timeout.saturating_add(filmcraft_screenagent::agent::DONE_GRACE)
+}
+
 /// The agent request that picks the whole album `title` (all of it, up to Google's limit).
 pub fn album_request(title: &str, videos_only: bool) -> Request {
-    Request { queries: Vec::new(), max_items: filmcraft_gphotos::api::MAX_PICK, select_all: true, album: Some(title.to_string()), videos_only }
+    Request {
+        items: Vec::new(),
+        queries: Vec::new(),
+        max_items: filmcraft_gphotos::api::MAX_PICK,
+        select_all: true,
+        album: Some(title.to_string()),
+        videos_only,
+    }
 }
 
 fn join(h: JoinHandle<Result<Summary, String>>) -> Result<Summary, String> {
@@ -258,7 +299,7 @@ pub struct Searches {
 impl Searches {
     /// The agent's request for one session of these searches.
     fn session_request(&self, batch: Vec<String>, cap: u32) -> Request {
-        Request { queries: batch, max_items: cap, select_all: self.select_all, album: None, videos_only: !self.photos }
+        Request { items: Vec::new(), queries: batch, max_items: cap, select_all: self.select_all, album: None, videos_only: !self.photos }
     }
 }
 
@@ -476,6 +517,23 @@ impl AlbumSource for PickerAlbums {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_items_request_checks_every_item() {
+        let r = items_request([("2024-10-02T06:54:35Z", "video"), ("2026-07-08T08:03:16.352Z", "Photo")]).unwrap();
+        assert_eq!(r.items.len(), 2);
+        assert!(r.queries.is_empty() && r.album.is_none());
+        let wait = items_wait(&r);
+        assert!(wait > filmcraft_screenagent::agent::DONE_GRACE && wait <= Duration::from_secs(3300 + 120));
+        assert!(items_request([]).unwrap_err().contains("no items"));
+        let e = items_request([("2024-10-02T06:54:35Z", "video"), ("tomorrow", "video")]).unwrap_err();
+        assert!(e.starts_with("item 2:") && e.contains("tomorrow"), "{e}");
+        assert!(items_request([("2024-10-02T06:54:35Z", "gif")]).unwrap_err().contains("`video` or `photo`"));
+        let long = "x".repeat(100_000);
+        assert!(items_request([(long.as_str(), "video")]).unwrap_err().len() < 200, "a hostile time is not echoed whole");
+        let many: Vec<(&str, &str)> = vec![("2024-10-02T06:54:35Z", "video"); 201];
+        assert!(items_request(many).unwrap_err().contains("at most 200"));
+    }
 
     #[test]
     fn an_album_request_selects_all_of_it() {
