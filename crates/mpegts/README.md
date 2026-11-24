@@ -44,14 +44,22 @@ let au: Vec<u8> = file.read_unit(&bytes, v, 0)?;      // the first access unit
     picture_structure) — with the sequence / GOP headers before it; picture type, temporal
     reference, field structure, top_field_first, repeat_first_field, progressive_frame, closed
     GOP / broken link. A PTS belongs to the unit whose picture start code is in that PES.
-  - H.264 / HEVC: PES packets with a timestamp (a PES without one continues the previous unit);
-    random access from IDR / IRAP NAL types; disposable when every slice is a non-reference.
+  - H.264 / HEVC: one access unit per unit, split at the first NAL of the next picture (AUD,
+    parameter sets, SEI, or a slice with first_mb_in_slice / first_slice_segment_in_pic_flag);
+    the first unit of a PES keeps its timestamps. Random access from IDR / IRAP NAL types and
+    H.264 recovery point SEI with recovery_frame_cnt 0 (open GOP); disposable when every slice
+    is a non-reference.
   - Audio: one frame per unit from the frame headers (sync re-hunted after garbage; a header
     found while hunting is confirmed by the next one); a PTS belongs to the first frame starting
     in the PES.
   - LPCM and everything else: one PES packet per unit.
 - **Timestamps**: 33-bit PTS/DTS unwrapped across the wrap (and back, for B pictures shown
-  before a wrap that came earlier); PCR / SCR range.
+  before a wrap that came earlier); a program's streams share one clock epoch. PCR range of the
+  PMT's PCR_PID (PCRs before the first PMT count when it names their PID); SCR range.
+- **Damaged and repeated packets**: transport_error_indicator packets are dropped, scrambled
+  payloads skipped, an exact repeat (same continuity counter and payload) of a packet dropped,
+  each with a warning. A PMT must carry the PAT's program number and be applicable
+  (current_next_indicator 1); a later PMT version can add streams, never re-map or drop one.
 - **Reading**: a unit records only the position of its first packet and its offset in that
   packet's payload; `read_unit` re-reads from there (the index costs a few dozen bytes per
   unit, not per packet).
@@ -73,8 +81,5 @@ let au: Vec<u8> = file.read_unit(&bytes, v, 0)?;      // the first access unit
 
 - One program per TS (the first in the PAT); no program switching, no section-based
   metadata (SDT / EIT), no scrambled streams.
-- H.264 / HEVC access units follow PES packets: streams that put several pictures in one PES
-  packet (rare in practice; not seen in broadcast, AVCHD or FFmpeg output) would be indexed as
-  one unit.
 - DVD navigation (IFO / NAV packets), multiple VOB concatenation and angle interleaving are not
   handled; each file opens on its own.
