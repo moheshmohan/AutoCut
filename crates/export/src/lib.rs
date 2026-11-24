@@ -1490,11 +1490,27 @@ impl AudioEncoder for FlacAudio {
     }
 }
 
-fn aac_factory(_format: Format, sample_rate: u32, channels: u32, s: &ExportSettings) -> Option<Result<Box<dyn AudioEncoder>>> {
+/// The AAC bit rate an export writes for a setting of `kbps` (all channels together): 32 to 512
+/// kbit/s, at least [`aac_floor_per_channel`] per channel, and at most what a frame can hold.
+fn aac_bitrate(sample_rate: u32, channels: u32, kbps: u32) -> u32 {
+    let channels = u64::from(channels.max(1));
     // AAC caps a frame at 6144 bits per channel (ISO/IEC 14496-3 §4.5.3.2): 6 bits per sample, so
     // 264.6 kbps for stereo at 22.05 kHz; a higher setting is capped instead of refused
-    let max = (6 * sample_rate as u64 * channels.max(1) as u64).min(u32::MAX as u64) as u32;
-    let bps = (s.audio.bitrate_kbps.clamp(32, 512) * 1000).min(max);
+    let max = (6 * u64::from(sample_rate) * channels).min(u64::from(u32::MAX));
+    let floor = u64::from(aac_floor_per_channel(sample_rate)) * channels;
+    let bps = u64::from(kbps.clamp(32, 512)) * 1000;
+    u32::try_from(bps.max(floor).min(max)).unwrap_or(u32::MAX)
+}
+
+/// The lowest AAC bit rate an export uses, per channel: 6 kbit/s, and a quarter of the sample
+/// rate (256 bits a frame). The encoder accepts less, but then has too few bits for anything but
+/// silence: 32 kbit/s for 5.1 at 48 kHz, or for stereo at 96 kHz, wrote a silent track.
+fn aac_floor_per_channel(sample_rate: u32) -> u32 {
+    (sample_rate / 4).max(6000)
+}
+
+fn aac_factory(_format: Format, sample_rate: u32, channels: u32, s: &ExportSettings) -> Option<Result<Box<dyn AudioEncoder>>> {
+    let bps = aac_bitrate(sample_rate, channels, s.audio.bitrate_kbps);
     Some(
         filmcraft_aac::Encoder::new(filmcraft_aac::EncoderConfig::cbr(sample_rate, channels as usize, bps))
             .map(|enc| Box::new(AacEncoder { enc, rate: sample_rate, channels }) as Box<dyn AudioEncoder>)

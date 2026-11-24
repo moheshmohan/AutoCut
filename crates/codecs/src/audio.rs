@@ -596,7 +596,7 @@ fn stream_mux_config(r: &mut filmcraft_bitstream::BitReader) -> Option<LatmConfi
         let pce = latm_program_config(r)?;
         let cfg = filmcraft_aac::AudioSpecificConfig { pce: Some(pce), ..filmcraft_aac::AudioSpecificConfig::lc(sf as u8, 0) };
         let channels = u32::try_from(cfg.channels()).ok().filter(|&n| n > 0)?;
-        (cfg.to_bytes(), channels)
+        (cfg.to_bytes().ok()?, channels)
     } else {
         // `ch` is an index into ISO/IEC 14496-3 Table 1.19, not a count: 7 and 12 are eight
         // channels, 11 is seven, and a reserved configuration has no layout
@@ -1429,7 +1429,7 @@ mod surround_order_tests {
         // the same elements, described by a program config element instead of configuration 3
         let pce = filmcraft_aac::ProgramConfig { object_type: 1, sf_index: 3, front: vec![(false, 0), (true, 0)], ..Default::default() };
         let asc = filmcraft_aac::AudioSpecificConfig { pce: Some(pce), ..filmcraft_aac::AudioSpecificConfig::lc(3, 0) };
-        let mut dec = PacketDecoder::aac(&asc.to_bytes(), rate).unwrap();
+        let mut dec = PacketDecoder::aac(&asc.to_bytes().unwrap(), rate).unwrap();
         let mut out = vec![Vec::new(); 3];
         for u in &units {
             for (o, c) in out.iter_mut().zip(dec.decode(u, 0).unwrap()) {
@@ -1713,7 +1713,7 @@ mod bounded_latm_tests {
         w.write_bits(3, 4);
         w.write_bits(0, 4);
         w.write_bits(0, 3);
-        pce.write(&mut w);
+        pce.write(&mut w).unwrap();
         let asc_bits = w.bit_len();
         let asc = w.finish();
         let asc_fields: Vec<(u32, u32)> = (0..asc_bits).map(|i| (u32::from(asc[i / 8] >> (7 - i % 8) & 1), 1)).collect();

@@ -611,7 +611,7 @@ mod tests {
         let mut bw = BitWriter::new();
         if let Some(pce) = pce {
             bw.write_bits(ID_PCE, 3);
-            pce.write(&mut bw);
+            pce.write(&mut bw).unwrap();
         }
         for &(id, tag) in elements {
             bw.write_bits(id, 3);

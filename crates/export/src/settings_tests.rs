@@ -1197,6 +1197,34 @@ fn aac_bitrate_is_capped_for_low_sample_rates() {
     }
 }
 
+/// The lowest AAC setting still codes the audio: at 32 kbit/s for all channels together, 5.1 at
+/// 48 kHz and stereo at 96 kHz had too few bits per channel for anything but silence, and the
+/// export wrote a silent track.
+#[test]
+fn the_lowest_aac_bitrate_still_codes_the_audio() {
+    for (rate, ch) in [(8_000, 1), (16_000, 2), (44_100, 2), (48_000, 6), (96_000, 2)] {
+        let bps = aac_bitrate(rate, ch, 32);
+        assert!(bps >= aac_floor_per_channel(rate) * ch, "{rate} Hz × {ch}: {bps} b/s");
+        let tone = |hz: f32| (0..rate as usize).map(|i| 0.25 * (std::f32::consts::TAU * hz * i as f32 / rate as f32).sin()).collect::<Vec<f32>>();
+        let input: Vec<Vec<f32>> = (0..ch).map(|c| tone(300.0 + 100.0 * c as f32)).collect();
+        let mut enc = filmcraft_aac::Encoder::new(filmcraft_aac::EncoderConfig::cbr(rate, ch as usize, bps)).unwrap();
+        let refs: Vec<&[f32]> = input.iter().map(Vec::as_slice).collect();
+        let mut units = enc.encode(&refs);
+        units.extend(enc.flush());
+        let mut dec = filmcraft_aac::Decoder::new(&enc.audio_specific_config()).unwrap();
+        let mut out = Vec::new();
+        for u in &units {
+            out.extend(dec.decode(u).unwrap().swap_remove(0));
+        }
+        // past the priming, as long as the input
+        let decoded = out.get(1024..1024 + rate as usize).unwrap();
+        let level = rms(&[decoded.to_vec()]) / rms(&input[..1]);
+        assert!(level > 0.5, "{rate} Hz × {ch} at {bps} b/s: {level} of the level");
+        let settings = ExportSettings { audio: AudioSettings { bitrate_kbps: 32, ..AudioSettings::default() }, ..Default::default() };
+        assert!(aac_factory(Format::H264, rate, ch, &settings).is_some_and(|e| e.is_ok()), "{rate} Hz × {ch}");
+    }
+}
+
 #[test]
 fn a_time_left_reads_like_a_clock() {
     use std::time::Duration;

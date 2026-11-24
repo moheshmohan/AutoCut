@@ -33,6 +33,7 @@ pub enum BitrateMode {
     /// Constant bitrate in bits per second (bit reservoir + fill elements).
     Cbr(u32),
     /// Constant quality, 1.0 (small) ..= 5.0 (transparent-ish). 3.0 targets the masking threshold.
+    /// Values outside 0.5..=6.0 are clamped to it; NaN is rejected by [`Encoder::new`].
     Vbr(f32),
 }
 
@@ -118,6 +119,9 @@ struct ElementFrame {
 
 const HISTORY: usize = 2048;
 
+/// Bits per channel in a silent frame, rounded up: the smallest frame the encoder writes.
+const MIN_FRAME_BITS_PER_CHANNEL: u64 = 48;
+
 /// AAC-LC encoder.
 pub struct Encoder {
     cfg: EncoderConfig,
@@ -143,10 +147,21 @@ pub struct Encoder {
 }
 
 impl Encoder {
+    /// Create an encoder. Fails if the sampling rate is not an AAC rate, `channels` is outside
+    /// 1..=8, the CBR bitrate is out of range for the channel count and rate, or the VBR quality is
+    /// NaN.
     pub fn new(cfg: EncoderConfig) -> Result<Encoder> {
         let sf_index = sample_rate_index(cfg.sample_rate).ok_or(Error::InvalidConfig("sample rate must be one of the 13 AAC rates (7350–96000 Hz)"))?;
         if !(1..=8).contains(&cfg.channels) {
             return Err(Error::InvalidConfig("channels must be 1..=8"));
+        }
+        // A NaN quality passes `clamp` and makes the rate-distortion multiplier NaN, which turns off
+        // the frame-size limit: every band is coded at full precision, and 8-channel frames outgrow
+        // the ADTS length field.
+        if let BitrateMode::Vbr(q) = cfg.mode
+            && q.is_nan()
+        {
+            return Err(Error::InvalidConfig("VBR quality must be a number"));
         }
         use ElementType::*;
         let (channel_config, layout) = match cfg.channels {
@@ -207,10 +222,25 @@ impl Encoder {
             BitrateMode::Cbr(b) => b as i64 * FRAME_LEN as i64 / cfg.sample_rate as i64,
             BitrateMode::Vbr(_) => 0,
         };
-        if let BitrateMode::Cbr(b) = cfg.mode
-            && (b < 1000 * cfg.channels as u32 || mean > max_frame_bits)
-        {
-            return Err(Error::InvalidConfig("bitrate out of range for the channel count and sample rate"));
+        // Compare the exact bits per frame, `b * 1024 / rate`, against what a frame can hold: at
+        // most 6144 bits per channel (the decoder buffer), and at least what a silent frame takes:
+        // 48 bits per channel, plus the program config that ADTS repeats in every 7-channel frame.
+        // Outside that range the encoder cannot keep the requested rate.
+        if let BitrateMode::Cbr(b) = cfg.mode {
+            let per_frame = u64::from(b) * FRAME_LEN as u64;
+            let rate = u64::from(cfg.sample_rate);
+            let pce_bits = match &asc.pce {
+                Some(p) if cfg.adts => {
+                    let mut bw = BitWriter::new();
+                    let _ = p.write(&mut bw); // its own program config, which fits
+                    3 + bw.bit_len() as u64
+                }
+                _ => 0,
+            };
+            let min_frame_bits = MIN_FRAME_BITS_PER_CHANNEL * cfg.channels as u64 + pce_bits;
+            if u64::from(b) < 1000 * cfg.channels as u64 || per_frame > max_frame_bits as u64 * rate || per_frame < min_frame_bits * rate {
+                return Err(Error::InvalidConfig("bitrate out of range for the channel count and sample rate"));
+            }
         }
         let res_max = (max_frame_bits - mean).max(0);
         let hist = vec![vec![0f32; HISTORY]; cfg.channels];
@@ -242,7 +272,8 @@ impl Encoder {
 
     /// `AudioSpecificConfig` bytes for the MP4 `esds` decoder-specific info.
     pub fn audio_specific_config(&self) -> Vec<u8> {
-        self.asc.to_bytes()
+        // The only program config the encoder writes is its own, for 7 channels, which fits.
+        self.asc.to_bytes().unwrap_or_default()
     }
 
     /// Encoder delay: the first 1024 decoded samples are priming and should be skipped (MP4 edit
@@ -633,7 +664,7 @@ impl Encoder {
         let pce_bits = if self.cfg.adts && self.asc.channel_config == 0 {
             let mut bw = BitWriter::new();
             if let Some(p) = &self.asc.pce {
-                p.write(&mut bw);
+                let _ = p.write(&mut bw); // its own program config, which fits
             }
             3 + bw.bit_len() as u32 + 8
         } else {
@@ -732,7 +763,7 @@ impl Encoder {
             && let Some(p) = &self.asc.pce
         {
             bw.write_bits(5, 3);
-            p.write(&mut bw);
+            let _ = p.write(&mut bw); // its own program config, which fits
         }
         for (ei, (f, q)) in frames.iter().zip(&quant).enumerate() {
             let e = &self.elements[ei];
@@ -760,8 +791,12 @@ impl Encoder {
             }
         }
         if let BitrateMode::Cbr(_) = self.cfg.mode {
-            let projected = ((bw.bit_len() as i64 + 3 + 7) / 8) * 8;
-            let excess = self.level + mean - projected - if last { 0 } else { self.res_max };
+            // Fill up to the bits this unit should end at, never past `max_frame_bits`, rounded down
+            // to a whole byte since units are whole bytes. `write_fill` ends at most 6 bits short and
+            // never over, so the byte-aligned unit ends exactly there. The 0-7 bits rounded off stay
+            // in the reservoir; after the last frame they are left unspent.
+            let target_end = (self.level + mean - if last { 0 } else { self.res_max }).min(self.max_frame_bits) / 8 * 8;
+            let excess = target_end - (bw.bit_len() as i64 + 3);
             if excess > 0 {
                 self.stats.fill_bits += write_fill(&mut bw, excess as u64);
             }
@@ -787,22 +822,25 @@ impl Encoder {
                 BitrateMode::Cbr(_) => ((self.level / (32 * self.cfg.channels as i64)) as u16).min(0x7FE),
                 BitrateMode::Vbr(_) => 0x7FF,
             };
-            let mut out = AdtsHeader::write(2, self.sf_index, self.asc.channel_config, au.len(), fullness).to_vec();
-            out.extend_from_slice(&au);
-            out
+            // The header holds everything the encoder writes: channel configurations 0-7, rates from
+            // the table, and frames of at most 6144 bits per channel, far below its length limit.
+            let Ok(header) = AdtsHeader::write(2, self.sf_index, self.asc.channel_config, au.len(), fullness) else { return au };
+            [&header[..], &au].concat()
         } else {
             au
         }
     }
 }
 
-/// Write fill elements totalling at least `bits - 7` bits (at most `bits + 8`); returns bits written.
+/// Write fill elements totalling between `bits - 6` and `bits` bits; returns bits written. It could
+/// write 8 bits more than asked (an access unit past the decoder buffer) or stop early.
 fn write_fill(bw: &mut BitWriter, bits: u64) -> u64 {
     let start = bw.bit_len() as u64;
-    let mut left = bits as i64;
+    let mut left = i64::try_from(bits).unwrap_or(i64::MAX);
     while left >= 7 {
-        let n = (((left - 7) / 8) as usize).min(269);
-        let n = if n >= 15 && (left - 15) / 8 < 15 { 14 } else { n };
+        // An element of n payload bytes is 7 + 8n bits for n < 15, and 15 + 8n with the escape
+        // count. Each element is at most `left` bits, so the total never passes `bits`.
+        let n = if left >= 15 + 8 * 15 { (((left - 15) / 8) as usize).min(269) } else { (((left - 7) / 8) as usize).min(14) };
         bw.write_bits(6, 3);
         if n >= 15 {
             bw.write_bits(15, 4);
@@ -818,9 +856,6 @@ fn write_fill(bw: &mut BitWriter, bits: u64) -> u64 {
         }
         let el = 7 + if n >= 15 { 8 } else { 0 } + 8 * n as i64;
         left -= el;
-        if n == 0 {
-            break;
-        }
     }
     bw.bit_len() as u64 - start
 }
@@ -836,4 +871,140 @@ fn interp(pts: &[(f32, f32)], x: f32) -> f32 {
         }
     }
     pts[pts.len() - 1].1
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn noise(n: usize) -> Vec<f32> {
+        let mut s = 7u32;
+        (0..n)
+            .map(|_| {
+                s = s.wrapping_mul(1664525).wrapping_add(1013904223);
+                ((s >> 8) as f32 / (1 << 24) as f32 - 0.5) * 1.6
+            })
+            .collect()
+    }
+
+    fn encode_all(cfg: EncoderConfig, input: &[f32]) -> Vec<Vec<u8>> {
+        let ch = cfg.channels;
+        let mut e = Encoder::new(cfg).unwrap();
+        let chans: Vec<&[f32]> = (0..ch).map(|_| input).collect();
+        let mut units = e.encode(&chans);
+        units.extend(e.flush());
+        units
+    }
+
+    #[test]
+    fn cbr_bitrate_limits_use_the_exact_bits_per_frame() {
+        // 288000 b/s at 48 kHz is exactly 6144 bits per frame; one more cannot fit a mono frame.
+        assert!(Encoder::new(EncoderConfig::cbr(48_000, 1, 288_000)).is_ok());
+        assert!(Encoder::new(EncoderConfig::cbr(48_000, 1, 288_001)).is_err());
+        // 4500 b/s at 96 kHz is exactly 48 bits per frame, the size of a silent mono frame.
+        assert!(Encoder::new(EncoderConfig::cbr(96_000, 1, 4_500)).is_ok());
+        assert!(Encoder::new(EncoderConfig::cbr(96_000, 1, 4_499)).is_err());
+        assert!(Encoder::new(EncoderConfig::cbr(96_000, 2, 2_000)).is_err());
+    }
+
+    /// No CBR access unit passes the decoder buffer, 6144 bits (768 bytes) per channel: fill could
+    /// write 8 bits past its request, which made 769-byte mono units at the highest rate.
+    #[test]
+    fn cbr_access_units_fit_the_decoder_buffer() {
+        let sil = vec![0f32; 48_000];
+        let nz = noise(48_000);
+        for (rate, ch, bps) in [(48_000, 1, 288_000), (48_000, 2, 576_000), (44_100, 1, 264_600), (8_000, 1, 1_000)] {
+            for input in [&sil, &nz] {
+                let units = encode_all(EncoderConfig::cbr(rate, ch, bps), input);
+                let max = units.iter().map(Vec::len).max().unwrap_or(0);
+                assert!(max <= 768 * ch, "{rate} Hz, {ch} ch, {bps} b/s: {max}-byte access unit");
+            }
+        }
+    }
+
+    #[test]
+    fn the_lowest_accepted_cbr_rate_holds_a_silent_frame() {
+        // The full bandwidth makes the largest silent frames; ADTS adds the program config to every
+        // 7-channel frame.
+        let sil = vec![0f32; 96_000];
+        for ch in 1..=8 {
+            for adts in [false, true] {
+                let cfg = |b| EncoderConfig { adts, bandwidth: Some(47_040), ..EncoderConfig::cbr(96_000, ch, b) };
+                let b = (1000..20_000).map(|k| k * 10).find(|&b| Encoder::new(cfg(b)).is_ok()).unwrap();
+                let budget = b as usize * FRAME_LEN / 96_000;
+                let header = if adts { 56 } else { 0 };
+                let units = encode_all(cfg(b), &sil);
+                let max = units[1..units.len() - 1].iter().map(|u| u.len() * 8 - header).max().unwrap_or(0);
+                assert!(max <= budget, "{ch} ch, ADTS {adts}: {b} b/s accepted, {budget} bits per frame, silent frames take {max}");
+            }
+        }
+    }
+
+    #[test]
+    fn maximum_rate_frames_are_filled_to_the_limit() {
+        let sil = vec![0f32; 48_000];
+        for bandwidth in [None, Some(1000)] {
+            let units = encode_all(EncoderConfig { bandwidth, ..EncoderConfig::cbr(48_000, 1, 288_000) }, &sil);
+            for u in &units[..units.len() - 1] {
+                assert_eq!(u.len(), 768, "bandwidth {bandwidth:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn cbr_fill_never_spends_more_than_the_reservoir_holds() {
+        // Encode frame by frame, as `flush` does, so the bits each frame may spend are known: the
+        // reservoir level plus this frame's share of the rate.
+        for (rate, ch, bps) in [(48_000, 1, 5_907), (48_000, 2, 96_011), (8_000, 1, 7_919), (44_100, 2, 128_000)] {
+            for n in [1, 1500, 10_000] {
+                let mut e = Encoder::new(EncoderConfig::cbr(rate, ch, bps)).unwrap();
+                // Silent input, buffered without encoding: `encode` would code the frames it can.
+                for h in &mut e.hist {
+                    h.extend(std::iter::repeat_n(0.0, n));
+                }
+                e.total_in = n as u64;
+                let frames = (n as u64).div_ceil(FRAME_LEN as u64) + 1;
+                while e.frames_done < frames {
+                    let (need, have) = (e.needed_for(e.frames_done), e.available());
+                    for h in &mut e.hist {
+                        h.extend(std::iter::repeat_n(0.0, (need - have).max(0) as usize));
+                    }
+                    let last = e.frames_done + 1 == frames;
+                    let mean = ((e.mean_acc + bps as u64 * FRAME_LEN as u64) / rate as u64) as i64;
+                    let available = e.level + mean;
+                    let used = e.encode_frame(last).len() as i64 * 8;
+                    let at = format!("{rate} Hz, {ch} ch, {bps} b/s, {n} samples, frame {}", e.frames_done);
+                    assert!(used <= available, "{at}: {used} bits used, {available} available");
+                    if last {
+                        assert!(used >= available.min(e.max_frame_bits) / 8 * 8, "{at}: last frame {used} bits, {available} available");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn fill_never_passes_the_request() {
+        for bits in 0..3000u64 {
+            let mut bw = BitWriter::new();
+            let n = write_fill(&mut bw, bits);
+            assert_eq!(n, bw.bit_len() as u64);
+            assert!(n <= bits && n + 6 >= bits, "asked {bits}, wrote {n}");
+        }
+    }
+
+    #[test]
+    fn vbr_quality_must_be_a_number() {
+        assert!(Encoder::new(EncoderConfig::vbr(48_000, 2, f32::NAN)).is_err());
+        // Infinities and other out-of-range values are clamped: they encode exactly as the nearest
+        // end of the range, within the frame limit.
+        let nz = noise(48_000);
+        for (q, end) in [(f32::INFINITY, 6.0), (f32::NEG_INFINITY, 0.5), (100.0, 6.0), (-3.0, 0.5)] {
+            let units = encode_all(EncoderConfig { adts: true, ..EncoderConfig::vbr(48_000, 8, q) }, &nz);
+            assert!(units == encode_all(EncoderConfig { adts: true, ..EncoderConfig::vbr(48_000, 8, end) }, &nz), "quality {q}");
+            for u in &units {
+                assert!(u.len() <= 6144 + 7 && u.starts_with(&[0xFF]), "quality {q}: {}-byte unit", u.len());
+            }
+        }
+    }
 }
