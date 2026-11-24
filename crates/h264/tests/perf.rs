@@ -7,12 +7,19 @@ use filmcraft_h264::Decoder;
 use std::time::Instant;
 
 fn bench(data: &[u8], threads: usize, iters: usize) -> (usize, f64) {
+    // one access unit per call, as the media stack feeds the decoder (a call may start only so
+    // many pictures)
+    let aus = common::split_access_units(data);
     let mut best = f64::MAX;
     let mut frames = 0;
     for _ in 0..iters {
         let mut dec = Decoder::with_threads(threads);
         let t0 = Instant::now();
-        frames = dec.decode(data, 0).expect("decode").len() + dec.flush().len();
+        frames = 0;
+        for (i, au) in aus.iter().enumerate() {
+            frames += dec.decode(au, i as i64).expect("decode").len();
+        }
+        frames += dec.flush().len();
         best = best.min(t0.elapsed().as_secs_f64());
     }
     (frames, best)

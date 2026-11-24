@@ -72,6 +72,27 @@ fn y4m_high_bit_depth_frame_parameters_aspect_and_range() {
     assert!(planes[0].iter().all(|&s| s == 940) && planes[1].iter().all(|&s| s == 512) && planes[2].iter().all(|&s| s == 64));
 }
 
+/// On a rate whose frame is not a whole number of ticks (37.516 fps), each frame's time and the
+/// duration are the boundaries `frame_at` reads back as that frame (rounded up); a floored time
+/// lies in the frame before.
+#[test]
+fn y4m_frame_times_read_back_as_their_frames_on_an_exotic_rate() {
+    let frames: Vec<Vec<u8>> = (0..7).map(|k| planes8(4, 1, 10 * k, 128, 128)).collect();
+    let src = open("exotic.y4m", y4m("W2 H2 F37516:1000 C420jpeg", "FRAME", &frames));
+    let rate = FrameRate::new(37516, 1000);
+    assert_eq!(src.info().video.as_ref().map(|v| v.frame_rate), Some(rate));
+    assert_ne!(Tick::from_rational(1, 1000, 37516), rate.tick_of(1), "the rate must have fractional frame boundaries");
+    assert_eq!(src.info().duration, rate.tick_of(7));
+    assert_eq!(rate.frame_at(src.info().duration), 7);
+    for k in 0..7u8 {
+        let f = src.video_frame(FrameRequest::full(rate.tick_of(i64::from(k)))).unwrap();
+        assert_eq!(f.pts, rate.tick_of(i64::from(k)));
+        assert_eq!(rate.frame_at(f.pts), i64::from(k), "frame {k}");
+        let PixelData::Yuv8 { planes, .. } = &f.data else { panic!("{:?}", f.data) };
+        assert_eq!(planes[0][0], 10 * k);
+    }
+}
+
 #[test]
 fn y4m_mono_has_neutral_chroma() {
     let src = open("grey.y4m", y4m("W2 H2 F24:1 Cmono", "FRAME", &[vec![77; 4]]));

@@ -180,7 +180,9 @@ impl Y4mSource {
             return Err(bad("no complete frames"));
         }
         let color = ColorInfo { matrix: filmcraft_frame::default_matrix(w, h), range: if full { Range::Full } else { Range::Limited }, ..ColorInfo::REC709 };
-        let duration = Tick::from_rational(frames.len() as i64, rate.den, rate.num);
+        // frame boundaries round up, as `frame_at` reads them (craft-libs 3de39fd3a5): on an exotic
+        // rate a floored boundary lies in the frame before
+        let duration = rate.tick_of(frames.len() as i64);
         let bitrate = (frame_bytes as u64 * 8).checked_mul(rate.num as u64).map(|b| b / rate.den as u64);
         let info = MediaInfo {
             name: name.to_string(),
@@ -238,14 +240,7 @@ impl Y4mSource {
             };
             PixelData::Yuv16 { planes: [y, cb, cr], chroma: self.layout.chroma.unwrap_or(Chroma::C420), bits: self.layout.bits, alpha: None }
         };
-        Ok(VideoFrame {
-            width: v.width,
-            height: v.height,
-            data: pixels,
-            color: v.color,
-            par: v.par,
-            pts: Tick::from_rational(idx as i64, self.rate.den, self.rate.num),
-        })
+        Ok(VideoFrame { width: v.width, height: v.height, data: pixels, color: v.color, par: v.par, pts: self.rate.tick_of(idx as i64) })
     }
 }
 
