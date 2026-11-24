@@ -3,7 +3,7 @@
 
 /// A complete WAVE file around little-endian PCM.
 pub fn wav_file(pcm: &[u8], channels: u16, sample_rate: u32, bits: u16) -> Vec<u8> {
-    let mut v = wav_header(pcm.len() as u32, channels, sample_rate, bits);
+    let mut v = wav_header(u32::try_from(pcm.len()).unwrap_or(u32::MAX), channels, sample_rate, bits);
     v.extend_from_slice(pcm);
     if pcm.len() % 2 == 1 {
         v.push(0);
@@ -11,9 +11,10 @@ pub fn wav_file(pcm: &[u8], channels: u16, sample_rate: u32, bits: u16) -> Vec<u
     v
 }
 
-/// The RIFF header of a WAVE file up to and including the `data` chunk header.
+/// The RIFF header of a WAVE file up to and including the `data` chunk header. Sizes saturate at
+/// their fields instead of wrapping (channels and bits come from interchange documents).
 pub fn wav_header(data_len: u32, channels: u16, sample_rate: u32, bits: u16) -> Vec<u8> {
-    let block = channels.max(1) * bits.div_ceil(8);
+    let block = channels.max(1).saturating_mul(bits.div_ceil(8));
     let mut v = Vec::with_capacity(44);
     v.extend_from_slice(b"RIFF");
     // Saturating: a huge source (data_len saturated by the caller) must not overflow.
@@ -23,7 +24,7 @@ pub fn wav_header(data_len: u32, channels: u16, sample_rate: u32, bits: u16) -> 
     v.extend_from_slice(&1u16.to_le_bytes());
     v.extend_from_slice(&channels.max(1).to_le_bytes());
     v.extend_from_slice(&sample_rate.to_le_bytes());
-    v.extend_from_slice(&sample_rate.saturating_mul(block as u32).to_le_bytes());
+    v.extend_from_slice(&sample_rate.saturating_mul(u32::from(block)).to_le_bytes());
     v.extend_from_slice(&block.to_le_bytes());
     v.extend_from_slice(&bits.to_le_bytes());
     v.extend_from_slice(b"data");
@@ -69,9 +70,9 @@ pub fn parse_wav(b: &[u8]) -> Option<(Vec<u8>, u16, u32, u16)> {
 
 /// A complete AIFF file (big-endian PCM) from little-endian PCM.
 pub fn aiff_file(pcm: &[u8], channels: u16, sample_rate: u32, bits: u16) -> Vec<u8> {
-    let bps = bits.div_ceil(8) as usize;
-    let frames = pcm.len() / (bps * channels.max(1) as usize).max(1);
-    let mut v = aiff_header(frames as u32, channels, sample_rate, bits);
+    let bps = usize::from(bits.div_ceil(8));
+    let frames = pcm.len() / bps.max(1).saturating_mul(usize::from(channels.max(1)));
+    let mut v = aiff_header(u32::try_from(frames).unwrap_or(u32::MAX), channels, sample_rate, bits);
     for s in pcm.chunks_exact(bps.max(1)) {
         if bps == 1 {
             v.push(s[0] ^ 0x80); // WAVE 8-bit is unsigned, AIFF signed
@@ -85,12 +86,14 @@ pub fn aiff_file(pcm: &[u8], channels: u16, sample_rate: u32, bits: u16) -> Vec<
     v
 }
 
-/// The AIFF header up to the sound data (`FORM`, `COMM`, `SSND` with offset and block size).
+/// The AIFF header up to the sound data (`FORM`, `COMM`, `SSND` with offset and block size). Sizes
+/// saturate at their 32-bit fields instead of wrapping.
 pub fn aiff_header(frames: u32, channels: u16, sample_rate: u32, bits: u16) -> Vec<u8> {
-    let data_len = frames as usize * channels.max(1) as usize * bits.div_ceil(8) as usize;
+    let data_len = u64::from(frames).saturating_mul(u64::from(channels.max(1))).saturating_mul(u64::from(bits.div_ceil(8)));
+    let chunk = |extra: u64| u32::try_from(extra.saturating_add(data_len)).unwrap_or(u32::MAX);
     let mut v = Vec::with_capacity(54);
     v.extend_from_slice(b"FORM");
-    v.extend_from_slice(&((4 + 26 + 16 + data_len + (data_len & 1)) as u32).to_be_bytes());
+    v.extend_from_slice(&chunk(4 + 26 + 16 + (data_len & 1)).to_be_bytes());
     v.extend_from_slice(b"AIFFCOMM");
     v.extend_from_slice(&18u32.to_be_bytes());
     v.extend_from_slice(&channels.max(1).to_be_bytes());
@@ -98,7 +101,7 @@ pub fn aiff_header(frames: u32, channels: u16, sample_rate: u32, bits: u16) -> V
     v.extend_from_slice(&bits.to_be_bytes());
     v.extend_from_slice(&extended(sample_rate as f64));
     v.extend_from_slice(b"SSND");
-    v.extend_from_slice(&((8 + data_len) as u32).to_be_bytes());
+    v.extend_from_slice(&chunk(8).to_be_bytes());
     v.extend_from_slice(&[0; 8]);
     v
 }
@@ -176,6 +179,30 @@ mod tests {
     }
 
     use super::*;
+
+    /// Channels and bits come from AAF / OMF descriptors: the block size overflowed `u16`
+    /// ("attempt to multiply with overflow") and the AIFF sizes wrapped.
+    #[test]
+    fn hostile_channels_bits_and_frames_saturate() {
+        let h = wav_header(u32::MAX, u16::MAX, u32::MAX, u16::MAX);
+        assert_eq!(h.len(), 44);
+        assert_eq!(&h[28..32], &u32::MAX.to_le_bytes(), "byte rate");
+        assert_eq!(&h[32..34], &u16::MAX.to_le_bytes(), "block align");
+        let a = aiff_header(u32::MAX, u16::MAX, 48_000, u16::MAX);
+        assert_eq!(a.len(), 54);
+        assert_eq!(&a[4..8], &u32::MAX.to_be_bytes(), "FORM size");
+        assert_eq!(&a[42..46], &u32::MAX.to_be_bytes(), "SSND size");
+        // a size that fits is still exact
+        let a = aiff_header(8, 2, 44_100, 24);
+        assert_eq!(&a[4..8], &(46u32 + 48).to_be_bytes());
+        assert_eq!(&a[42..46], &(8u32 + 48).to_be_bytes());
+        for bits in [0, 1, 8, 4096, u16::MAX] {
+            for channels in [0, 1, u16::MAX] {
+                let _ = wav_file(&[1, 2, 3], channels, 48_000, bits);
+                let _ = aiff_file(&[1, 2, 3, 4, 5, 6, 7, 8], channels, 48_000, bits);
+            }
+        }
+    }
 
     #[test]
     fn wav_and_aiff_round_trip() {

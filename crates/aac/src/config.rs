@@ -181,6 +181,9 @@ fn read_rate(br: &mut BitReader) -> Result<(u8, u32)> {
     let i = br.read_bits(4)? as u8;
     if i == 15 {
         let r = br.read_bits(24)?;
+        if r == 0 {
+            return Err(Error::InvalidConfig("sampling rate of 0"));
+        }
         return Ok((table_index_for_rate(r), r));
     }
     let r = *SAMPLE_RATES.get(i as usize).ok_or(Error::InvalidConfig("reserved sampling frequency index"))?;
@@ -188,11 +191,12 @@ fn read_rate(br: &mut BitReader) -> Result<(u8, u32)> {
 }
 
 impl AudioSpecificConfig {
-    /// A plain AAC-LC configuration.
+    /// A plain AAC-LC configuration. A sampling frequency index with no rate (13 and above) gives a
+    /// sample rate of 0, which [`crate::Decoder`] refuses.
     pub fn lc(sf_index: u8, channel_config: u8) -> AudioSpecificConfig {
         AudioSpecificConfig {
             object_type: 2,
-            sample_rate: SAMPLE_RATES[sf_index as usize],
+            sample_rate: SAMPLE_RATES.get(usize::from(sf_index)).copied().unwrap_or(0),
             sf_index,
             channel_config,
             frame_length_flag: false,
@@ -378,6 +382,33 @@ pub fn split_adts(mut data: &[u8]) -> Result<Vec<(AdtsHeader, &[u8])>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_index_with_no_rate_does_not_panic_and_is_refused() {
+        for sf_index in [13, 14, 15, u8::MAX] {
+            let asc = AudioSpecificConfig::lc(sf_index, 2);
+            assert_eq!(asc.sample_rate, 0);
+            assert!(crate::Decoder::from_config(asc).is_err());
+        }
+    }
+
+    /// An explicit sampling rate of 0 is not a rate.
+    #[test]
+    fn a_zero_explicit_rate_is_refused() {
+        let mut bw = BitWriter::new();
+        bw.write_bits(2, 5);
+        bw.write_bits(15, 4);
+        bw.write_bits(0, 24);
+        bw.write_bits(2, 4);
+        bw.write_bits(0, 3);
+        assert!(AudioSpecificConfig::parse(&bw.finish()).is_err());
+        // nor is it as the output rate of explicitly signalled HE-AAC
+        let mut bw = BitWriter::new();
+        for (value, bits) in [(5, 5), (6, 4), (2, 4), (15, 4), (0, 24), (2, 5), (0, 3)] {
+            bw.write_bits(value, bits);
+        }
+        assert!(AudioSpecificConfig::parse(&bw.finish()).is_err());
+    }
 
     #[test]
     fn asc_roundtrip() {

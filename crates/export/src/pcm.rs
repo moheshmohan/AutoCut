@@ -40,6 +40,12 @@ const FL32_NAME: &[u8] = b"\x1532-bit floating point";
 /// an error naming WAV instead.
 pub fn header(container: PcmContainer, channels: u16, sample_rate: u32, format: SampleFormat, frames: u64) -> Result<Vec<u8>, String> {
     let too_long = || "the audio is too long to write".to_string();
+    if channels == 0 {
+        return Err("audio needs at least one channel".into());
+    }
+    if sample_rate == 0 {
+        return Err("audio needs a sample rate".into());
+    }
     let bits = format.bits();
     let bps = bits / 8;
     let float = format.is_float();
@@ -162,7 +168,11 @@ pub fn encode(container: PcmContainer, interleaved: &[f32], format: SampleFormat
 
 /// A whole file in memory (short audio; exports stream with [`header`] and [`encode`]).
 fn write_whole(container: PcmContainer, interleaved: &[f32], channels: u16, sample_rate: u32, format: SampleFormat) -> Result<Vec<u8>, String> {
-    let frames = (interleaved.len() / usize::from(channels.max(1))) as u64;
+    let per_frame = usize::from(channels.max(1));
+    if !interleaved.len().is_multiple_of(per_frame) {
+        return Err("the samples do not make whole frames".into());
+    }
+    let frames = (interleaved.len() / per_frame) as u64;
     let mut v = header(container, channels, sample_rate, format, frames)?;
     encode(container, interleaved, format, &mut v);
     v.extend_from_slice(pad(frames, channels, format));
@@ -373,6 +383,19 @@ mod tests {
         assert_eq!(&a[54..76], FL32_NAME);
         assert_eq!((&a[76..80], be32(&a, 80)), (&b"SSND"[..], 8 + 8));
         assert_eq!(&a[92..], [0.25f32.to_be_bytes(), (-3.0f32).to_be_bytes()].concat());
+    }
+
+    #[test]
+    fn zero_channels_rates_and_partial_frames_are_refused() {
+        for container in [PcmContainer::Wav, PcmContainer::Aiff] {
+            assert!(header(container, 0, 48_000, I16, 1).is_err());
+            assert!(header(container, 1, 0, I16, 1).is_err());
+            assert!(header(container, 2, 48_000, I16, 0).is_ok(), "zero frames stay valid");
+        }
+        assert!(write_wav(&[0.5], 0, 48_000, I16).is_err());
+        assert!(write_wav(&[0.1, 0.2, 0.3], 2, 48_000, I16).is_err());
+        assert!(write_aiff(&[0.1, 0.2, 0.3], 2, 48_000, I16).is_err());
+        assert!(write_aiff(&[0.1, 0.2], 2, 48_000, I16).is_ok());
     }
 
     /// ffprobe (an external oracle; skipped where it is not installed) reads every new format.
