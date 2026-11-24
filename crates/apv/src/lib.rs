@@ -299,7 +299,9 @@ impl Frame {
         let cw = chroma.chroma_width(width) as usize;
         let ch = chroma.chroma_height(height) as usize;
         let cn = cw * ch;
-        let shift = bit_depth.saturating_sub(8) as u32;
+        // The fill values are those of the nearest depth the format has (8..=16 bits).
+        let depth = bit_depth.clamp(8, 16) as u32;
+        let shift = depth - 8;
         let has_alpha = with_alpha || chroma == ChromaFormat::Yuv4444;
         Self {
             width,
@@ -309,7 +311,7 @@ impl Frame {
             y: vec![(16u32 << shift) as u16; n],
             cb: vec![(128u32 << shift) as u16; cn],
             cr: vec![(128u32 << shift) as u16; cn],
-            alpha: has_alpha.then(|| vec![((1u32 << bit_depth) - 1) as u16; n]),
+            alpha: has_alpha.then(|| vec![((1u32 << bit_depth.min(16)) - 1) as u16; n]),
             color: ColorInfo::BT709,
             profile_idc: Profile::P422_10.idc(),
             level_idc: 90,

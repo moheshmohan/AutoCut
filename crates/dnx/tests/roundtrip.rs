@@ -104,3 +104,68 @@ fn corrupt_streams_never_panic() {
         let _ = decode_frame(&d);
     }
 }
+
+#[test]
+fn rejects_repeated_scan_line_indices() {
+    // Every scan index pointing at the first row's payload must not let one coded row fill the
+    // whole raster.
+    let mut enc = Encoder::new(Profile::Hq, 256, 128).unwrap();
+    let mut d = enc.encode(&picture(256, 128, ChromaFormat::Yuv422, 8, 2)).unwrap();
+    assert!(decode_frame(&d).is_ok());
+    let h = filmcraft_dnx::probe(&d).unwrap();
+    assert!(h.mb_rows > 1);
+    let first = filmcraft_dnx::header::SCAN_INDEX_OFFSET;
+    let idx: [u8; 4] = d[first..first + 4].try_into().unwrap();
+    for s in 1..h.mb_rows as usize {
+        d[first + 4 * s..first + 4 * s + 4].copy_from_slice(&idx);
+    }
+    assert!(decode_frame(&d).is_err());
+}
+
+#[test]
+fn rejects_frames_over_the_memory_limit() {
+    // A compact header-only frame claiming a 16384x16384 4:4:4 raster with alpha is refused before
+    // any plane is allocated.
+    let mut enc = Encoder::new(Profile::R444, 64, 64).unwrap();
+    let d = enc.encode(&picture(64, 64, ChromaFormat::Yuv444, 10, 3)).unwrap();
+    let mut h = filmcraft_dnx::probe(&d).unwrap();
+    h.width = 16384;
+    h.lines = 16384;
+    h.mb_rows = 1024;
+    h.alpha = true;
+    h.header_size = filmcraft_dnx::header::header_size_for(h.lines);
+    let mut big = filmcraft_dnx::header::write(&h);
+    let hs = big.len() as u32;
+    for s in 0..h.mb_rows as usize {
+        let o = filmcraft_dnx::header::SCAN_INDEX_OFFSET + 4 * s;
+        big[o..o + 4].copy_from_slice(&(s as u32).to_be_bytes());
+    }
+    big.resize(hs as usize + 4096, 0);
+    assert!(filmcraft_dnx::probe(&big).is_ok());
+    let err = decode_frame(&big).unwrap_err().to_string();
+    assert!(err.contains("memory limit"), "{err}");
+}
+
+#[test]
+fn repeated_or_decreasing_scan_line_offsets_are_refused() {
+    let mut enc = Encoder::new(Profile::Hq, 256, 128).unwrap();
+    let good = enc.encode(&picture(256, 128, ChromaFormat::Yuv422, 8, 2)).unwrap();
+    assert!(decode_frame(&good).is_ok());
+    let rows = probe(&good).unwrap().mb_rows as usize;
+    assert!(rows > 2);
+    let at = |s: usize| filmcraft_dnx::header::SCAN_INDEX_OFFSET + 4 * s;
+    let get = |d: &[u8], s: usize| <[u8; 4]>::try_from(&d[at(s)..at(s) + 4]).unwrap();
+    // every row pointing at the first row's data
+    let mut repeated = good.clone();
+    for s in 1..rows {
+        let first = get(&good, 0);
+        repeated[at(s)..at(s) + 4].copy_from_slice(&first);
+    }
+    assert!(decode_frame(&repeated).is_err());
+    // two rows swapped
+    let mut swapped = good.clone();
+    let (a, b) = (get(&good, 1), get(&good, 2));
+    swapped[at(1)..at(1) + 4].copy_from_slice(&b);
+    swapped[at(2)..at(2) + 4].copy_from_slice(&a);
+    assert!(decode_frame(&swapped).is_err());
+}

@@ -244,6 +244,13 @@ impl FrameState {
         )
     }
 
+    /// Bytes of CDEF and loop-restoration metadata each parallel tile state copies whole.
+    pub fn tile_metadata_bytes(&self) -> usize {
+        let lr = &self.lr;
+        // 1 (type) + 6 (Wiener) + 1 (SGR set) + 2 (SGR weights) bytes per unit.
+        self.cdef.len().saturating_add(lr.lr_type.iter().fold(0usize, |n, v| n.saturating_add(v.len().saturating_mul(10))))
+    }
+
     /// Return the buffers taken by [`FrameState::take_tile_state`].
     pub fn put_tile_state(&mut self, t: TileState) {
         self.cur = t.cur;

@@ -92,7 +92,7 @@ impl EncoderConfig {
         let tile_height_in_mbs = h_mbs.div_ceil(4).max(8).max(h_mbs.div_ceil(20));
         let target_frame_bytes = profile.nominal_frame_bytes(width, height);
         let kbps = ((target_frame_bytes as u64) * 8 * 30 / 1000).max(1000) as u32;
-        let (level_idc, band_idc) = select_level_and_band((width as u64) * (height as u64) * 30, kbps);
+        let (level_idc, band_idc) = select_level_and_band((width as u64).saturating_mul(height as u64).saturating_mul(30), kbps);
         Self {
             profile,
             width,

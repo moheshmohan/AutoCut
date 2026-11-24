@@ -2,6 +2,15 @@
 
 use crate::tables::LEVEL_SCALE;
 
+/// `qp` and `bit_depth` held to the format's ranges (`BitDepth` 10..=16, QP `0..=51 + QpBdOffset`):
+/// the codec only passes values in range, but these functions are public and the shifts below
+/// overflow outside it.
+#[inline(always)]
+fn in_range(qp: u8, bit_depth: u8) -> (u8, u8) {
+    let bit_depth = bit_depth.clamp(10, 16);
+    (qp.min(51 + 6 * (bit_depth - 8)), bit_depth)
+}
+
 /// 1D 8-point inverse transform using the RFC 9924 §6.3.2.3 even/odd butterfly decomposition,
 /// shifting each output by `(sum + round) >> shift`.
 #[inline(always)]
@@ -40,6 +49,7 @@ fn idct_1d(x0: i32, x1: i32, x2: i32, x3: i32, x4: i32, x5: i32, x6: i32, x7: i3
 /// Fast path when an 8x8 block has only a DC coefficient (`coeff[1..64]` are all zero).
 #[inline]
 pub fn scale_and_idct8x8_dc_only(dc_coeff: i16, q0: u8, qp: u8, bit_depth: u8, out: &mut [u16; 64]) {
+    let (qp, bit_depth) = in_range(qp, bit_depth);
     let bd_shift_scale = (bit_depth as u32).saturating_sub(2);
     let scale_round = if bd_shift_scale > 0 { 1i64 << (bd_shift_scale - 1) } else { 0 };
     let level_scale = LEVEL_SCALE[(qp % 6) as usize] as i64;
@@ -61,6 +71,7 @@ pub fn scale_and_idct8x8_dc_only(dc_coeff: i16, q0: u8, qp: u8, bit_depth: u8, o
 /// into reconstructed samples at `bit_depth` (`10..=16`), per RFC 9924 §6.3.
 #[inline]
 pub fn scale_and_idct8x8(coeff: &[i16; 64], q_matrix: &[u8; 64], qp: u8, bit_depth: u8, out: &mut [u16; 64]) {
+    let (qp, bit_depth) = in_range(qp, bit_depth);
     let bd_shift_scale = (bit_depth as u32).saturating_sub(2);
     let scale_round = if bd_shift_scale > 0 { 1i64 << (bd_shift_scale - 1) } else { 0 };
     let level_scale = LEVEL_SCALE[(qp % 6) as usize] as i64;
@@ -133,6 +144,7 @@ fn fdct_1d(x0: i32, x1: i32, x2: i32, x3: i32, x4: i32, x5: i32, x6: i32, x7: i3
 /// scaled coefficient domain `d[y * 8 + x]` matching [`scale_and_idct8x8`].
 #[inline]
 pub fn fdct8x8(samples: &[u16; 64], bit_depth: u8) -> [i32; 64] {
+    let (_, bit_depth) = in_range(0, bit_depth);
     let mid = 1i32 << (bit_depth - 1);
     let shift1 = (bit_depth as u32).saturating_sub(5);
     let add1 = if shift1 > 0 { 1i32 << (shift1 - 1) } else { 0 };
@@ -170,6 +182,7 @@ pub fn fdct8x8(samples: &[u16; 64], bit_depth: u8) -> [i32; 64] {
 /// Quantize forward-transformed coefficients `f` (in the `d` domain) at `qp` with `q_matrix`.
 #[inline]
 pub fn quantize8x8(f: &[i32; 64], q_matrix: &[u8; 64], qp: u8, bit_depth: u8) -> [i16; 64] {
+    let (qp, bit_depth) = in_range(qp, bit_depth);
     let bd_shift_scale = (bit_depth as u32).saturating_sub(2);
     let level_scale = LEVEL_SCALE[(qp % 6) as usize] as i64;
     let qp_shift = (qp / 6) as u32;
@@ -196,6 +209,21 @@ pub fn quantize8x8(f: &[i32; 64], q_matrix: &[u8; 64], qp: u8, bit_depth: u8) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The functions are public: a bit depth or QP outside the format's range must not overflow.
+    #[test]
+    fn out_of_range_bit_depth_and_qp_do_not_overflow() {
+        let (src, qm) = ([u16::MAX; 64], [255u8; 64]);
+        for depth in [0, 1, 9, 17, 20, 21, 64, 255] {
+            for qp in [0, 99, 255] {
+                let q = quantize8x8(&fdct8x8(&src, depth), &qm, qp, depth);
+                let mut rec = [0u16; 64];
+                scale_and_idct8x8(&q, &qm, qp, depth, &mut rec);
+                scale_and_idct8x8(&[i16::MIN; 64], &qm, qp, depth, &mut rec);
+                scale_and_idct8x8_dc_only(i16::MIN, 255, qp, depth, &mut rec);
+            }
+        }
+    }
 
     #[test]
     fn fdct_idct_roundtrip_10bit() {

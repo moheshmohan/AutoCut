@@ -164,11 +164,17 @@ impl Decoder {
         if frames.len() > 1 {
             self.stats.superframes += 1;
         }
+        let queued = self.pending.len();
         for f in frames {
             if f.is_empty() {
                 continue;
             }
-            self.decode_frame(f, pts)?;
+            if let Err(e) = self.decode_frame(f, pts) {
+                // A failed sample outputs nothing: drop what its earlier subframes queued so a
+                // later drain does not expand each repeat into its own picture.
+                self.pending.truncate(queued);
+                return Err(e);
+            }
         }
         Ok(self.drain(false))
     }
@@ -1006,4 +1012,38 @@ fn picture_of(f: &Frame, pts: i64, draft: bool) -> Picture {
         b.add(f, r, f.band(r));
     }
     b.finish()
+}
+
+#[cfg(test)]
+mod superframe_tests {
+    use super::*;
+
+    /// A superframe whose later subframe fails outputs nothing: the repeat its first subframe
+    /// queued (show_existing_frame of slot 0) is dropped, not handed out by a later drain.
+    #[test]
+    fn failed_superframe_drops_its_queued_repeats() {
+        let mut dec = Decoder::with_threads(1);
+        let info = FrameInfo {
+            width: 8,
+            height: 8,
+            ss_x: true,
+            ss_y: true,
+            bit_depth: 8,
+            color_space: 0,
+            color_range: false,
+            render_width: 8,
+            render_height: 8,
+            key: true,
+            intra_only: false,
+        };
+        dec.slots[0] = Some(Arc::new(Frame::new(info, Arc::new(Pools::default()))));
+        // Profile 0 show_existing_frame of slot 0, then a frame with a bad frame marker; superframe
+        // index with one-byte sizes for two frames.
+        let sample = [0x88, 0x00, 0xc1, 1, 1, 0xc1];
+        assert!(dec.decode(&sample, 1).is_err());
+        assert!(dec.pending.is_empty(), "the failed superframe left {} queued pictures", dec.pending.len());
+        // The repeat alone still shows.
+        assert!(dec.decode(&[0x88], 2).is_ok());
+        assert_eq!(dec.pending.len(), 1);
+    }
 }

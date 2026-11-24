@@ -114,6 +114,8 @@ struct FrameJob {
     apply_film_grain: bool,
     /// Draft mode: the frame refreshes no reference slot, so its in-loop filters are skipped.
     draft: bool,
+    #[cfg(test)]
+    force_panic: bool,
 }
 
 /// A shown picture in output order.
@@ -242,6 +244,9 @@ pub struct Decoder {
     out: VecDeque<Output>,
     /// pts of the temporal unit being decoded.
     pts: i64,
+    /// Make every frame job panic (tests of the worker panic handling).
+    #[cfg(test)]
+    force_panic: bool,
 }
 
 fn default_threads() -> usize {
@@ -344,6 +349,8 @@ impl Decoder {
             max_in_flight: fthreads + 2,
             out: VecDeque::new(),
             pts: 0,
+            #[cfg(test)]
+            force_panic: false,
         }
     }
 
@@ -617,6 +624,8 @@ impl Decoder {
             pts: self.pts,
             apply_film_grain: self.apply_film_grain,
             draft,
+            #[cfg(test)]
+            force_panic: self.force_panic,
         }));
         Ok(None)
     }
@@ -736,10 +745,13 @@ impl Decoder {
     }
 }
 
-/// Decode a frame job and publish its results.
+/// Decode a frame job and publish its results. A panic while decoding (a decoder bug hit by
+/// hostile input) becomes an error in both slots: otherwise a frame worker would die with its
+/// slots unset and every later `wait` on them would block forever.
 fn run_job(job: FrameJob, pool: &Pool, stats: &Mutex<DecodeStats>) {
     let mut st = DecodeStats::default();
-    match decode_frame(&job, pool, &mut st) {
+    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| decode_frame(&job, pool, &mut st)));
+    match res.unwrap_or(Err(Error::Invalid("decoder panicked"))) {
         Ok((rf, pic)) => {
             if let Some(ps) = &job.picture {
                 ps.set(pic.map(Arc::new).ok_or(Error::Invalid("shown frame without picture")));
@@ -761,6 +773,8 @@ fn run_job(job: FrameJob, pool: &Pool, stats: &Mutex<DecodeStats>) {
 /// The whole decoding process of one frame: setup, tiles, post-filters, motion vector storage
 /// and the output picture.
 fn decode_frame(job: &FrameJob, pool: &Pool, stats: &mut DecodeStats) -> Result<(Arc<RefFrame>, Option<Picture>)> {
+    #[cfg(test)]
+    assert!(!job.force_panic, "forced frame job panic");
     let fh = &job.fh;
     let seq = &job.seq;
     // Wait for the reference frames this frame reads.
@@ -851,6 +865,14 @@ fn decode_frame(job: &FrameJob, pool: &Pool, stats: &mut DecodeStats) -> Result<
 
 /// Decode the tiles of a frame (tile number, data), in parallel when several; returns the final
 /// CDFs of tile context_update_tile_id.
+/// Bytes all parallel tile states may hold of whole-frame CDEF and restoration metadata; past it
+/// the tiles decode one after another on the frame's own metadata.
+const TILE_METADATA_BUDGET: usize = 256 << 20;
+
+fn tile_metadata_fits(tiles: usize, per_tile: usize) -> bool {
+    tiles.checked_mul(per_tile).is_some_and(|n| n <= TILE_METADATA_BUDGET)
+}
+
 fn decode_tiles(pool: &Pool, fs: &mut FrameState, cdfs: &Cdfs, tiles: &[(usize, Vec<u8>)]) -> Result<Option<Box<Cdfs>>> {
     let ti = fs.fh.tile_info.clone();
     let ctx_tile = ti.context_update_tile_id as usize;
@@ -862,7 +884,7 @@ fn decode_tiles(pool: &Pool, fs: &mut FrameState, cdfs: &Cdfs, tiles: &[(usize, 
     };
     // Intra block copy reads the current frame through the tile's own buffer: keep whole-frame
     // buffers (tiles one after another) for it.
-    if tiles.len() > 1 && pool.is_parallel() && !fs.fh.allow_intrabc {
+    if tiles.len() > 1 && pool.is_parallel() && !fs.fh.allow_intrabc && tile_metadata_fits(tiles.len(), fs.tile_metadata_bytes()) {
         let mut states: Vec<TileState> = tiles
             .iter()
             .map(|(num, _)| {
@@ -1074,6 +1096,7 @@ mod tests {
             pts: 0,
             apply_film_grain: false,
             draft: false,
+            force_panic: false,
         }));
         decoder
     }
@@ -1091,6 +1114,16 @@ mod tests {
         // #2801: the LEB128 size 2^32 became zero on wasm32, accepting a truncated OBU.
         let result = std::panic::catch_unwind(|| Decoder::with_threads(1).decode(&[0x7a, 0x80, 0x80, 0x80, 0x80, 0x10]));
         assert!(matches!(result.expect("OBU size parsing must not panic"), Err(Error::Truncated)));
+    }
+
+    #[test]
+    fn hostile_lengths_obu_size_requires_termination() {
+        let mut data = [0x80; 9];
+        data[0] = 0x7a; // Padding OBU with eight unterminated size bytes.
+        let result = std::panic::catch_unwind(|| Decoder::with_threads(1).decode(&data));
+        assert!(matches!(result.expect("OBU size parsing must not panic"), Err(Error::Truncated)));
+        data[8] = 0; // A terminated eight-byte encoding of zero remains valid.
+        assert!(Decoder::with_threads(1).decode(&data).unwrap().is_empty());
     }
 
     #[test]
@@ -1146,6 +1179,61 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// A 16x16 libaom key frame: temporal delimiter, sequence header, frame OBU.
+    const KEY_FRAME_16X16: &[u8] = &[
+        0x12, 0x00, 0x0a, 0x0a, 0x00, 0x00, 0x00, 0x01, 0x9f, 0xf9, 0xf5, 0xf3, 0x00, 0x80, 0x32, 0x0b, 0x10, 0x00, 0xc0, 0x00, 0x00, 0x02, 0x80, 0x00, 0x00,
+        0x00, 0x9c,
+    ];
+
+    fn decode_key_frame(threads: usize, force_panic: bool) -> crate::Result<usize> {
+        let mut dec = Decoder::with_threads(threads);
+        dec.force_panic = force_panic;
+        let mut n = dec.decode(KEY_FRAME_16X16)?.len();
+        n += dec.flush_result()?.len();
+        Ok(n)
+    }
+
+    /// `f()` on another thread; a hang fails the test instead of blocking it.
+    fn within_a_minute<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(f());
+        });
+        rx.recv_timeout(std::time::Duration::from_secs(60)).expect("decoder hung after a frame job panicked")
+    }
+
+    #[test]
+    fn a_panicking_frame_job_is_an_error_not_a_hang() {
+        for threads in [1, 3] {
+            assert_eq!(decode_key_frame(threads, false), Ok(1), "threads {threads}");
+            assert_eq!(within_a_minute(move || decode_key_frame(threads, true)), Err(Error::Invalid("decoder panicked")), "threads {threads}");
+        }
+    }
+
+    #[test]
+    fn the_decoder_recovers_at_the_next_key_frame_after_a_panic() {
+        let n = within_a_minute(|| {
+            let mut dec = Decoder::with_threads(3);
+            dec.force_panic = true;
+            let _ = dec.decode(KEY_FRAME_16X16);
+            assert!(dec.flush_result().is_err());
+            dec.force_panic = false;
+            let mut pics = dec.decode(KEY_FRAME_16X16).expect("decode");
+            pics.extend(dec.flush_result().expect("flush"));
+            pics.len()
+        });
+        assert_eq!(n, 1);
+    }
+
+    /// Each parallel tile copies the frame's whole CDEF and restoration metadata: the copies of
+    /// many tiles of a large frame are budgeted instead of multiplying that memory per tile.
+    #[test]
+    fn tile_metadata_copies_are_budgeted() {
+        assert!(tile_metadata_fits(64, 1 << 20));
+        assert!(!tile_metadata_fits(4096, 1 << 20));
+        assert!(!tile_metadata_fits(usize::MAX, 2));
     }
 
     #[test]

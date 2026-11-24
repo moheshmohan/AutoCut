@@ -894,6 +894,9 @@ impl FrameHeader {
             let mut widest = 0;
             let mut start = 0;
             while start < sb_cols {
+                if t.mi_col_starts.len() >= MAX_TILE_COLS {
+                    return Err(Error::Invalid("tile_cols exceeds MAX_TILE_COLS"));
+                }
                 t.mi_col_starts.push(start << sb_shift);
                 let max_width = (sb_cols - start).min(max_tile_width_sb);
                 let size = r.ns(max_width)? + 1;
@@ -911,6 +914,9 @@ impl FrameHeader {
             let max_tile_height_sb = (max_tile_area_sb / widest.max(1)).max(1);
             let mut start = 0;
             while start < sb_rows {
+                if t.mi_row_starts.len() >= MAX_TILE_ROWS {
+                    return Err(Error::Invalid("tile_rows exceeds MAX_TILE_ROWS"));
+                }
                 t.mi_row_starts.push(start << sb_shift);
                 let max_height = (sb_rows - start).min(max_tile_height_sb);
                 let size = r.ns(max_height)? + 1;
@@ -1386,5 +1392,29 @@ mod tests {
         assert!(strictly_increasing(&[0, 64, 255]));
         assert!(!strictly_increasing(&[0, 64, 64]));
         assert!(!strictly_increasing(&[128, 64]));
+    }
+}
+
+#[cfg(test)]
+mod tile_info_tests {
+    use super::*;
+
+    /// tile_info() of a frame `sb_cols` x `sb_rows` 64x64 superblocks wide, with non-uniform
+    /// spacing and every tile one superblock (`ns` values 0: six zero bits each while the
+    /// remaining width is at least 64), so the tile counts equal the superblock counts.
+    fn one_superblock_tiles(sb_cols: u32, sb_rows: u32) -> Result<FrameHeader> {
+        let mut fh = FrameHeader { mi_cols: sb_cols * 16, mi_rows: sb_rows * 16, ..Default::default() };
+        // A zero bit for uniform_tile_spacing_flag, then all-zero tile sizes, ids and tile_size_bytes.
+        let data = vec![0u8; 4096];
+        fh.tile_info(&mut BitReader::new(&data), &SequenceHeader::default())?;
+        Ok(fh)
+    }
+
+    #[test]
+    fn non_uniform_tiles_stop_at_the_tile_count_limits() {
+        let fh = one_superblock_tiles(MAX_TILE_COLS as u32, 1).unwrap();
+        assert_eq!(fh.tile_info.cols, MAX_TILE_COLS);
+        assert!(matches!(one_superblock_tiles(MAX_TILE_COLS as u32 + 36, 1), Err(Error::Invalid("tile_cols exceeds MAX_TILE_COLS"))));
+        assert!(matches!(one_superblock_tiles(1, MAX_TILE_ROWS as u32 + 36), Err(Error::Invalid("tile_rows exceeds MAX_TILE_ROWS"))));
     }
 }
