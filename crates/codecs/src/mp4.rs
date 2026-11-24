@@ -21,6 +21,12 @@ use crate::{CodecError, make_video_decoder};
 /// Most bytes read from one AAC access unit when probing for HE-AAC at open (8 channels × 6144 bits).
 const MAX_AAC_PROBE_UNIT: usize = 8 * 6144 / 8;
 
+impl crate::audio::PacketBytes for DecodedAudioPacket {
+    fn packet_bytes(&self) -> usize {
+        self.samples.packet_bytes()
+    }
+}
+
 /// How far a track's nominal rate may sit from a standard rate and still be read as it.
 ///
 /// Whole-millisecond frame times (#1700) move the mean duration by at most one timestamp unit over
@@ -67,6 +73,8 @@ struct AudioState {
     packets: HashMap<usize, Arc<DecodedAudioPacket>>,
     order: Vec<usize>,
     last_decoded: Option<usize>,
+    /// Bytes of the decoded packets held in `packets`.
+    bytes: usize,
 }
 
 /// One playable audio track with its own decoder state and timing tables.
@@ -411,7 +419,7 @@ impl Mp4Source {
                     }
                     _ => (t.edit_offset, 0),
                 };
-                let state = Mutex::new(AudioState { decoder: None, packets: HashMap::new(), order: Vec::new(), last_decoded: None });
+                let state = Mutex::new(AudioState { decoder: None, packets: HashMap::new(), order: Vec::new(), last_decoded: None, bytes: 0 });
                 Some(Mp4Audio { track: i, state, starts, offset, preroll })
             })
             .collect();
@@ -515,12 +523,7 @@ impl Mp4Source {
             }
         };
         let p = Arc::new(DecodedAudioPacket { samples, failed });
-        st.packets.insert(i, p.clone());
-        st.order.push(i);
-        if st.order.len() > 4096 {
-            let old = st.order.remove(0);
-            st.packets.remove(&old);
-        }
+        crate::audio::cache_packet(&mut st.packets, &mut st.order, &mut st.bytes, i, &p);
         Ok(p)
     }
 }
