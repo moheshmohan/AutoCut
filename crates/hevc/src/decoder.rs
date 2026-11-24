@@ -19,6 +19,10 @@ use std::sync::{Arc, Mutex};
 /// Maximum completed pictures retained after a failed decode call.
 const MAX_QUEUED_AFTER_ERROR: usize = 32;
 
+/// Most pictures one `decode` call may start: a chunk is an access unit, or a few in a transport
+/// stream packet. Each picture is a full frame, and small slices make them cheap to ask for.
+const MAX_PICTURES_PER_CALL: usize = 64;
+
 /// A picture whose slices are being collected.
 struct PendingPic {
     frame: FrameRef,
@@ -83,6 +87,8 @@ pub struct Decoder {
     /// One lazily allocated gray backing for unavailable references in the active format.
     gray_reference: Option<Frame>,
     first_picture: bool,
+    /// Pictures started by the current `decode` call (see [`MAX_PICTURES_PER_CALL`]).
+    call_pictures: usize,
     after_eos: bool,
     /// RASL pictures associated with the last IRAP are skipped (it had NoRaslOutputFlag = 1).
     skip_rasl: bool,
@@ -139,6 +145,7 @@ impl Decoder {
             active_sps: None,
             gray_reference: None,
             first_picture: true,
+            call_pictures: 0,
             after_eos: false,
             skip_rasl: false,
             layout_cache: Vec::new(),
@@ -163,22 +170,38 @@ impl Decoder {
     pub fn configure_hvcc(&mut self, hvcc: &[u8]) -> Result<()> {
         ensure!(hvcc.len() >= 23, "hvcC too short");
         ensure!(hvcc[0] == 1, "unsupported hvcC version {}", hvcc[0]);
-        self.nal_length_size = Some((hvcc[21] & 3) as usize + 1);
         let num_arrays = hvcc[22] as usize;
-        let mut pos = 23;
-        for _ in 0..num_arrays {
-            ensure!(pos + 3 <= hvcc.len(), "hvcC truncated");
-            let n = u16::from_be_bytes([hvcc[pos + 1], hvcc[pos + 2]]) as usize;
-            pos += 3;
-            for _ in 0..n {
-                ensure!(pos + 2 <= hvcc.len(), "hvcC truncated");
-                let len = u16::from_be_bytes([hvcc[pos], hvcc[pos + 1]]) as usize;
-                pos += 2;
-                ensure!(pos + len <= hvcc.len(), "hvcC truncated");
-                self.handle_nal(&hvcc[pos..pos + len], 0)?;
-                pos += len;
+        // Two passes: the first checks every array, so a record that carries anything but
+        // parameter sets and SEI (a picture slice, say) is refused before any NAL is handled.
+        for pass in 0..2 {
+            let mut pos = 23;
+            for _ in 0..num_arrays {
+                ensure!(pos <= hvcc.len() && hvcc.len() - pos >= 3, "hvcC truncated");
+                let array_type = hvcc[pos] & 0x3f;
+                let n = u16::from_be_bytes([hvcc[pos + 1], hvcc[pos + 2]]) as usize;
+                pos += 3;
+                for _ in 0..n {
+                    ensure!(pos <= hvcc.len() && hvcc.len() - pos >= 2, "hvcC truncated");
+                    let len = u16::from_be_bytes([hvcc[pos], hvcc[pos + 1]]) as usize;
+                    pos += 2;
+                    ensure!(len <= hvcc.len() - pos, "hvcC truncated");
+                    let nal = &hvcc[pos..pos + len];
+                    if pass == 0 {
+                        let header = NalHeader::parse(nal)?;
+                        ensure!(
+                            [nal_type::VPS, nal_type::SPS, nal_type::PPS, nal_type::PREFIX_SEI, nal_type::SUFFIX_SEI].contains(&array_type),
+                            "hvcC array has unsupported NAL type {array_type}"
+                        );
+                        ensure!(header.nal_type == array_type, "hvcC array type {array_type} disagrees with NAL header type {}", header.nal_type);
+                    } else {
+                        self.handle_nal(nal, 0)?;
+                    }
+                    pos += len;
+                }
             }
         }
+        // Set last: a record that fails above leaves the decoder as it was.
+        self.nal_length_size = Some((hvcc[21] & 3) as usize + 1);
         Ok(())
     }
 
@@ -202,6 +225,7 @@ impl Decoder {
             },
             None => annexb_nals(data),
         };
+        self.call_pictures = 0;
         let mut result = Ok(());
         for nal in nals {
             if let Err(e) = self.handle_nal(nal, pts) {
@@ -399,6 +423,8 @@ impl Decoder {
 
     fn start_picture(&mut self, sh: &SliceHeader, sps: &Arc<Sps>, pps: &Arc<Pps>, pts: i64) -> Result<()> {
         ensure!(sh.first_slice_segment_in_pic && !sh.dependent, "invalid first slice segment");
+        self.call_pictures += 1;
+        ensure!(self.call_pictures <= MAX_PICTURES_PER_CALL, "too many pictures in one chunk");
         let hdr = sh.nal;
         let changed = match &self.active_sps {
             None => true,
@@ -567,9 +593,10 @@ fn run_job_as<S: Sample>(
     draft: bool,
     shared: &Shared,
 ) {
-    let mut pic = PicState::<S>::new(frame.clone(), sps, pps, layout, scaling);
-    pic.draft = draft;
+    // The picture state is set up inside the guard too: a panic there must not escape the job.
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let mut pic = PicState::<S>::new(frame.clone(), sps, pps, layout, scaling);
+        pic.draft = draft;
         let mut first_err = None;
         for s in &slices {
             if let Err(e) = SliceDecoder::decode(&mut pic, s) {
@@ -577,19 +604,19 @@ fn run_job_as<S: Sample>(
             }
         }
         crate::filter::finish(&mut pic);
-        first_err
+        (pic, first_err)
     }));
-    let err = match result {
-        Ok(e) => e,
+    let (pic, err) = match result {
+        Ok((pic, err)) => (Some(pic), err),
         Err(_) => {
             // make sure readers never block on this frame
             frame.publish_gray();
-            Some(Error::Invalid("internal error while decoding a picture".into()))
+            (None, Some(Error::Invalid("internal error while decoding a picture".into())))
         }
     };
     if let Ok(mut s) = shared.stats.lock() {
         s.pictures += 1;
-        let [intra, skip, inter] = block_counts(&pic.blk);
+        let [intra, skip, inter] = pic.as_ref().map_or([0; 3], |pic| block_counts(&pic.blk));
         s.intra_4x4_blocks += intra;
         s.skip_4x4_blocks += skip;
         s.inter_4x4_blocks += inter;
@@ -661,6 +688,18 @@ fn make_picture(o: &Output<FrameRef>) -> Picture {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    /// A chunk may start only so many pictures, however cheap each one is to ask for.
+    fn a_chunk_with_too_many_pictures_is_refused() {
+        let one = crate::synth_tests::missing_reference_picture(0, &[]);
+        let mut decoder = Decoder::new();
+        let ok: Vec<u8> = (0..MAX_PICTURES_PER_CALL).flat_map(|_| one.iter().copied()).collect();
+        assert!(decoder.decode(&ok, 0).is_ok());
+        let mut decoder = Decoder::new();
+        let too_many: Vec<u8> = (0..=MAX_PICTURES_PER_CALL).flat_map(|_| one.iter().copied()).collect();
+        assert!(decoder.decode(&too_many, 0).is_err());
+    }
 
     fn missing_refs(decoder: &mut Decoder, poc: u32, deltas: &[i32]) -> Vec<FrameRef> {
         let stream = crate::synth_tests::missing_reference_picture(poc, deltas);
@@ -850,5 +889,32 @@ mod tests {
         decoder.nal_length_size = Some(4);
         assert!(decoder.decode(&[0, 0, 0, 9, 1, 2], 0).is_err());
         assert_eq!(decoder.out_queue.len(), MAX_QUEUED_AFTER_ERROR);
+    }
+}
+
+#[cfg(test)]
+mod config_tests {
+    use super::Decoder;
+
+    #[test]
+    fn hvcc_skips_prefix_and_suffix_sei_arrays() {
+        let mut config = vec![0; 23];
+        config[0] = 1;
+        config[22] = 2;
+        config.extend_from_slice(&[39, 0, 1, 0, 2, 0x4e, 0x01]);
+        config.extend_from_slice(&[40, 0, 1, 0, 2, 0x50, 0x01]);
+
+        let decoder = Decoder::from_hvcc(&config);
+        assert!(decoder.is_ok());
+    }
+
+    #[test]
+    fn hvcc_array_type_must_match_its_nal_headers() {
+        let mut config = vec![0; 23];
+        config[0] = 1;
+        config[22] = 1;
+        // An array announced as VPS (32) holding a NAL whose header says SPS (33).
+        config.extend_from_slice(&[32, 0, 1, 0, 2, 0x42, 0x01]);
+        assert!(Decoder::from_hvcc(&config).is_err());
     }
 }
