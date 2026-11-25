@@ -381,3 +381,13 @@ fork's `MkvWriter` laces audio frames whatever their timestamps (laced frames af
 back at the block time plus multiples of DefaultDuration, or the block time without one), and
 `Mp4Writer::write_sample` computes `sample_count as u32 + 1` for a sync sample, which overflows past
 2^32 - 1 samples in one track (upstream's `too_many_samples` guard, from another commit).
+
+### Still images (AV116 onwards)
+
+The `list` items on still images (EXR, TIFF YCbCr, CinemaDNG in MXF, DNG, AVIF), ported in one
+lane (own worktree and target, lane gate), behaviour only, into the fork's own crates: no
+craft-libs crate and no new dependency.
+
+| Commit | Port | craft-libs |
+|---|---|---|
+| AV116 | YCbCr TIFF: unusable YCbCrCoefficients / ReferenceBlackWhite fall back to their defaults (they were refused), libtiff's green (greys stay neutral when the weights do not sum to 1), a file too small for its picture refused before the data units are allocated, fallible allocations, overlapping strips refused. JPEG-compressed YCbCr stays the image crate's | `603d43da85` |

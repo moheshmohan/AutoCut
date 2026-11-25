@@ -917,3 +917,13 @@ items: the tests use stand-ins.
 - **AV163**: an AV1 MP4 export lists `av01` among its compatible brands (AV1-ISOBMFF §2.1). The MP4
   muxer takes extra compatible brands; the Matroska muxer's dependent frames name their real
   reference frame.
+
+## Update 2026-11-25 (still images from craft-libs, AV116 onwards)
+
+Still-image improvements from upstream craft-libs, ported into AutoCut's own crates (recorded in
+`plan/upstream-sync-2026-11-24.md`):
+
+- **AV116**: YCbCr TIFFs whose YCbCrCoefficients or ReferenceBlackWhite cannot be used open with
+  the TIFF defaults instead of being refused, and greys stay grey when a file's luma weights do not
+  sum to 1 (libtiff's reading, which other tools show); a small file claiming a huge picture is
+  refused before memory is set aside for it.

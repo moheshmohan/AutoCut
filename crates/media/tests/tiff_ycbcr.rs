@@ -127,6 +127,38 @@ fn partial_data_units_keep_their_own_chroma() {
 }
 
 #[test]
+fn unusable_colour_fields_fall_back_to_the_tiff_defaults() {
+    // A green weight of 0, a single weight, and a ReferenceBlackWhite whose luma black equals its
+    // white were refused; libtiff-based readers use each field's default (BT.601, full range).
+    let red = [76, 85, 255];
+    let cases: [(u16, Vec<u32>); 3] = [(529, vec![1, 2, 0, 1, 1, 2]), (529, vec![1, 2]), (532, vec![16, 1, 16, 1, 128, 1, 240, 1, 128, 1, 240, 1])];
+    for (tag, values) in cases {
+        let file = ycbcr_tiff(1, 1, (1, 1), 1, &red, &[(tag, 5, values.clone())]);
+        let r = decode_raster("frame.tiff", &file).unwrap_or_else(|e| panic!("{tag} {values:?}: {e}"));
+        assert!(near(px(&r, 0, 0), [254, 0, 0, 255]), "{tag} {values:?}: {:?}", px(&r, 0, 0));
+    }
+}
+
+#[test]
+fn weights_that_do_not_sum_to_one_keep_greys_grey() {
+    // YCbCrCoefficients 0.4, 0.4, 0.4: the specification's green equation gave (128, 64, 128) for
+    // this grey; libtiff's form, which libtiff-based tools show, keeps it neutral.
+    let grey = [128, 128, 128];
+    let r = decode_raster("frame.tiff", &ycbcr_tiff(1, 1, (1, 1), 1, &grey, &[(529, 5, vec![2, 5, 2, 5, 2, 5])])).unwrap();
+    assert_eq!(px(&r, 0, 0), [128, 128, 128, 255]);
+}
+
+#[test]
+fn a_small_file_claiming_a_large_picture_is_refused() {
+    // 16384 × 16384 at 4:4:4 needs 768 MiB of data units: a file of a few hundred bytes cannot
+    // hold them, uncompressed or as PackBits.
+    for compression in [1, 32773] {
+        let e = decode_raster("big.tiff", &ycbcr_tiff(16_384, 16_384, (1, 1), compression, &[0, 128, 128, 128], &[])).err();
+        assert!(e.is_some_and(|e| e.to_string().contains("shorter than the image")), "compression {compression}");
+    }
+}
+
+#[test]
 fn damaged_ycbcr_tiffs_fail_without_panicking() {
     let data: Vec<u8> = (0..4 * 4 / 4 * 6).map(|i| (i * 37 % 256) as u8).collect();
     let good = ycbcr_tiff(4, 4, (2, 2), 1, &data, &[]);
