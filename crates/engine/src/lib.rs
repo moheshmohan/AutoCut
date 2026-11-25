@@ -43,6 +43,7 @@ pub mod effectcraft;
 pub mod elements;
 pub mod embed;
 pub mod essential_sound;
+pub mod explainer;
 pub mod export_tools;
 pub mod faces;
 pub mod feedback;

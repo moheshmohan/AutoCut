@@ -1008,7 +1008,7 @@ fn keep(
 
 /// The audio of `n` under the strict check `p` asks for, whether it came from a cache (nothing
 /// was synthesized), and the result's `check`.
-fn synthesize(s: &Session, cmd: &str, p: &Value, n: &Narration) -> Result<(Arc<tts::Audio>, bool, Value)> {
+pub(crate) fn synthesize(s: &Session, cmd: &str, p: &Value, n: &Narration) -> Result<(Arc<tts::Audio>, bool, Value)> {
     let models = crate::transcript::models_dir();
     let check = check_for(s, cmd, p, n)?;
     if let Some((a, report)) = cached(s, n, models.as_deref(), &check) {
@@ -1114,7 +1114,7 @@ fn preview(s: &mut Session, p: &Value) -> Result<Value> {
 
 /// Write `samples` as a new WAV and import it (its own undo step; callers collapse history).
 /// `near`: an edit writes next to the narration's previous file unless `dir` is given.
-fn write_and_import(s: &mut Session, p: &Value, samples: &[f32], rate: u32, near: Option<ItemId>) -> Result<(ItemId, String)> {
+pub(crate) fn write_and_import(s: &mut Session, p: &Value, samples: &[f32], rate: u32, near: Option<ItemId>) -> Result<(ItemId, String)> {
     let beside = near.filter(|_| p.get("dir").is_none()).and_then(|i| match &s.project.items.get(&i)?.kind {
         ItemKind::Media(m) => match &m.media {
             // the stored path as media access resolves it: a path it refuses (a network share, a URL) picks no folder
