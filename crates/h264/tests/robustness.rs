@@ -44,7 +44,7 @@ fn to_avcc(data: &[u8]) -> (Vec<u8>, Vec<Vec<u8>>) {
 
 #[test]
 fn avcc_input_matches_reference() {
-    for name in ["main_cabac_b", "baseline_qcif"] {
+    for name in ["main_cabac_b", "baseline_qcif", "hi10_cavlc_b"] {
         let f = common::fixture(name);
         let Some((h264, yuv)) = common::ensure(f) else { return };
         let (avcc, samples) = to_avcc(&std::fs::read(h264).unwrap());
@@ -56,7 +56,7 @@ fn avcc_input_matches_reference() {
         }
         pics.extend(dec.flush());
         let reference = std::fs::read(yuv).unwrap();
-        common::compare(&pics, &reference, f.width as usize, f.height as usize).unwrap();
+        common::compare_fmt(&pics, &reference, f.width as usize, f.height as usize, common::PixFmt::of(f.pix_fmt())).unwrap();
         // pts are passed through reordering
         let mut pts: Vec<i64> = pics.iter().map(|p| p.pts).collect();
         pts.sort();
@@ -77,7 +77,7 @@ fn xorshift(seed: &mut u64) -> u64 {
 /// Damaged streams must never panic or hang; errors are fine.
 #[test]
 fn corrupted_streams_do_not_panic() {
-    for name in ["main_cabac_b", "baseline_cif_noise", "cavlc_b", "bpyramid"] {
+    for name in ["main_cabac_b", "baseline_cif_noise", "cavlc_b", "bpyramid", "hi10_cabac_b", "hi10_weightp_cavlc"] {
         let f = common::fixture(name);
         let Some((h264, _)) = common::ensure(f) else { return };
         let data = std::fs::read(h264).unwrap();

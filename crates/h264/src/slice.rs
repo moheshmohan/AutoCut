@@ -304,7 +304,8 @@ impl SliceHeader {
         }
         let slice_qp_delta = r.read_se()?;
         let Some(qp) = pps.pic_init_qp.checked_add(slice_qp_delta) else { return crate::error::invalid("slice QP out of range") };
-        ensure!((0..=51).contains(&qp), "slice QP {qp} out of range");
+        // SliceQPY in -QpBdOffsetY..=51 (7.4.3)
+        ensure!((-sps.qp_bd_offset_y()..=51).contains(&qp), "slice QP {qp} out of range");
         let mut sp_for_switch = false;
         let mut slice_qs_delta = 0;
         if matches!(slice_type, SliceType::Sp | SliceType::Si) {

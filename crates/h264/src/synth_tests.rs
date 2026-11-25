@@ -676,3 +676,326 @@ fn a_slice_overlapping_decoded_macroblocks_is_refused() {
         assert!(matches!(&err, Some(crate::Error::Invalid(m)) if m.contains("overlaps")), "{err:?}");
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// High 10 sample formats: I_PCM at every supported bit depth (luma and chroma apart, which
+// libx264 cannot produce), P_Skip copies, cropping, and hostile sequence headers.
+// ---------------------------------------------------------------------------------------------
+
+/// Chroma sampling and bit depths of a synthetic stream.
+#[derive(Clone, Copy, Debug)]
+struct Fmt {
+    c422: bool,
+    bd_y: u32,
+    bd_c: u32,
+}
+
+impl Fmt {
+    /// Chroma lines per macroblock.
+    fn mbh_c(self) -> usize {
+        if self.c422 { 16 } else { 8 }
+    }
+}
+
+/// A High 4:2:2 profile SPS (profile_idc 122) with `chroma_idc` and the bit depths as coded
+/// (bit_depth_*_minus8), `mbs` macroblocks, POC type 2, optional cropping (left, right, top,
+/// bottom in crop units).
+fn sps_fmt(chroma_idc: u32, depth_minus8: (u32, u32), mbs: (u32, u32), crop: Option<(u32, u32, u32, u32)>) -> Vec<u8> {
+    let mut w = BitWriter::new();
+    w.write_bits(122, 8);
+    w.write_bits(0, 8);
+    w.write_bits(40, 8);
+    w.write_ue(0); // sps id
+    w.write_ue(chroma_idc);
+    if chroma_idc == 3 {
+        w.write_bit(false); // separate_colour_plane_flag
+    }
+    w.write_ue(depth_minus8.0);
+    w.write_ue(depth_minus8.1);
+    w.write_bit(false); // qpprime_y_zero_transform_bypass_flag
+    w.write_bit(false); // seq_scaling_matrix_present_flag
+    w.write_ue(0); // log2_max_frame_num - 4
+    w.write_ue(2); // POC type 2
+    w.write_ue(1); // max_num_ref_frames
+    w.write_bit(false);
+    w.write_ue(mbs.0 - 1);
+    w.write_ue(mbs.1 - 1);
+    w.write_bit(true); // frame_mbs_only
+    w.write_bit(true); // direct_8x8_inference
+    match crop {
+        Some((l, r, t, b)) => {
+            w.write_bit(true);
+            for v in [l, r, t, b] {
+                w.write_ue(v);
+            }
+        }
+        None => w.write_bit(false),
+    }
+    w.write_bit(false); // vui
+    w.rbsp_trailing();
+    nal(3, 7, &w.finish())
+}
+
+/// Random I_PCM samples of one macroblock (256 luma, then MbWidthC * MbHeightC Cb and Cr, raster)
+/// within the bit depths.
+fn random_pcm(f: Fmt, seed: &mut u32) -> Vec<u16> {
+    let n_c = 8 * f.mbh_c();
+    (0..256 + 2 * n_c)
+        .map(|i| {
+            *seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+            let bd = if i < 256 { f.bd_y } else { f.bd_c };
+            ((*seed >> 8) % (1 << bd)) as u16
+        })
+        .collect()
+}
+
+/// pcm_sample_luma / pcm_sample_chroma as coded: BitDepth bits each, MSB first (7.3.5).
+fn pack_pcm(f: Fmt, samples: &[u16]) -> Vec<u8> {
+    let mut w = BitWriter::new();
+    for (i, &s) in samples.iter().enumerate() {
+        w.write_bits(s as u32, if i < 256 { f.bd_y } else { f.bd_c });
+    }
+    w.finish()
+}
+
+type Planes16 = (Vec<u16>, Vec<u16>, Vec<u16>);
+
+/// Expected (uncropped) planes of a picture of PCM blocks (`None` = copy from `reference`).
+fn render_fmt(f: Fmt, mbs: &[Option<Vec<u16>>], reference: Option<&Planes16>) -> Planes16 {
+    let (w, h) = (MB_W * 16, MB_H * 16);
+    let (cw, ch, lc) = (w / 2, MB_H * f.mbh_c(), f.mbh_c());
+    let mut out = match reference {
+        Some(r) => r.clone(),
+        None => (vec![0; w * h], vec![0; cw * ch], vec![0; cw * ch]),
+    };
+    for (i, mb) in mbs.iter().enumerate() {
+        let Some(s) = mb else { continue };
+        let (mx, my) = (i % MB_W, i / MB_W);
+        for r in 0..16 {
+            let o = (my * 16 + r) * w + mx * 16;
+            out.0[o..o + 16].copy_from_slice(&s[r * 16..r * 16 + 16]);
+        }
+        for r in 0..lc {
+            let o = (my * lc + r) * cw + mx * 8;
+            out.1[o..o + 8].copy_from_slice(&s[256 + r * 8..256 + r * 8 + 8]);
+            out.2[o..o + 8].copy_from_slice(&s[256 + 8 * lc + r * 8..256 + 8 * lc + r * 8 + 8]);
+        }
+    }
+    out
+}
+
+/// The stream (IDR of PCM, P of PCM and P_Skip, P_Skip, non-reference mixed P) and its expected
+/// pictures, `crop_bottom` luma lines cropped off the bottom.
+fn format_stream(f: Fmt, cabac: bool, crop_bottom: u32) -> (Vec<u8>, Vec<Planes16>) {
+    let mut seed = 1234 + f.bd_y * 7 + f.bd_c * 3 + f.c422 as u32;
+    let pcm =
+        |seed: &mut u32, every: usize| -> Vec<Option<Vec<u16>>> { (0..NMB).map(|i| if i % every == 0 { Some(random_pcm(f, seed)) } else { None }).collect() };
+    let a = pcm(&mut seed, 1);
+    let b = pcm(&mut seed, 3);
+    let skip = vec![None; NMB];
+    let d = pcm(&mut seed, 2);
+    let packed = |m: &[Option<Vec<u16>>]| m.iter().map(|s| s.as_ref().map(|s| pack_pcm(f, s))).collect::<Vec<_>>();
+    let pics = [
+        Pic { idr: true, frame_num: 0, ref_idc: 3, mbs: packed(&a), ..Default::default() },
+        Pic { frame_num: 1, ref_idc: 2, mbs: packed(&b), ..Default::default() },
+        Pic { frame_num: 2, ref_idc: 2, mbs: packed(&skip), ..Default::default() },
+        Pic { frame_num: 3, ref_idc: 0, mbs: packed(&d), ..Default::default() },
+    ];
+    // crop units: 2 lines in 4:2:0, 1 in 4:2:2
+    let crop = (crop_bottom > 0).then_some((0, 0, 0, if f.c422 { crop_bottom } else { crop_bottom / 2 }));
+    let mut stream = sps_fmt(1 + f.c422 as u32, (f.bd_y - 8, f.bd_c - 8), (MB_W as u32, MB_H as u32), crop);
+    stream.extend(pps(cabac, false));
+    for p in &pics {
+        stream.extend(slice_nal(p, cabac));
+    }
+    let pa = render_fmt(f, &a, None);
+    let pb = render_fmt(f, &b, Some(&pa));
+    let pc = pb.clone();
+    let pd = render_fmt(f, &d, Some(&pc));
+    let (w, h) = (MB_W * 16, MB_H * 16 - crop_bottom as usize);
+    let ch = if f.c422 { h } else { h / 2 };
+    let crop_planes = |p: Planes16| -> Planes16 { (p.0[..w * h].to_vec(), p.1[..w / 2 * ch].to_vec(), p.2[..w / 2 * ch].to_vec()) };
+    (stream, [pa, pb, pc, pd].into_iter().map(crop_planes).collect())
+}
+
+fn check_format(f: Fmt, cabac: bool, threads: usize, crop_bottom: u32) {
+    let (stream, expected) = format_stream(f, cabac, crop_bottom);
+    let mut dec = Decoder::with_threads(threads);
+    let mut out = dec.decode(&stream, 0).unwrap_or_else(|e| panic!("{f:?} cabac {cabac}: {e}"));
+    out.extend(dec.flush());
+    assert!(dec.take_error().is_none(), "{f:?}");
+    assert_eq!(out.len(), expected.len(), "{f:?}");
+    let ch = expected[0].1.len() / (MB_W * 8);
+    for (i, (p, e)) in out.iter().zip(&expected).enumerate() {
+        let label = format!("{f:?} cabac {cabac} threads {threads} crop {crop_bottom}: picture {i}");
+        let size = (p.width as usize, p.height as usize, p.chroma_width as usize, p.chroma_height as usize);
+        assert_eq!(size, (MB_W * 16, e.0.len() / (MB_W * 16), MB_W * 8, ch), "{label}");
+        let chroma = if f.c422 { crate::ChromaFormat::C422 } else { crate::ChromaFormat::C420 };
+        assert_eq!((p.chroma, p.bit_depth, p.bit_depth_chroma), (chroma, f.bd_y, f.bd_c), "{label}");
+        assert_eq!(p.y.as_u8().is_some(), f.bd_y == 8 && f.bd_c == 8, "{label}: storage type");
+        for (plane, want, name) in [(&p.y, &e.0, "Y"), (&p.u, &e.1, "U"), (&p.v, &e.2, "V")] {
+            let got: Vec<u16> = (0..plane.len()).map(|k| plane.get(k)).collect();
+            assert!(&got == want, "{label}: plane {name} differs");
+        }
+    }
+}
+
+/// I_PCM pictures and P_Skip copies decode exactly at every supported combination of luma /
+/// chroma bit depth (8, 9, 10, mixed), CAVLC and CABAC (whose engine restarts after the PCM
+/// bytes), single- and multi-threaded, and cropped. Before, every one but 8/8 was refused as
+/// unsupported (only 8-bit).
+#[test]
+#[allow(clippy::single_element_loop)] // 4:2:2 follows
+fn pcm_pictures_at_every_depth_and_chroma_format() {
+    for c422 in [false] {
+        for (bd_y, bd_c) in [(8, 8), (10, 10), (9, 9), (8, 10), (10, 8), (9, 10)] {
+            let f = Fmt { c422, bd_y, bd_c };
+            for cabac in [false, true] {
+                for threads in [1, 4] {
+                    check_format(f, cabac, threads, 0);
+                }
+                check_format(f, cabac, 1, if c422 { 1 } else { 2 });
+            }
+        }
+    }
+}
+
+/// The synthetic 10-bit PCM stream matches ffmpeg's decode too.
+#[test]
+#[allow(clippy::single_element_loop)] // 4:2:2 follows
+fn pcm_formats_match_ffmpeg() {
+    let Some(ff) = filmcraft_testkit::ffmpeg_or_skip("pcm formats") else { return };
+    for (c422, bd) in [(false, 10)] {
+        let f = Fmt { c422, bd_y: bd, bd_c: bd };
+        let (stream, expected) = format_stream(f, true, if c422 { 1 } else { 0 });
+        let pix = format!("yuv{}p{}", if c422 { "422" } else { "420" }, if bd == 8 { String::new() } else { format!("{bd}le") });
+        let dir = filmcraft_testkit::fixtures_dir("h264");
+        let src = filmcraft_testkit::temp_path(&dir.join(format!("synth_pcm_{pix}.h264")));
+        let dst = filmcraft_testkit::temp_path(&dir.join(format!("synth_pcm_{pix}.yuv")));
+        std::fs::write(&src, &stream).unwrap();
+        let ok = std::process::Command::new(&ff)
+            .args(["-hide_banner", "-loglevel", "error", "-y", "-i"])
+            .arg(&src)
+            .args(["-fps_mode", "passthrough", "-f", "rawvideo", "-pix_fmt", &pix])
+            .arg(&dst)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        assert!(ok, "ffmpeg failed to decode the {pix} stream");
+        let got = std::fs::read(&dst).unwrap();
+        let _ = std::fs::remove_file(&src);
+        let _ = std::fs::remove_file(&dst);
+        let bytes = |s: u16| if bd == 8 { vec![s as u8] } else { s.to_le_bytes().to_vec() };
+        let want: Vec<u8> = expected.iter().flat_map(|(y, u, v)| y.iter().chain(u).chain(v).flat_map(|&s| bytes(s)).collect::<Vec<u8>>()).collect();
+        assert!(got == want, "ffmpeg's {pix} decode differs from the expected output ({} vs {} bytes)", got.len(), want.len());
+    }
+}
+
+/// Sequence headers of every chroma format and bit depth a stream can code, at odd and huge
+/// sizes, with crops up to the picture: no panic in the parser or a decoding job; what this
+/// decoder does not implement (4:2:2, 4:4:4, monochrome, more than 10 bits) is `Unsupported`,
+/// the rest decode or fail with an ordinary error.
+#[test]
+fn hostile_high_sequence_headers_never_panic() {
+    let slice = slice_nal(&Pic { idr: true, frame_num: 0, ref_idc: 3, mbs: vec![Some(vec![0x5a; 640]); NMB], ..Default::default() }, false);
+    let slice_cabac = slice_nal(&Pic { idr: true, frame_num: 0, ref_idc: 3, mbs: vec![Some(vec![0xa5; 640]); NMB], ..Default::default() }, true);
+    for chroma in 0..=3 {
+        for depths in [(0, 0), (2, 2), (0, 2), (2, 0), (1, 2), (3, 2), (2, 6), (6, 6), (7, 0)] {
+            for (mbs, crop) in [
+                ((MB_W as u32, MB_H as u32), None),
+                ((MB_W as u32, MB_H as u32), Some((0, 1, 0, 1))),
+                ((MB_W as u32, MB_H as u32), Some((7, 0, 0, 23))),
+                ((1, 1), None),
+                ((3, 1), Some((1, 0, 3, 0))),
+                ((1024, 1024), None),
+                ((256, 192), None),
+                ((256, 196), None),
+            ] {
+                for (cabac, data) in [(false, &slice), (true, &slice_cabac)] {
+                    let mut stream = sps_fmt(chroma, depths, mbs, crop);
+                    stream.extend(pps(cabac, false));
+                    stream.extend_from_slice(data);
+                    for threads in [1, 3] {
+                        let mut dec = Decoder::with_threads(threads);
+                        let first = dec.decode(&stream, 0).err();
+                        let _ = dec.flush();
+                        let err = first.or_else(|| dec.take_error());
+                        let label = format!("chroma {chroma} depths {depths:?} mbs {mbs:?} crop {crop:?} cabac {cabac} threads {threads}");
+                        assert!(!matches!(&err, Some(crate::Error::Invalid(m)) if m.contains("internal error")), "{label}: a decoding job panicked");
+                        // an SPS the parser refuses (depth 15, crop past the picture) never gets this far
+                        if crate::params::Sps::parse(&filmcraft_bitstream::unescape_rbsp(&sps_fmt(chroma, depths, mbs, crop)[5..])).is_err() {
+                            continue;
+                        }
+                        let unsupported_format = chroma != 1 || depths.0 > 2 || depths.1 > 2;
+                        if unsupported_format {
+                            assert!(matches!(&err, Some(crate::Error::Unsupported(_))), "{label}: {err:?}");
+                        } else if mbs == (256, 196) && chroma == 2 && depths != (0, 0) {
+                            // over the picture byte budget: 4096 x 3136 4:2:2 at 16 bits per sample
+                            assert!(matches!(&err, Some(crate::Error::Unsupported(m)) if m.contains("memory limit")), "{label}: {err:?}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The picture-size limit counts the bytes of every plane and per sample: the largest 8-bit 4:2:0
+/// picture's memory (2^25 luma samples) is the budget, so 10-bit 4:2:0 fits up to 2^24 luma
+/// samples; one macroblock row more is refused.
+#[test]
+fn the_picture_budget_counts_bytes_per_sample_and_every_plane() {
+    let parse = |chroma: u32, depth: u32, mbs: (u32, u32)| {
+        let s = sps_fmt(chroma, (depth, depth), mbs, None);
+        crate::params::Sps::parse(&filmcraft_bitstream::unescape_rbsp(&s[5..])).unwrap().check_supported()
+    };
+    let limit = |r: crate::Result<()>| matches!(r, Err(crate::Error::Unsupported(m)) if m.contains("memory limit"));
+    // 8-bit 4:2:0: 2^25 luma samples (8192 x 4096)
+    assert!(parse(1, 0, (512, 256)).is_ok());
+    assert!(limit(parse(1, 0, (512, 257))));
+    // 10-bit 4:2:0: 2^24 (4096 x 4096)
+    assert!(parse(1, 2, (256, 256)).is_ok());
+    assert!(limit(parse(1, 2, (256, 257))));
+    // 8-bit luma with 10-bit chroma is stored in 16 bits too
+    let s = sps_fmt(1, (0, 2), (256, 257), None);
+    assert!(limit(crate::params::Sps::parse(&filmcraft_bitstream::unescape_rbsp(&s[5..])).unwrap().check_supported()));
+}
+
+/// A sequence that switches sample format mid-stream (8-bit, then 10-bit on a non-IDR picture,
+/// then a 10-bit IDR) flushes its references: the inter picture after the switch has none (an
+/// error, not a read of the old 8-bit frames as 16-bit; the picture it started is output
+/// undecoded, in the new format), the IDR decodes.
+#[test]
+fn a_format_switch_mid_stream_drops_the_old_references() {
+    let f8 = Fmt { c422: false, bd_y: 8, bd_c: 8 };
+    let f10 = Fmt { c422: false, bd_y: 10, bd_c: 10 };
+    let mut seed = 3u32;
+    let idr = |f: Fmt, seed: &mut u32| Pic {
+        idr: true,
+        frame_num: 0,
+        ref_idc: 3,
+        mbs: (0..NMB).map(|_| Some(pack_pcm(f, &random_pcm(f, seed)))).collect(),
+        ..Default::default()
+    };
+    let mut stream = sps_fmt(1, (0, 0), (MB_W as u32, MB_H as u32), None);
+    stream.extend(pps(true, false));
+    stream.extend(slice_nal(&idr(f8, &mut seed), true));
+    let mut switch = sps_fmt(1, (2, 2), (MB_W as u32, MB_H as u32), None);
+    switch.extend(pps(true, false));
+    switch.extend(slice_nal(&Pic { frame_num: 1, ref_idc: 2, mbs: vec![None; NMB], ..Default::default() }, true));
+    let idr10 = slice_nal(&idr(f10, &mut seed), true);
+    for threads in [1, 3] {
+        let mut dec = Decoder::with_threads(threads);
+        let mut out = dec.decode(&stream, 0).unwrap();
+        let switched = dec.decode(&switch, 1);
+        assert!(matches!(&switched, Err(crate::Error::Invalid(m)) if m.contains("no reference")), "{switched:?}");
+        out.extend(dec.decode(&idr10, 2).unwrap());
+        out.extend(dec.flush());
+        assert!(dec.take_error().is_none());
+        assert_eq!(out.len(), 3);
+        assert!(out[0].y.as_u8().is_some() && out[0].chroma == crate::ChromaFormat::C420);
+        for p in &out[1..] {
+            assert!(p.y.as_u16().is_some() && p.chroma == crate::ChromaFormat::C420 && p.bit_depth == 10);
+        }
+    }
+}

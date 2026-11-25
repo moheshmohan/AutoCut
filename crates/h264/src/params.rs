@@ -1,12 +1,16 @@
 //! Sequence and picture parameter sets (7.3.2.1, 7.3.2.2) including VUI and scaling lists.
 
+use crate::ChromaFormat;
 use crate::error::{Result, ensure, unsupported};
+use crate::picture::Format;
 use crate::tables::*;
 use filmcraft_bitstream::BitReader;
 
-/// Maximum supported reconstructed luma area. 8K UHD fits comfortably while
-/// hostile SPS dimensions cannot allocate full pictures and decoder work state.
-const MAX_LUMA_SAMPLES: u64 = 1 << 25;
+/// Maximum supported reconstructed picture size in bytes, every plane counted: the bytes of an
+/// 8-bit 4:2:0 picture of 2^25 luma samples (8K UHD fits comfortably), so hostile SPS dimensions
+/// cannot allocate full pictures and decoder work state. Deeper pictures get the same memory:
+/// 10-bit 4:2:0 up to 2^24 luma samples (5.7K; 8K is refused).
+pub const MAX_PICTURE_BYTES: u64 = (1 << 25) * 3 / 2;
 
 /// Scaling matrices after applying fall-back rules, stored in raster order (weightScale).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -526,18 +530,38 @@ impl Sps {
         self.max_dpb_frames()
     }
 
-    pub fn check_supported(&self) -> Result<()> {
-        if u64::from(self.width()).saturating_mul(u64::from(self.height())) > MAX_LUMA_SAMPLES {
-            return unsupported("picture dimensions exceed the decoder memory limit");
+    /// The sample format of the pictures, when this decoder handles it: 4:2:0 at 8 to 10 bits
+    /// (luma and chroma depths may differ).
+    pub fn format(&self) -> Result<Format> {
+        let chroma = match (self.chroma_format_idc, self.separate_colour_plane) {
+            (1, _) => ChromaFormat::C420,
+            (2, _) => return unsupported("chroma_format_idc 2 (4:2:2; 4:2:0 is implemented)"),
+            (0, _) => return unsupported("monochrome (chroma_format_idc 0)"),
+            (_, true) => return unsupported("4:4:4 with separate colour planes"),
+            _ => return unsupported(format!("chroma_format_idc {} (4:4:4; 4:2:0 is implemented)", self.chroma_format_idc)),
+        };
+        if !(8..=10).contains(&self.bit_depth_luma) || !(8..=10).contains(&self.bit_depth_chroma) {
+            return unsupported(format!("bit depth luma {} chroma {} (8 to 10 bits are implemented)", self.bit_depth_luma, self.bit_depth_chroma));
         }
+        Ok(Format { chroma, bit_depth_y: self.bit_depth_luma, bit_depth_c: self.bit_depth_chroma })
+    }
+
+    /// QpBdOffsetY = 6 * bit_depth_luma_minus8.
+    pub fn qp_bd_offset_y(&self) -> i32 {
+        6 * self.bit_depth_luma.saturating_sub(8).min(8) as i32
+    }
+    /// QpBdOffsetC = 6 * bit_depth_chroma_minus8.
+    pub fn qp_bd_offset_c(&self) -> i32 {
+        6 * self.bit_depth_chroma.saturating_sub(8).min(8) as i32
+    }
+
+    pub fn check_supported(&self) -> Result<()> {
         if !self.frame_mbs_only {
             return unsupported("interlaced (field / MBAFF) coding");
         }
-        if self.chroma_array_type() != 1 {
-            return unsupported(format!("chroma_format_idc {} (only 4:2:0 is implemented)", self.chroma_format_idc));
-        }
-        if self.bit_depth_luma != 8 || self.bit_depth_chroma != 8 {
-            return unsupported(format!("bit depth luma {} chroma {} (only 8-bit is implemented)", self.bit_depth_luma, self.bit_depth_chroma));
+        let fmt = self.format()?;
+        if fmt.picture_bytes(u64::from(self.width()).saturating_mul(u64::from(self.height()))) > MAX_PICTURE_BYTES {
+            return unsupported("picture dimensions exceed the decoder memory limit");
         }
         if self.qpprime_y_zero_transform_bypass {
             return unsupported("qpprime_y_zero_transform_bypass (lossless)");

@@ -339,3 +339,56 @@ fn hevc_422_in_mp4_and_mov_decodes_with_our_decoder() {
         }
     }
 }
+
+/// H.264 High 10 camera footage (what mirrorless cameras record in their 10-bit modes; B-frames,
+/// weighted prediction) in MP4, at a size that is not a multiple of 16, opens and decodes with
+/// our own decoder: as many frames as ffmpeg decodes, the first and last ones (asked for on a fresh
+/// source, the last one first) sample-exact in every plane, as 10-bit frames. No hardware
+/// decoder is registered in these tests (`filmcraft_platform` registers them in the app), and the
+/// track's decoder is checked to be ours. Before, the decoder refused it as unsupported
+/// ("H.264: bit depth luma 10 chroma 10 (only 8-bit is implemented)").
+#[test]
+#[allow(clippy::single_element_loop)] // 4:2:2 follows
+fn h264_camera_footage_decodes_with_our_decoder() {
+    let ff = filmcraft_testkit::require_ffmpeg!();
+    let cases = [("h264_high10.mp4", "yuv420p10le", "high10", "bframes=3:keyint=12:weightp=2", (322usize, 180usize))];
+    for (name, pix, profile, params, (w, h)) in cases {
+        // (the format first: testsrc2 drops an odd last line in its own 4:2:0 output)
+        let input = format!("testsrc2=size={w}x{h}:rate=30:duration=1,format={pix},noise=alls=10:allf=t");
+        let x264 = format!("log-level=error:{params}");
+        let args = ["-f", "lavfi", "-i", &input, "-c:v", "libx264", "-profile:v", profile, "-x264-params", &x264, "-pix_fmt", pix];
+        let Some(path) = fixture(&ff, name, &args) else {
+            eprintln!("SKIPPED ({name}): ffmpeg without libx264");
+            continue;
+        };
+        // our decoder, not a hardware one
+        let file = filmcraft_isobmff::open(std::fs::read(&path).unwrap()).unwrap();
+        let track = file.track_of_kind(filmcraft_isobmff::TrackKind::Video).unwrap();
+        let entry = &file.tracks[track].entries[0];
+        assert_eq!(filmcraft_codecs::make_video_decoder(entry).unwrap().name(), "FilmCraft H.264", "{name}");
+        let open = || filmcraft_codecs::open_bytes(name, bytes(&path)).unwrap();
+        let v = open().info().video.clone().unwrap();
+        assert_eq!((v.width as usize, v.height as usize), (w, h), "{name}: reported size");
+        let raw = ffmpeg_frames(&ff, &path, pix);
+        let (c422, bps) = (pix.starts_with("yuv422"), if pix.ends_with("le") { 2 } else { 1 });
+        let (cw, ch) = (w.div_ceil(2), if c422 { h } else { h.div_ceil(2) });
+        let frame_bytes = (w * h + 2 * cw * ch) * bps;
+        assert_eq!(raw.len() % frame_bytes, 0, "{name}: ffmpeg's frames are {w}x{h} {pix}");
+        let n = raw.len() / frame_bytes;
+        assert_eq!(n, 30, "{name}: ffmpeg's frame count");
+        assert_eq!(open().info().duration, v.frame_rate.tick_of(n as i64), "{name}: as many frames as ffmpeg decodes");
+        let chroma = if c422 { filmcraft_frame::Chroma::C422 } else { filmcraft_frame::Chroma::C420 };
+        for i in [n - 1, 0] {
+            let f =
+                open().video_frame(filmcraft_media::FrameRequest::full(v.frame_rate.tick_of(i as i64))).unwrap_or_else(|e| panic!("{name}: frame {i}: {e}"));
+            assert_eq!((f.width as usize, f.height as usize), (w, h), "{name}: frame {i} size");
+            match &f.data {
+                filmcraft_frame::PixelData::Yuv8 { chroma: c, .. } => assert_eq!((*c, bps), (chroma, 1), "{name}"),
+                filmcraft_frame::PixelData::Yuv16 { chroma: c, bits, .. } => assert_eq!((*c, *bits, bps), (chroma, 10, 2), "{name}"),
+                _ => panic!("{name}: frame {i} is not planar YUV"),
+            }
+            let want = raw_planes(&raw[i * frame_bytes..(i + 1) * frame_bytes], w, h, cw, ch, bps);
+            assert!(planes(&f) == want, "{name}: frame {i} differs from ffmpeg's (max difference {})", max_diff(&planes(&f), &want));
+        }
+    }
+}

@@ -56,6 +56,33 @@ fixture_tests!(
     vt_high_1080p,
 );
 
+// High 10 and High 10 Intra, compared per plane with ffmpeg's yuv420p10le decode
+// (`common::HIGH_FIXTURES`).
+fixture_tests!(
+    hi10_intra_cavlc,
+    hi10_intra,
+    hi10_intra_no8x8dct,
+    hi10_cabac_b,
+    hi10_cavlc_b,
+    hi10_pyramid_open_gop,
+    hi10_direct_temporal,
+    hi10_no_deblock,
+    hi10_deblock_m3_3,
+    hi10_no8x8dct,
+    hi10_cqm,
+    hi10_cqm_cavlc,
+    hi10_slices4,
+    hi10_constrained_intra,
+    hi10_qp1,
+    hi10_qp1_cavlc,
+    hi10_qp62,
+    hi10_chroma_offset,
+    hi10_weightp,
+    hi10_weightp_cavlc,
+    hi10_crop_202x118,
+    hi10_720p,
+);
+
 /// Draft mode (reduced-resolution playback) skips deblocking of non-reference pictures only:
 /// every other picture stays bit-exact with ffmpeg, single- and frame-threaded, the skipped ones
 /// are flagged, and they are the only ones that differ.
@@ -78,7 +105,7 @@ fn draft_mode_changes_only_flagged_non_reference_pictures() {
             let (mut draft, mut changed) = (0, 0);
             for (i, p) in pics.iter().enumerate() {
                 let r = &reference[i * fsize..(i + 1) * fsize];
-                let same = p.y == r[..w * h] && [&p.u[..], &p.v[..]].concat() == r[w * h..];
+                let same = p.y == r[..w * h] && [p.u.to_le_bytes(), p.v.to_le_bytes()].concat() == r[w * h..];
                 if p.draft {
                     draft += 1;
                     changed += !same as usize;
@@ -102,7 +129,7 @@ fn draft_mode_changes_only_flagged_non_reference_pictures() {
 #[test]
 #[ignore]
 fn coverage_report() {
-    for f in common::FIXTURES {
+    for f in common::FIXTURES.iter().chain(common::HIGH_FIXTURES) {
         let Some((h264, _)) = common::ensure(f) else { return };
         let data = std::fs::read(h264).unwrap();
         let mut dec = filmcraft_h264::Decoder::new();
@@ -143,7 +170,7 @@ fn coverage_report() {
 #[ignore]
 fn generate_fixtures() {
     let dir = common::fixtures_dir();
-    for f in common::FIXTURES {
+    for f in common::FIXTURES.iter().chain(common::HIGH_FIXTURES) {
         let outs = [dir.join(format!("{}.h264", f.name)), dir.join(format!("{}.yuv", f.name))];
         filmcraft_testkit::fixtures::generate_and_report(&format!("h264/{}", f.name), &outs, || common::ensure(f));
     }
