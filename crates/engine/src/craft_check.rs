@@ -9,6 +9,8 @@
 //! | `emptyFirstFrame` | the first frame has no picture, starts at opacity 0, or renders black or one flat colour | as `qa.motionEnergy`: mean grey < 0.04, spread < 0.01 |
 //! | `staticTimeline` | more than 3 s with nothing changing on the timeline, outside the declared holds | 3 s |
 //! | `silence` | more than 15 s with no clip on an audible audio track | 15 s |
+//! | `longStill` | with `explainer: true` (PX7.5), instead of `staticTimeline`: the picture (the video tracks alone; captions changing do not count) stands still for more than 3 s, outside the declared holds | 3 s |
+//! | `smallHero` | with `explainer: true`: the tallest element on screen that is not a backdrop is under a quarter of the frame's height, unless a picture fills half the frame | 25 % |
 //!
 //! **What "behind the text" is.** For contrast the sequence is rendered at a few times across each
 //! text's life (3 to 8, about one every 2 s) with every title's text layers turned off and no
@@ -60,6 +62,13 @@ pub const STROKE_SHARE: f64 = 0.05;
 /// Longest stretch with nothing changing, and with no sound, seconds.
 pub const STATIC_SECONDS: f64 = 3.0;
 pub const SILENCE_SECONDS: f64 = 15.0;
+/// The explainer's rules (PX7.5, `explainer: true`): the longest still picture, seconds; the
+/// hero's least share of the frame's height; a shape this share of the frame both ways is a
+/// backdrop; a picture covering this share of the frame is the hero.
+pub const STILL_SECONDS: f64 = 3.0;
+pub const HERO_SHARE: f64 = 0.25;
+const BACKDROP_SHARE: f64 = 0.9;
+const PICTURE_SHARE: f64 = 0.5;
 /// Most frames rendered for contrast, and their long side.
 const MAX_RENDERS: usize = 400;
 const BACKDROP_SIDE: f64 = 480.0;
@@ -79,7 +88,7 @@ pub fn commands() -> Vec<CommandSpec> {
         label: "Check Craft",
         menu: &[],
         shortcut: None,
-        params: r#"{"sequence":id? (default the active one),"holds":[{"start":ticks,"end":ticks,"reason":str}]? (intended static stretches)}"#,
+        params: r#"{"sequence":id? (default the active one),"holds":[{"start":ticks,"end":ticks,"reason":str}]? (intended static stretches),"explainer":bool=false (an explainer's rules: no still picture over 3 s, captions or not, and the hero at least a quarter of the frame's height)}"#,
         enabled: has_seq,
         run,
         journal: false,
@@ -396,8 +405,9 @@ fn moving_picture(project: &Project, it: &TrackItem) -> bool {
     }
 }
 
-/// What the timeline shows at `t` (sample number `n`).
-fn shown(project: &Project, q: &Sequence, t: Tick, n: usize) -> Vec<Shown> {
+/// What the timeline shows at `t` (sample number `n`); the picture alone, without the captions,
+/// when `captions` is off (the explainer's still check).
+fn shown(project: &Project, q: &Sequence, t: Tick, n: usize, captions: bool) -> Vec<Shown> {
     let mut v = Vec::new();
     for (ti, track) in q.video_tracks.iter().enumerate().filter(|(_, t)| t.enabled) {
         for tr in track.transitions.iter().filter(|tr| tr.start <= t && t < tr.end()) {
@@ -428,7 +438,7 @@ fn shown(project: &Project, q: &Sequence, t: Tick, n: usize) -> Vec<Shown> {
             }
         }
     }
-    for (ci, track) in q.caption_tracks.iter().enumerate().filter(|(_, t)| t.enabled) {
+    for (ci, track) in q.caption_tracks.iter().enumerate().filter(|(_, t)| t.enabled && captions) {
         if let Some(c) = track.caption_at(t) {
             v.push(Shown::Caption(ci, c.id.0));
             if track.style.animated.is_some() {
@@ -461,29 +471,34 @@ fn sample_times(q: &Sequence, end: Tick) -> Vec<i64> {
 }
 
 /// Stretches longer than [`STATIC_SECONDS`] with nothing changing, outside `holds`; and how many
-/// samples were read.
-fn static_stretches(project: &Project, q: &Sequence, end: Tick, holds: &[(i64, i64)]) -> (Vec<Value>, usize) {
+/// samples were read. `pictures`: the explainer's `longStill`, the picture alone (captions
+/// changing over a still picture do not count).
+fn static_stretches(project: &Project, q: &Sequence, end: Tick, holds: &[(i64, i64)], pictures: bool) -> (Vec<Value>, usize) {
     let times = sample_times(q, end);
     let mut findings = Vec::new();
-    let longest = Tick::from_seconds_f64(STATIC_SECONDS).0;
+    let longest = Tick::from_seconds_f64(if pictures { STILL_SECONDS } else { STATIC_SECONDS }).0;
     let mut run_start = 0i64;
     let mut prev: Option<Vec<Shown>> = None;
     let close = |from: i64, to: i64, findings: &mut Vec<Value>| {
         for (a, b) in uncovered(from, to, holds) {
             if b.saturating_sub(a) > longest {
                 let secs = Tick(b - a).seconds();
-                findings.push(finding(
-                    "staticTimeline",
-                    Tick(a),
-                    Some(Tick(b)),
-                    format!("nothing changes on the timeline for {secs:.1} s; declare a hold if it is meant"),
-                    json!({"length": r3(secs)}),
-                ));
+                let (code, message) = if pictures {
+                    (
+                        "longStill",
+                        format!(
+                            "the picture stands still for {secs:.1} s (an explainer keeps it under {STILL_SECONDS} s): bring in the next element, move it slowly, or cut; declare a hold if it is meant"
+                        ),
+                    )
+                } else {
+                    ("staticTimeline", format!("nothing changes on the timeline for {secs:.1} s; declare a hold if it is meant"))
+                };
+                findings.push(finding(code, Tick(a), Some(Tick(b)), message, json!({"length": r3(secs)})));
             }
         }
     };
     for (n, &t) in times.iter().enumerate() {
-        let now = shown(project, q, Tick(t), n);
+        let now = shown(project, q, Tick(t), n, !pictures);
         if prev.as_ref().is_some_and(|p| *p != now) {
             close(run_start, t, &mut findings);
             run_start = t;
@@ -523,6 +538,169 @@ fn silences(q: &Sequence, end: Tick) -> Vec<Value> {
         gap(heard_to, end.0);
     }
     findings
+}
+
+/// What is the hero of the picture at one time (the explainer's `smallHero`).
+#[derive(Clone, Debug, PartialEq)]
+enum Hero {
+    /// A picture (footage, a photo) fills half the frame or more: it is the hero.
+    Picture,
+    /// Something whose content the timeline cannot see (a nested sequence, a picture with alpha).
+    Unknown,
+    /// Nothing but backdrops.
+    Nothing,
+    /// The tallest element on screen: its clip, track, what it is and its height in pixels.
+    Element { clip: u64, track: String, what: String, height: f64 },
+}
+
+/// The screen rectangle of the box `b` (`[x0, y0, x1, y1]` in the clip's source pixels) of clip
+/// `it` at media time `mt`.
+fn on_screen(q: &Sequence, it: &TrackItem, src: (u32, u32), mt: Tick, b: [f64; 4]) -> Option<[f64; 4]> {
+    if !b.iter().all(|v| v.is_finite()) || b[2] <= b[0] || b[3] <= b[1] {
+        return None;
+    }
+    let m = filmcraft_render::motion_matrix(q, it, src, None, mt);
+    let corners = [(b[0], b[1]), (b[2], b[1]), (b[0], b[3]), (b[2], b[3])].map(|(x, y)| m.apply(Vec2::new(x, y)));
+    let r = [
+        corners.iter().map(|p| p.x).fold(f64::INFINITY, f64::min),
+        corners.iter().map(|p| p.y).fold(f64::INFINITY, f64::min),
+        corners.iter().map(|p| p.x).fold(f64::NEG_INFINITY, f64::max),
+        corners.iter().map(|p| p.y).fold(f64::NEG_INFINITY, f64::max),
+    ];
+    r.iter().all(|v| v.is_finite()).then_some(r)
+}
+
+/// The hero of the picture at `t`: the tallest element on the visible video tracks that is not a
+/// backdrop (a plain colour, or a shape covering nine tenths of the frame both ways).
+fn hero_at(project: &Project, q: &Sequence, t: Tick) -> Hero {
+    use filmcraft_media::Generator;
+    let (w, h) = (f64::from(q.settings.width.max(1)), f64::from(q.settings.height.max(1)));
+    let backdrop = |r: [f64; 4]| (r[2] - r[0]) >= BACKDROP_SHARE * w && (r[3] - r[1]) >= BACKDROP_SHARE * h;
+    let visible = |r: [f64; 4]| ((r[2].min(w) - r[0].max(0.0)).max(0.0), (r[3].min(h) - r[1].max(0.0)).max(0.0));
+    let mut best: Option<(f64, u64, usize, String)> = None;
+    let mut unknown = false;
+    for (ti, track) in q.video_tracks.iter().enumerate().filter(|(_, t)| t.enabled) {
+        let Some(it) = track.item_at(t).filter(|i| i.enabled) else { continue };
+        let mt = it.effect_time_at(t);
+        if opacity(it, mt) <= 0.01 {
+            continue;
+        }
+        let Some(src) = project.source_size(it.item) else { continue };
+        let mut consider = |height: f64, what: String| {
+            if best.as_ref().is_none_or(|b| height > b.0) {
+                best = Some((height, it.id.0, ti, what));
+            }
+        };
+        match project.item(it.item).map(|p| &p.kind) {
+            Some(ItemKind::Graphic { .. }) => {
+                for (_, spec) in item_layer_specs(it, mt, src) {
+                    if !spec.enabled || spec.transform.opacity <= 0.01 {
+                        continue;
+                    }
+                    let Some(r) = on_screen(q, it, src, mt, layer_bounds(&spec)) else { continue };
+                    if backdrop(r) {
+                        continue;
+                    }
+                    let what = match &spec.content {
+                        LayerContent::Text(tp) => {
+                            format!("the text \"{}\"", tp.text.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(60).collect::<String>())
+                        }
+                        LayerContent::Shape(_) => "a shape".to_string(),
+                    };
+                    consider(visible(r).1, what);
+                }
+            }
+            Some(ItemKind::Sequence(_)) => unknown = true,
+            Some(ItemKind::AdjustmentLayer { .. }) | None => {}
+            Some(_) => {
+                let Some((_, m, _)) = project.resolve_media(it.item) else { continue };
+                if matches!(m.media, MediaRef::Generator(Generator::ColorMatte { .. } | Generator::BlackVideo | Generator::TransparentVideo)) {
+                    continue;
+                }
+                let Some(v) = m.info.video.as_ref() else { continue };
+                if v.has_alpha {
+                    unknown = true;
+                    continue;
+                }
+                let Some(r) = on_screen(q, it, src, mt, [0.0, 0.0, f64::from(src.0), f64::from(src.1)]) else { continue };
+                let (vw, vh) = visible(r);
+                if vw * vh >= PICTURE_SHARE * w * h {
+                    return Hero::Picture;
+                }
+                consider(vh, format!("the picture of clip {}", it.id.0));
+            }
+        }
+    }
+    if unknown {
+        return Hero::Unknown;
+    }
+    match best {
+        Some((height, clip, ti, what)) => Hero::Element { clip, track: format!("V{}", ti + 1), what, height },
+        None => Hero::Nothing,
+    }
+}
+
+/// The explainer's hero check: at the middle of every stretch between the picture tracks' edit
+/// points, the tallest element is at least [`HERO_SHARE`] of the frame's height (unless a picture
+/// fills half the frame); and what was looked at.
+fn small_heroes(project: &Project, q: &Sequence, end: Tick) -> (Vec<Value>, Value) {
+    let h = f64::from(q.settings.height.max(1));
+    let mut points: Vec<i64> = q
+        .video_tracks
+        .iter()
+        .filter(|t| t.enabled)
+        .flat_map(|t| t.items.iter().filter(|i| i.enabled).flat_map(|c| [c.start.0, c.end().0]))
+        .filter(|t| *t > 0 && *t < end.0)
+        .take(MAX_EDIT_POINTS)
+        .collect();
+    points.push(0);
+    points.push(end.0);
+    points.sort_unstable();
+    points.dedup();
+    // (start, end, clip, track, what, height) of the stretches with a small hero, neighbours merged
+    let mut small: Vec<(i64, i64, u64, String, String, f64)> = Vec::new();
+    let (mut measured, mut pictures, mut unknown, mut nothing) = (0usize, 0usize, 0usize, 0usize);
+    for pair in points.windows(2) {
+        let [a, b] = pair else { continue };
+        if b <= a {
+            continue;
+        }
+        match hero_at(project, q, Tick(a.saturating_add((b - a) / 2))) {
+            Hero::Picture => pictures += 1,
+            Hero::Unknown => unknown += 1,
+            Hero::Nothing => nothing += 1,
+            Hero::Element { clip, track, what, height } => {
+                measured += 1;
+                if height >= HERO_SHARE * h {
+                    continue;
+                }
+                match small.last_mut() {
+                    Some(last) if last.2 == clip && last.1 == *a => {
+                        last.1 = *b;
+                        last.5 = last.5.max(height);
+                    }
+                    _ => small.push((*a, *b, clip, track, what, height)),
+                }
+            }
+        }
+    }
+    let findings = small
+        .into_iter()
+        .map(|(a, b, clip, track, what, height)| {
+            finding(
+                "smallHero",
+                Tick(a),
+                Some(Tick(b)),
+                format!(
+                    "the biggest thing on screen, {what}, is {:.0} % of the frame's height; an explainer's hero takes at least {:.0} %: make it bigger, or give the shot one main element",
+                    100.0 * height / h,
+                    100.0 * HERO_SHARE
+                ),
+                json!({"clip": clip, "track": track, "height": r3(height), "share": r3(height / h), "minimum": r3(HERO_SHARE * h)}),
+            )
+        })
+        .collect();
+    (findings, json!({"measured": measured, "pictures": pictures, "unknown": unknown, "backdropsOnly": nothing}))
 }
 
 /// Renders sequence `seq` of `project` on the GPU frame renderer where the host has one, else
@@ -591,6 +769,10 @@ fn run(s: &mut Session, p: &Value) -> Result<Value> {
         return Err(bad(CMD, "the sequence is empty"));
     }
     let holds = holds_p(CMD, p, "holds", end)?;
+    let explainer = match p.get("explainer") {
+        None | Some(Value::Null) => false,
+        Some(v) => v.as_bool().ok_or_else(|| bad(CMD, "`explainer` is true or false"))?,
+    };
     let (w, h) = (q.settings.width.max(1), q.settings.height.max(1));
     let short = f64::from(w.min(h));
     let mut findings = Vec::new();
@@ -756,10 +938,20 @@ fn run(s: &mut Session, p: &Value) -> Result<Value> {
     if let Some(why) = why {
         findings.push(finding("emptyFirstFrame", Tick::ZERO, None, why.to_string(), json!({"mean": r3(mean), "spread": r3(spread)})));
     }
-    // ---- the timeline
-    let (stills, timeline_samples) = static_stretches(&project, q, end, &holds);
+    // ---- the timeline; an explainer's picture alone, and its hero
+    let (stills, timeline_samples) = static_stretches(&project, q, end, &holds, explainer);
+    if explainer {
+        skipped.push(json!({"check": "staticTimeline", "reason": "an explainer's longStill covers it: the picture alone, captions or not"}));
+    }
     findings.extend(stills);
     findings.extend(silences(q, end));
+    let heroes = if explainer {
+        let (small, seen) = small_heroes(&project, q, end);
+        findings.extend(small);
+        seen
+    } else {
+        Value::Null
+    };
     let (findings, counts) = bounded(findings);
     Ok(json!({
         "sequence": seq.0,
@@ -775,19 +967,23 @@ fn run(s: &mut Session, p: &Value) -> Result<Value> {
             "burnedCaptionPages": all.iter().filter(|t| t.kind == "caption").count(),
             "contrast": {"texts": measurable.len(), "checked": checked, "renders": at.len(), "samplesPerText": samples_per_text, "gpuFrames": renderer.on_gpu, "cpuFrames": renderer.on_cpu, "ratios": ratios},
             "timelineSamples": timeline_samples,
+            "heroes": heroes,
         },
+        "explainer": explainer,
         "holds": holds.iter().map(|(a, b)| json!({"start": a, "end": b})).collect::<Vec<_>>(),
         "thresholds": {
             "wordsPerSecond": WORDS_PER_SECOND, "readingFloor": READING_FLOOR,
             "minTextShare": MIN_TEXT_SHARE, "largeTextShare": LARGE_TEXT_SHARE, "largeBoldShare": LARGE_BOLD_SHARE,
             "contrast": CONTRAST, "contrastLarge": CONTRAST_LARGE, "strokeShare": STROKE_SHARE,
             "staticSeconds": STATIC_SECONDS, "silenceSeconds": SILENCE_SECONDS,
+            "stillSeconds": STILL_SECONDS, "heroShare": HERO_SHARE,
         },
         "method": {
             "contrast": "rendered with every title's text layers off and no captions; 10th and 90th percentile luminance inside the text's box, a background box and the text's opacity mixed in; a stroke or outline of 5 % of the font size or more counts as backdrop; shadows, glows, per-character colours and nested sequences not measured",
             "readingTime": "whitespace-separated words; a title is all text layers of its clip; every caption track",
             "timeline": "clip, caption and transition edges, moving pictures, animated parameters and title animation, sampled every 0.1 s and at every edit point",
             "silence": "clips on enabled, unmuted audio tracks; levels not measured",
+            "explainer": "explainer only: longStill reads the picture tracks alone (captions changing do not count); the hero is the tallest element that is not a backdrop (a plain colour, or a shape covering nine tenths of the frame) at the middle of each stretch between the picture tracks' edit points, unless a picture fills half the frame; nested sequences and pictures with alpha are not looked into",
         },
     }))
 }

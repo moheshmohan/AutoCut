@@ -354,6 +354,33 @@ fn an_overlay_with_alpha_has_its_entrance_measured_and_footage_does_not() {
 }
 
 #[test]
+fn an_explainer_lets_each_shot_settle_before_it_leaves() {
+    let mut s = session(30);
+    // a title whose entrance ends at 0.5 s of a 3 s shot settles; one that slides until the cut does not
+    let calm = title(&mut s, "Settled", 0.0, 3.0);
+    animate(&mut s, json!({"clip": calm, "in": {"kind": "fade", "duration": 0.5}}));
+    let busy = title(&mut s, "Busy", 3.0, 3.0);
+    s.execute(
+        "keyframes.choreograph",
+        json!({"target": {"clip": busy, "effect": "motion"}, "tweens": [{"prop": "scale", "from": 100, "to": 110, "duration": 2.7, "ease": "power1.out", "position": 0.1}]}),
+    )
+    .unwrap();
+    // a title with an exit: its settle runs to the exit's start
+    let exits = title(&mut s, "Exits", 6.0, 3.0);
+    animate(&mut s, json!({"clip": exits, "in": {"kind": "fade", "duration": 0.5}, "out": {"kind": "fade", "duration": 0.4}}));
+    let r = check(&mut s, json!({"explainer": true}));
+    let f = with_code(&r, "noSettle");
+    assert_eq!(f.iter().map(|x| x["clip"].as_u64().unwrap()).collect::<Vec<_>>(), [busy], "{r:#}");
+    assert!(f[0]["settle"].as_f64().unwrap() < 0.3, "{}", f[0]);
+    assert_eq!(f[0]["leaves"].as_i64(), Some(secs(6.0)));
+    assert!(f[0]["message"].as_str().unwrap().contains("settle about a second"));
+    assert_eq!(r["checked"]["settled"], 3);
+    // not without the switch
+    assert!(with_code(&check(&mut s, json!({})), "noSettle").is_empty());
+    assert!(s.execute(CMD, json!({"explainer": "on"})).unwrap_err().to_string().contains("true or false"));
+}
+
+#[test]
 fn an_exit_is_not_held_to_an_entrance_that_is_a_cut() {
     assert!(!outlasts(1.0, 3.0), "a one-frame entrance is a cut");
     assert!(!outlasts(8.4, 9.0) && !outlasts(20.0, 22.0), "within a frame or a tenth");

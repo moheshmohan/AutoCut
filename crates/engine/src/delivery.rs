@@ -24,7 +24,7 @@ pub fn commands() -> Vec<CommandSpec> {
         spec(
             CMD,
             "Delivery quality gate",
-            r#"{"short":bool=false,"privacy":bool=true,"narration":bool=true,"changedNarration":[clip id]?,"mix":bool=true,"motionEnergy":bool=true (qa.motionEnergy, warnings only),"craft":bool=true (sequence.checkCraft: textContrast under 3:1 is Floor, the rest craft),"motionCraft":bool=true (sequence.checkMotion: eases, entrance and exit timing, stagger, loops and pops; Reflex),"copy":bool=true (copy.lint of titles and captions: figures not in the ledger are Floor, the rest copy),"facts":[str|number|{"text","source"?}]? (the fact ledger; default build/facts.json beside the project),"factSources":bool? (script.factLedger: the sources of the figures and claims on screen, Floor; default on once the ledger names a source),"allow":[str]? (phrases copy.lint never flags),"decisions":path? (waivers; default build/decisions.json beside the project),"floorBlocks":bool=false (the new Floor checks block too),"holds":[{"start":ticks,"end":ticks,"reason":str}]?,"exemptions":[…audio continuity exemptions],"report":path?}"#,
+            r#"{"short":bool=false,"privacy":bool=true,"narration":bool=true,"changedNarration":[clip id]?,"mix":bool=true,"motionEnergy":bool=true (qa.motionEnergy, warnings only),"craft":bool=true (sequence.checkCraft: textContrast under 3:1 is Floor, the rest craft),"motionCraft":bool=true (sequence.checkMotion: eases, entrance and exit timing, stagger, loops and pops; Reflex),"copy":bool=true (copy.lint of titles and captions: figures not in the ledger are Floor, the rest copy),"facts":[str|number|{"text","source"?}]? (the fact ledger; default build/facts.json beside the project),"factSources":bool? (script.factLedger: the sources of the figures and claims on screen, Floor; default on once the ledger names a source),"allow":[str]? (phrases copy.lint never flags),"decisions":path? (waivers; default build/decisions.json beside the project),"floorBlocks":bool=false (the new Floor checks block too),"explainer":bool=false (the explainer rules of checkCraft and checkMotion: still pictures over 3 s, the hero under a quarter of the frame, no settle before a shot leaves; Reflex),"holds":[{"start":ticks,"end":ticks,"reason":str}]?,"exemptions":[…audio continuity exemptions],"report":path?}"#,
             preflight,
         ),
         spec(
@@ -100,6 +100,7 @@ fn preflight(s: &mut Session, p: &Value) -> Result<Value> {
         Some(v) => Some(v.as_bool().ok_or_else(|| bad(CMD, "factSources must be boolean"))?),
     };
     let fact_ledger = if fact_sources == Some(false) { None } else { Some(crate::copy_lint::ledger(s, CMD, p)?) };
+    let explainer = flag(p, "explainer", false)?;
     let (decisions, named_decisions) = decisions_path(s, p)?;
     let (source_errors, sources) = crate::source_check::inspect(s, seq);
     // A final-delivery check must see current originals, even when editing used a
@@ -344,7 +345,7 @@ fn preflight(s: &mut Session, p: &Value) -> Result<Value> {
     };
     // sequence.checkCraft: text contrast under 3:1 is Floor, its other findings Reflex or Finish
     if craft_on {
-        match s.execute("sequence.checkCraft", json!({"sequence":seq.0,"holds":craft_holds(&frozen_holds, end.0)})) {
+        match s.execute("sequence.checkCraft", json!({"sequence":seq.0,"holds":craft_holds(&frozen_holds, end.0),"explainer":explainer})) {
             Ok(mut v) => {
                 let (floor, rest): (Vec<Value>, Vec<Value>) =
                     take_findings(&mut v).into_iter().partition(|f| f["code"] == "lowContrast" && f["ratio"].as_f64().is_some_and(|r| r < FLOOR_CONTRAST));
@@ -378,7 +379,7 @@ fn preflight(s: &mut Session, p: &Value) -> Result<Value> {
     }
     // sequence.checkMotion: how titles, transitions and keyframes move, every finding Reflex
     if motion_craft_on {
-        match s.execute("sequence.checkMotion", json!({"sequence":seq.0})) {
+        match s.execute("sequence.checkMotion", json!({"sequence":seq.0,"explainer":explainer})) {
             Ok(mut v) => {
                 let found: Vec<Value> = take_findings(&mut v).into_iter().map(|f| tiered(f, REFLEX)).collect();
                 let state = if found.is_empty() { "pass" } else { "warning" };
@@ -1204,6 +1205,24 @@ mod tests {
         let open = checks.iter().filter(|c| !matches!(c["state"].as_str(), Some("pass" | "skipped"))).count() as u64;
         assert!(total >= open, "every open check is counted at least once: {summary} {r:#}");
         assert_eq!(r["floorBlocks"], false);
+    }
+
+    /// `explainer` hands the explainer rules to the craft and motion checks (PX7.5): a card held
+    /// still for 4 s is a longStill there, at the Reflex tier.
+    #[test]
+    fn the_explainer_rules_ride_on_the_craft_and_motion_checks() {
+        let (mut s, _) = titled("delivery-explainer");
+        let card = json!({"shape":"rectangle","position":[320,180],"size":[640,360],"seconds":4.0,"time":Tick::from_seconds_f64(3.0).0,"track":"V1"});
+        s.execute("graphics.newShape", card).unwrap();
+        let plain = s.execute(CMD, quick(json!({}))).unwrap();
+        assert_eq!(check(&plain, "craft")["detail"]["explainer"], false);
+        let r = s.execute(CMD, quick(json!({"explainer": true}))).unwrap();
+        assert_eq!(check(&r, "craft")["detail"]["explainer"], true);
+        assert_eq!(check(&r, "motionCraft")["detail"]["explainer"], true);
+        let still: Vec<&Value> = findings_of(&r, "craft").into_iter().filter(|f| f["code"] == "longStill").collect();
+        assert_eq!(still.len(), 1, "{:#}", check(&r, "craft"));
+        assert_eq!(still[0]["tier"], "reflex");
+        assert!(s.execute(CMD, quick(json!({"explainer": "yes"}))).is_err());
     }
 
     /// The new Floor checks (contrast under 3:1, figures not in the ledger) warn by default and

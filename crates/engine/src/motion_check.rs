@@ -14,6 +14,7 @@
 //! | `sameEntrance` | three or more titles, and every one of them enters the same way | 3 titles |
 //! | `loopingText` | a looping text animator keeps a title moving for its whole clip | loops quicker than 8 s a cycle (an ambient drift is slower) |
 //! | `edgePop` | a keyframed position, scale, rotation or opacity changes by half its move or more between a clip's first two frames or its last two | 50 % of the keyframed range; at least 10 points of opacity, 5 % of scale, 5° or 1 % of the frame's short side |
+//! | `noSettle` | with `explainer: true` (PX7.5): a title or overlay is still moving (its entrance, a keyframed change) less than about a second before its shot leaves (its exit starts or it ends) | 0.8 s |
 //!
 //! Where the numbers come from: entrances of 500–800 ms for a focal element and exits faster
 //! than entrances (impeccable); a reveal of 0.4–0.8 s in all, exits at 60–75 % of the entrance,
@@ -81,6 +82,9 @@ const MAX_UNITS: usize = 4096;
 /// Longest band (frames) and stagger (seconds) a caller may set.
 const MAX_BAND_FRAMES: f64 = 100_000.0;
 const MAX_STAGGER: f64 = 600.0;
+/// The explainer's settle (PX7.5, `explainer: true`): a title or overlay stops moving about a
+/// second before its shot leaves (its exit starts or it ends); under this many seconds warns.
+pub const SETTLE_SECONDS: f64 = 0.8;
 
 pub fn commands() -> Vec<CommandSpec> {
     vec![CommandSpec {
@@ -88,7 +92,7 @@ pub fn commands() -> Vec<CommandSpec> {
         label: "Check Motion",
         menu: &[],
         shortcut: None,
-        params: r#"{"sequence":id? (default the active one),"style":"calm"|"playful"? (playful lets eases overshoot; default the taste profile's motion, else calm),"bands":{"entrance":[minFrames,maxFrames]? (default 8–30 at 30 fps, scaled to the sequence's rate),"exit":[minFrames,maxFrames]? (default 6–24 at 30 fps),"stagger":seconds? (default 0.8)}?}"#,
+        params: r#"{"sequence":id? (default the active one),"style":"calm"|"playful"? (playful lets eases overshoot; default the taste profile's motion, else calm),"bands":{"entrance":[minFrames,maxFrames]? (default 8–30 at 30 fps, scaled to the sequence's rate),"exit":[minFrames,maxFrames]? (default 6–24 at 30 fps),"stagger":seconds? (default 0.8)}?,"explainer":bool=false (an explainer's settle: titles and overlays stop moving about a second before their shot leaves)}"#,
         enabled: has_seq,
         run,
         journal: false,
@@ -622,6 +626,36 @@ fn read_keyframes(it: &TrackItem, track: &str, role: Role, c: &Ctx, out: &mut Re
     }
 }
 
+/// When clip `it`'s keyframed moves end (the last change of position, scale, rotation or opacity
+/// that is not its exit, on the timeline) and when its keyframed exit starts (the last two
+/// keyframes, ending at the clip's last frame, as [`read_keyframes`] finds it).
+fn keyframe_moves(it: &TrackItem, c: &Ctx) -> (Option<Tick>, Option<Tick>) {
+    let frame = Tick::from_seconds_f64(1.0 / c.fps).0.max(1);
+    let last = it.effect_time_at(Tick(it.end().0.saturating_sub(frame).max(it.start.0)));
+    let media_frame = ((frame as f64) * media_per_second(it)).round().max(1.0) as i64;
+    let (mut moved, mut exit): (Option<Tick>, Option<Tick>) = (None, None);
+    for e in it.effects.iter().filter(|e| e.enabled) {
+        for (_, param) in e.params.iter().filter(|(id, p)| p.is_animated() && MOVE_PROPS.contains(&id.as_str())) {
+            let keys = &param.keyframes;
+            for (k, pair) in keys.windows(2).take(MAX_KEYFRAMES).enumerate() {
+                let (Some(a), Some(b)) = (pair.first(), pair.get(1)) else { continue };
+                if a.value == b.value || b.time <= a.time {
+                    continue;
+                }
+                let is_exit = k + 2 == keys.len() && b.time.0.saturating_sub(last.0).abs() <= media_frame;
+                if is_exit {
+                    let at = timeline_of(it, a.time);
+                    exit = Some(exit.map_or(at, |x| x.min(at)));
+                } else {
+                    let at = timeline_of(it, b.time);
+                    moved = Some(moved.map_or(at, |x| x.max(at)));
+                }
+            }
+        }
+    }
+    (moved, exit)
+}
+
 /// A transition's easing, read from its parameters.
 fn transition_easing(e: &EffectInstance) -> (u32, Option<[f64; 4]>) {
     let num = |k: &str, d: f64| e.params.get(k).and_then(|p| p.value.as_f64()).filter(|v| v.is_finite()).unwrap_or(d);
@@ -871,10 +905,14 @@ fn run(s: &mut Session, p: &Value) -> Result<Value> {
         return Err(bad(CMD, "parameters must be an object"));
     }
     if let Some(o) = p.as_object()
-        && let Some(k) = o.keys().find(|k| !matches!(k.as_str(), "sequence" | "style" | "bands"))
+        && let Some(k) = o.keys().find(|k| !matches!(k.as_str(), "sequence" | "style" | "bands" | "explainer"))
     {
-        return Err(bad(CMD, format!("unknown parameter `{}`: sequence, style or bands", k.chars().take(64).collect::<String>())));
+        return Err(bad(CMD, format!("unknown parameter `{}`: sequence, style, bands or explainer", k.chars().take(64).collect::<String>())));
     }
+    let explainer = match p.get("explainer") {
+        None | Some(Value::Null) => false,
+        Some(v) => v.as_bool().ok_or_else(|| bad(CMD, "`explainer` is true or false"))?,
+    };
     let seq = match p.get("sequence").filter(|v| !v.is_null()) {
         Some(v) => {
             let id = ItemId(v.as_u64().ok_or_else(|| bad(CMD, "`sequence` is a sequence id"))?);
@@ -925,6 +963,45 @@ fn run(s: &mut Session, p: &Value) -> Result<Value> {
             json!({"kind": f.3, "titles": titles.len(), "clips": titles.iter().map(|t| t.2).collect::<Vec<_>>()}),
         ));
     }
+    // ---- an explainer's settle before each shot leaves
+    let mut settled = 0usize;
+    if explainer {
+        for (id, r) in &roles {
+            if *r == Role::Other || read.loops.contains(id) {
+                continue;
+            }
+            let Some((ti, it)) = q.find_item(filmcraft_project::ClipId(*id)) else { continue };
+            let mine: Vec<&Move> = read.moves.iter().filter(|m| m.clip == *id).collect();
+            let (moved, keyed_exit) = keyframe_moves(it, &c);
+            let Some(last) = mine.iter().filter(|m| m.entering).map(|m| m.end).chain(moved).max() else { continue };
+            let leave = mine.iter().filter(|m| !m.entering).map(|m| m.start).chain(keyed_exit).chain(std::iter::once(it.end())).min().unwrap_or(it.end());
+            settled += 1;
+            let settle = (leave - last).seconds();
+            if settle < SETTLE_SECONDS {
+                let what = match r {
+                    Role::Title => it
+                        .effects
+                        .iter()
+                        .enumerate()
+                        .find(|(_, e)| e.effect == TEXT_LAYER && e.enabled)
+                        .map_or_else(|| "the title".to_string(), |(i, e)| format!("\"{}\"", title_layer_name(e, i))),
+                    _ => format!("the overlay {}", project.item(it.item).map_or_else(String::new, |p| p.name.chars().take(80).collect())),
+                };
+                let target = Tick(leave.0.saturating_sub(Tick::from_seconds_f64(1.0).0)).max(it.start);
+                findings.push(finding(
+                    "noSettle",
+                    last.min(leave),
+                    Some(leave),
+                    format!(
+                        "{what} is still moving {:.2} s before its shot leaves; an explainer lets it settle about a second: end its moves by {:.2} s, or hold the shot longer",
+                        settle.max(0.0),
+                        target.seconds()
+                    ),
+                    json!({"clip": id, "track": q.video_tracks.iter().position(|t| t.id == ti).map(|k| format!("V{}", k + 1)), "settle": r3(settle.max(0.0)), "movesEnd": last.0, "leaves": leave.0, "minimum": SETTLE_SECONDS}),
+                ));
+            }
+        }
+    }
     let (findings, counts) = bounded(findings);
     let mut skipped = Vec::new();
     if playful {
@@ -954,14 +1031,16 @@ fn run(s: &mut Session, p: &Value) -> Result<Value> {
             "entrances": read.moves.iter().filter(|m| m.entering).count(),
             "exits": read.moves.iter().filter(|m| !m.entering).count(),
             "titleEntrances": titles.iter().map(|t| json!({"clip": t.2, "kind": t.3})).collect::<Vec<_>>(),
+            "settled": settled,
         },
+        "explainer": explainer,
         "fps": r3(fps),
         "bands": {"entrance": band(bands.entrance), "exit": band(bands.exit), "staggerSeconds": bands.stagger},
         "thresholds": {
             "entranceFrames30": [ENTRANCE_FRAMES_30.0, ENTRANCE_FRAMES_30.1], "exitFrames30": [EXIT_FRAMES_30.0, EXIT_FRAMES_30.1],
             "staggerSeconds": STAGGER_SECONDS, "springDamping": SPRING_DAMPING, "sameEntranceTitles": SAME_ENTRANCE_TITLES,
             "ambientLoopSeconds": AMBIENT_LOOP_SECONDS, "edgePopShare": EDGE_POP_SHARE,
-            "overshoot": OVERSHOOT_EPS, "bounceBack": BOUNCE_BACK,
+            "overshoot": OVERSHOOT_EPS, "bounceBack": BOUNCE_BACK, "settleSeconds": SETTLE_SECONDS,
             "note": "starting values, to be tuned on real projects",
         },
         "method": {
@@ -970,6 +1049,7 @@ fn run(s: &mut Session, p: &Value) -> Result<Value> {
             "overlays": "a clip of a picture with alpha (motion.render, composition.import): its transitions and keyframes",
             "units": "letters as shaped clusters, words and lines of the laid-out text at the clip's middle, as the renderer animates them",
             "edgePop": "position, scale, rotation and opacity between the clip's first two and last two frames, against the property's keyframed range",
+            "settle": "explainer only: from the end of a title's or overlay's last move that is not its exit (entrances, keyframed changes of position, scale, rotation or opacity) to when it leaves (its exit starts, a transition out begins, or it ends); looping titles are left to loopingText",
         },
     }))
 }

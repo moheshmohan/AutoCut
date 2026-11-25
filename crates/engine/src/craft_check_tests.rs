@@ -333,4 +333,69 @@ fn hostile_parameters_are_refused() {
     assert_eq!(check(&mut s, json!({"sequence": seq.0}))["sequence"], seq.0);
     // no sequence at all
     assert!(Session::default().execute(CMD, json!({})).is_err());
+    // the explainer switch is a boolean
+    let (mut s, dir) = session("craft-hostile-explainer");
+    let grey = photo(&mut s, &dir, "grey.png", 128);
+    place(&mut s, grey, "V1", 0.0, 2.0);
+    for v in [json!("yes"), json!(1), json!([true])] {
+        assert!(s.execute(CMD, json!({"explainer": v})).unwrap_err().to_string().contains("true or false"), "{v}");
+    }
+}
+
+/// A 640×360 card: a full-frame backdrop shape and a text of `size` px on V1 from `from` to `to`.
+fn card(s: &mut Session, text: &str, size: f64, from: f64, to: f64) -> u64 {
+    let c = s
+        .execute(
+            "graphics.newShape",
+            json!({"shape": "rectangle", "position": [320, 180], "size": [640, 360], "seconds": to - from, "time": secs(from), "track": "V1"}),
+        )
+        .unwrap()["clip"]
+        .as_u64()
+        .unwrap();
+    s.execute("graphics.set", json!({"clip": c, "layer": 0, "props": {"fill_color": "#1a2a3a"}})).unwrap();
+    s.execute("graphics.newText", json!({"text": text, "size": size, "clip": c, "position": [60, 230]})).unwrap();
+    c
+}
+
+#[test]
+fn an_explainer_holds_no_still_over_three_seconds_even_under_changing_captions() {
+    let (mut s, _dir) = session("craft-explainer-still");
+    card(&mut s, "1903", 160.0, 0.0, 6.0);
+    // captions change every 2 s: the timeline is never still, but the picture is
+    s.execute("captions.newTrack", json!({})).unwrap();
+    for (i, t) in ["The first flight.", "It lasted twelve seconds.", "Nobody believed it."].iter().enumerate() {
+        s.execute("captions.add", json!({"text": t, "time": secs(i as f64 * 2.0), "durationSeconds": 2.0})).unwrap();
+    }
+    let plain = check(&mut s, json!({}));
+    assert!(with_code(&plain, "staticTimeline").is_empty() && with_code(&plain, "longStill").is_empty(), "{plain:#}");
+    let r = check(&mut s, json!({"explainer": true}));
+    let f = with_code(&r, "longStill");
+    assert_eq!(f.len(), 1, "{r:#}");
+    assert_eq!((f[0]["time"].as_i64(), f[0]["end"].as_i64()), (Some(0), Some(secs(6.0))));
+    assert_eq!(r["explainer"], true);
+    assert!(r["skipped"].as_array().unwrap().iter().any(|x| x["check"] == "staticTimeline"));
+    // a hold declared over it, or a slow push on the text, and it is no longer still
+    let held = check(&mut s, json!({"explainer": true, "holds": [{"start": 0, "end": secs(6.0), "reason": "the year sits"}]}));
+    assert!(with_code(&held, "longStill").is_empty(), "{held:#}");
+}
+
+#[test]
+fn an_explainers_hero_takes_a_quarter_of_the_frame_height() {
+    let (mut s, dir) = session("craft-explainer-hero");
+    // a big year (hero), then a small label alone, then a photo filling the frame with a small title over it
+    card(&mut s, "1903", 160.0, 0.0, 2.0);
+    let small = card(&mut s, "a small label", 24.0, 2.0, 4.0);
+    let photo_item = photo(&mut s, &dir, "plate.png", 90);
+    place(&mut s, photo_item, "V1", 4.0, 6.0);
+    s.execute("graphics.newText", json!({"text": "Kitty Hawk", "size": 24, "seconds": 2.0, "time": secs(4.0), "track": "V2"})).unwrap();
+    let r = check(&mut s, json!({"explainer": true}));
+    let f = with_code(&r, "smallHero");
+    assert_eq!(f.len(), 1, "only the small label's shot: {r:#}");
+    assert_eq!((f[0]["clip"].as_u64(), f[0]["time"].as_i64(), f[0]["end"].as_i64()), (Some(small), Some(secs(2.0)), Some(secs(4.0))));
+    assert!(f[0]["share"].as_f64().unwrap() < HERO_SHARE);
+    assert!(f[0]["message"].as_str().unwrap().contains("a small label"), "{}", f[0]["message"]);
+    let heroes = &r["checked"]["heroes"];
+    assert_eq!((heroes["measured"].as_u64(), heroes["pictures"].as_u64()), (Some(2), Some(1)), "{heroes}");
+    // without the switch nothing is said about heroes
+    assert!(with_code(&check(&mut s, json!({})), "smallHero").is_empty());
 }
