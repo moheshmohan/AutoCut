@@ -101,6 +101,27 @@ Modules: `header` (6.2 / 6.3, superframes), `boolcoder` (9.2), `probs` (frame co
 inter prediction calls, reconstruction), `intra`, `inter`, `transform`, `loopfilter`, `frame`
 (banded frames, pools), `decoder` (scheduling, post stage).
 
+## Memory
+
+A frame is refused (`Error::Invalid`, before anything is allocated for it) when a side is over
+16384, when its luma plane has more than `Decoder::set_max_picture_luma_samples` samples
+(`MAX_LUMA_SAMPLES` = 2^26, 8192x8192, by default), or when what the decoder would hold at that
+size does not fit `Decoder::set_memory_budget`. The count follows the decoder's threading: the
+eight reference slots, the frames whose post stage still runs (at most `(threads / 3).clamp(2, 6)`
+with frame threads, the new frame's included; one without), and the output pictures those post
+stages build, the ones waiting in the output queue (at most `(threads / 2).clamp(2, 6)`) and up to
+two more shown by the same chunk; so at most 14 frames and 14 pictures, whatever the thread count.
+Frames count their real sample bands (two bytes a sample on the 64-sample grid, with the scratch
+rows of each band), pictures their planes (one byte a sample at 8 bits, two above).
+
+`DECODE_MEMORY_BUDGET` is 12 GiB on 64-bit targets: more than the decoder can hold for any frame
+the size limits admit, in every profile, at any thread count (the most is about 12.1 GB, 4:4:4 at
+12 bits and 2^26 luma samples; a level 6.2 frame at most about 6.5 GB; 8K UHD 4:4:4 12-bit about
+5.9 GB at 18 threads or more), so the default refuses nothing those limits let through and binds
+once a caller raises them. On 32-bit targets it is 1 GiB (one thread: 9 frames and 3 pictures):
+8-bit 4:2:0 fits up to about 29 million luma samples, so 8K UHD (1.2 GB) is refused there. A caller
+past 8K raises the luma limit and the budget together.
+
 ## Tests
 
 `cargo test --release -p filmcraft-vp9`. Fixtures are generated on first use into
@@ -271,7 +292,7 @@ column pass is scalar 64-bit).
 - Scaled references combined with compound prediction are not covered by a fixture (both are
   verified separately; libvpx through ffmpeg cannot change size mid-stream and the synthetic
   splice cannot keep the compound streams' probability contexts intact).
-- Frames larger than 16384x16384 are rejected (`Error::Invalid`) to bound memory.
+- Frames larger than 16384x16384 are rejected (`Error::Invalid`) to bound memory (see Memory).
 - Damaged streams are decoded as far as the data allows (the boolean decoder reads zeros past the
   end, as specified); there is no concealment beyond that, and inter frames whose reference slots
   are empty return `Error::MissingReference`.

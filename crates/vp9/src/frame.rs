@@ -137,6 +137,19 @@ impl Frame {
         self.bands.len()
     }
 
+    /// Bytes the sample bands of a complete frame of this size take, as [`Frame::new_band`]
+    /// allocates them: every plane at two bytes a sample, on the superblock grid, with the
+    /// [`BAND_PAD`] scratch rows of each band. `None` on overflow.
+    pub fn allocated_bytes(width: u32, height: u32, ss_x: bool, ss_y: bool) -> Option<u64> {
+        let sb_rows = u64::from(height).div_ceil(64);
+        let luma_stride = u64::from(width).div_ceil(64).checked_mul(64)?;
+        let chroma_stride = luma_stride >> u64::from(ss_x);
+        let pad = BAND_PAD as u64;
+        let luma = sb_rows.checked_mul(64 + pad)?.checked_mul(luma_stride)?;
+        let chroma = sb_rows.checked_mul((64 >> u64::from(ss_y)) + pad)?.checked_mul(chroma_stride)?.checked_mul(2)?;
+        luma.checked_add(chroma)?.checked_mul(2)
+    }
+
     /// A band buffer for this frame's geometry (recycled memory, contents unspecified).
     pub fn new_band(&self) -> Band {
         Band { planes: std::array::from_fn(|p| self.pools.bands.take_any((self.band_h[p] + BAND_PAD) * self.strides[p], 0)) }
@@ -312,5 +325,46 @@ pub struct Pools {
 impl Default for Pools {
     fn default() -> Self {
         Pools { samples: Pool::default(), bands: Pool::with_max(1024), mi: Pool::default() }
+    }
+}
+
+#[cfg(test)]
+mod allocation_tests {
+    use super::*;
+
+    fn info(width: u32, height: u32, ss_x: bool, ss_y: bool) -> FrameInfo {
+        FrameInfo {
+            width,
+            height,
+            ss_x,
+            ss_y,
+            bit_depth: 8,
+            color_space: 0,
+            color_range: false,
+            render_width: width,
+            render_height: height,
+            key: true,
+            intra_only: false,
+        }
+    }
+
+    /// The budget's frame size is what a complete frame really allocates, in every chroma format.
+    #[test]
+    fn allocated_bytes_match_the_bands_a_frame_holds() {
+        for (w, h) in [(64, 64), (65, 63), (352, 288), (1, 1), (200, 130)] {
+            for (sx, sy) in [(true, true), (true, false), (false, true), (false, false)] {
+                let f = Frame::new(info(w, h, sx, sy), Default::default());
+                let mut bytes = 0u64;
+                for r in 0..f.sb_rows() {
+                    let b = f.new_band();
+                    bytes += b.planes.iter().map(|p| p.len() as u64 * 2).sum::<u64>();
+                    f.publish(r, b);
+                }
+                assert!(f.is_complete());
+                assert_eq!(Frame::allocated_bytes(w, h, sx, sy), Some(bytes), "{w}x{h} ss {sx} {sy}");
+            }
+        }
+        // sizes far past any limit overflow instead of wrapping
+        assert_eq!(Frame::allocated_bytes(u32::MAX, u32::MAX, false, false), None);
     }
 }

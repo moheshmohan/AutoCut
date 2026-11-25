@@ -21,6 +21,7 @@
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable))]
 
 mod boolcoder;
+mod budget;
 mod decoder;
 mod error;
 mod frame;
@@ -39,7 +40,8 @@ mod transform;
 #[allow(dead_code, clippy::all)]
 mod transform_gen;
 
-pub use decoder::{DecodeStats, Decoder};
+pub use budget::DECODE_MEMORY_BUDGET;
+pub use decoder::{DecodeStats, Decoder, MAX_LUMA_SAMPLES};
 
 /// Stream parameters read from a key frame's uncompressed header (see [`keyframe_info`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

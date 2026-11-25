@@ -15,9 +15,10 @@ use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 
-/// Maximum luma samples accepted for one decoded reference frame: 8192x8192, above level 6.2's
-/// 8192x4352 (35 651 584 samples).
-const MAX_LUMA_SAMPLES: u64 = 1 << 26;
+/// Default maximum luma samples accepted for one decoded reference frame
+/// ([`Decoder::set_max_picture_luma_samples`]): 8192x8192, above level 6.2's 8192x4352
+/// (35 651 584 samples).
+pub const MAX_LUMA_SAMPLES: u64 = 1 << 26;
 
 /// Counters describing what the decoder has seen (useful to check test coverage).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -70,6 +71,10 @@ pub struct Decoder {
     last_size: Option<(u32, u32)>,
     last_show_frame: bool,
     stats: DecodeStats,
+    /// Bytes the picture store may take ([`Decoder::set_memory_budget`]).
+    memory_budget: u64,
+    /// Largest frame in luma samples ([`Decoder::set_max_picture_luma_samples`]).
+    max_luma_samples: u64,
     threads: usize,
     bufs: Arc<Pools>,
     draft: bool,
@@ -127,6 +132,8 @@ impl Decoder {
             last_size: None,
             last_show_frame: false,
             stats: DecodeStats::default(),
+            memory_budget: crate::budget::DECODE_MEMORY_BUDGET,
+            max_luma_samples: MAX_LUMA_SAMPLES,
             threads: threads.max(1),
             bufs: Arc::default(),
             draft: false,
@@ -141,6 +148,33 @@ impl Decoder {
     /// Statistics accumulated so far.
     pub fn stats(&self) -> DecodeStats {
         self.stats.clone()
+    }
+
+    /// Bytes the decoded pictures may take (default [`crate::DECODE_MEMORY_BUDGET`]: 12 GiB, 1
+    /// GiB on 32-bit targets). A frame whose size needs more is refused before anything is
+    /// allocated for it (`Error::Invalid`): the eight reference slots, the frames whose post
+    /// stage still runs and the output pictures being built or waiting to be returned, as many as
+    /// this decoder's threading keeps (at most 14 frames and 14 pictures). Applies to the frames
+    /// fed from now on.
+    pub fn set_memory_budget(&mut self, bytes: u64) {
+        self.memory_budget = bytes;
+    }
+
+    /// The picture memory budget ([`Decoder::set_memory_budget`]).
+    pub fn memory_budget(&self) -> u64 {
+        self.memory_budget
+    }
+
+    /// The largest frame, in luma samples (width x height), this decoder accepts (default
+    /// [`MAX_LUMA_SAMPLES`], 2^26: 8192x8192). Raise it, with the memory budget, for frames past
+    /// 8K; frames over 16384 on either side are refused whatever the limit.
+    pub fn set_max_picture_luma_samples(&mut self, samples: u64) {
+        self.max_luma_samples = samples;
+    }
+
+    /// The frame-size limit ([`Decoder::set_max_picture_luma_samples`]).
+    pub fn max_picture_luma_samples(&self) -> u64 {
+        self.max_luma_samples
     }
 
     /// Worker threads in use (1: everything runs on the calling thread).
@@ -216,7 +250,7 @@ impl Decoder {
     /// Pictures at the front of the queue that are finished (`all`: wait for every one). The
     /// queue is kept short: beyond a few pictures in flight the oldest is waited for.
     fn drain(&mut self, all: bool) -> Vec<Picture> {
-        let max_lag = (self.threads / 2).clamp(2, 6);
+        let max_lag = output_lag(self.threads);
         let mut out = Vec::new();
         loop {
             let must = all || self.pending.len() > max_lag;
@@ -268,8 +302,15 @@ impl Decoder {
         }
         ensure!(h.width <= 16384 && h.height <= 16384, "frame size {}x{} too large", h.width, h.height);
         ensure!(
-            u64::from(h.width).checked_mul(u64::from(h.height)).is_some_and(|n| n <= MAX_LUMA_SAMPLES),
+            u64::from(h.width).checked_mul(u64::from(h.height)).is_some_and(|n| n <= self.max_luma_samples),
             "frame size {}x{} exceeds the decoder memory limit",
+            h.width,
+            h.height
+        );
+        // The references, the frames in their post stage and the output pictures, at this size.
+        ensure!(
+            store(h.width, h.height, &h.color, self.threads()).is_some_and(|s| s.fits(self.memory_budget)),
+            "frame size {}x{} exceeds the decoder memory budget",
             h.width,
             h.height
         );
@@ -509,7 +550,7 @@ impl Decoder {
             while self.jobs.front().is_some_and(|j| j.is_finished()) {
                 let _ = self.jobs.pop_front().map(|j| j.join());
             }
-            let max_jobs = (self.threads / 3).clamp(2, 6);
+            let max_jobs = post_stages(self.threads);
             while self.jobs.len() >= max_jobs {
                 let _ = self.jobs.pop_front().map(|j| j.join());
             }
@@ -1012,6 +1053,169 @@ fn picture_of(f: &Frame, pts: i64, draft: bool) -> Picture {
         b.add(f, r, f.band(r));
     }
     b.finish()
+}
+
+/// Post stages (one thread each) a frame-threaded decoder runs at once, the new frame's included
+/// ([`Decoder::start_post`] waits for the oldest beyond them).
+fn post_stages(threads: usize) -> usize {
+    (threads / 3).clamp(2, 6)
+}
+
+/// Shown pictures the output queue keeps before [`Decoder::decode`] waits for the oldest.
+fn output_lag(threads: usize) -> usize {
+    (threads / 2).clamp(2, 6)
+}
+
+/// Frames and output pictures a decoder running `threads` threads (as [`Decoder::threads`]
+/// reports them) holds at once, for the memory budget: the eight reference slots and the frames
+/// whose post stage still runs (the new frame's included; just the new frame without frame
+/// threads); the output pictures those post stages are building, those waiting in the output
+/// queue, and up to two more shown by the same chunk (a superframe). Reference frames in their
+/// post stage count twice, so this is an upper bound. It stops growing at 18 threads (14 frames,
+/// 14 pictures).
+fn held(threads: usize) -> (u64, u64) {
+    if threads <= 1 {
+        return (8 + 1, 1 + 2);
+    }
+    let (jobs, lag) = (post_stages(threads) as u64, output_lag(threads) as u64);
+    (8 + jobs, jobs + lag + 2)
+}
+
+/// What a decoder running `threads` threads holds for frames of `width` x `height` in `color`
+/// ([`held`]: frames as [`Frame::allocated_bytes`], output pictures at one byte a sample for
+/// 8-bit, two above); `None` on overflow.
+fn store(width: u32, height: u32, color: &crate::header::ColorConfig, threads: usize) -> Option<crate::budget::Store> {
+    let (ss_x, ss_y) = (color.subsampling_x, color.subsampling_y);
+    let frame_bytes = Frame::allocated_bytes(width, height, ss_x, ss_y)?;
+    let (cw, ch) = ((u64::from(width) + u64::from(ss_x)) >> u64::from(ss_x), (u64::from(height) + u64::from(ss_y)) >> u64::from(ss_y));
+    let samples = u64::from(width).checked_mul(u64::from(height))?.checked_add(cw.checked_mul(ch)?.checked_mul(2)?)?;
+    let picture_bytes = samples.checked_mul(if color.bit_depth == 8 { 1 } else { 2 })?;
+    let (frames, pictures) = held(threads);
+    Some(crate::budget::Store { frames, frame_bytes, pictures, picture_bytes })
+}
+
+#[cfg(test)]
+mod budget_tests {
+    use super::*;
+    use crate::budget::DECODE_MEMORY_BUDGET;
+    use crate::header::ColorConfig;
+
+    fn color(ss: (bool, bool), bit_depth: u8) -> ColorConfig {
+        ColorConfig { subsampling_x: ss.0, subsampling_y: ss.1, bit_depth, ..Default::default() }
+    }
+
+    fn fits(w: u32, h: u32, c: &ColorConfig, threads: usize, budget: u64) -> bool {
+        store(w, h, c, threads).is_some_and(|s| s.fits(budget))
+    }
+
+    const C420: (bool, bool) = (true, true);
+    const C444: (bool, bool) = (false, false);
+    /// Every chroma format a profile can code: 4:2:0, 4:2:2, 4:4:0, 4:4:4.
+    const FORMATS: [(bool, bool); 4] = [(true, true), (true, false), (false, true), (false, false)];
+
+    /// The count follows the decoder's own threading limits, not the thread count.
+    #[test]
+    fn held_follows_the_post_stage_and_output_queue_limits() {
+        assert_eq!(held(1), (9, 3));
+        assert_eq!(held(2), (10, 6));
+        assert_eq!(held(16), (13, 13));
+        assert_eq!(held(18), (14, 14));
+        assert_eq!(held(64), (14, 14));
+        assert_eq!(held(usize::MAX), (14, 14));
+    }
+
+    /// 64x64 4:2:0 8-bit: a frame is 9216 + 5120 bytes of bands, a picture 6144 bytes; one
+    /// thread holds 9 frames and 3 pictures.
+    #[test]
+    fn exact_budget_boundary() {
+        let s = store(64, 64, &color(C420, 8), 1).unwrap();
+        assert_eq!((s.frame_bytes, s.picture_bytes), (14336, 6144));
+        let need = 9 * 14336 + 3 * 6144;
+        assert!(fits(64, 64, &color(C420, 8), 1, need));
+        assert!(!fits(64, 64, &color(C420, 8), 1, need - 1));
+        // deeper pictures are two bytes a sample; the frames already are
+        assert_eq!(store(64, 64, &color(C420, 10), 1).map(|s| (s.frame_bytes, s.picture_bytes)), Some((14336, 12288)));
+        assert!(store(u32::MAX, u32::MAX, &color(C444, 12), 64).is_none());
+    }
+
+    /// The budget's picture size is what an output picture really allocates.
+    #[test]
+    fn picture_bytes_match_the_output_planes() {
+        for (w, h) in [(64, 64), (65, 63), (352, 288), (1, 1)] {
+            for ss in FORMATS {
+                for depth in [8, 10, 12] {
+                    let info = FrameInfo {
+                        width: w,
+                        height: h,
+                        ss_x: ss.0,
+                        ss_y: ss.1,
+                        bit_depth: depth,
+                        color_space: 0,
+                        color_range: false,
+                        render_width: w,
+                        render_height: h,
+                        key: true,
+                        intra_only: false,
+                    };
+                    let f = Frame::new(info, Arc::default());
+                    let pic = PictureBuilder::new(&f, 0, false);
+                    let bytes: u64 = pic.planes.iter().map(|p| p.len() as u64 * if depth == 8 { 1 } else { 2 }).sum();
+                    assert_eq!(store(w, h, &color(ss, depth), 1).map(|s| s.picture_bytes), Some(bytes), "{w}x{h} {ss:?} {depth}-bit");
+                }
+            }
+        }
+    }
+
+    /// 8K UHD 4:4:4 (profiles 1 and 3) fits the 64-bit default at 16 and 64 threads, at every
+    /// depth: about 5.9 GB at 12 bits and 18 threads or more.
+    #[test]
+    fn uhd_8k_444_fits_the_default_at_16_and_64_threads() {
+        if !cfg!(target_pointer_width = "64") {
+            return;
+        }
+        for depth in [8, 10, 12] {
+            for threads in [16, 64] {
+                assert!(fits(7680, 4320, &color(C444, depth), threads, DECODE_MEMORY_BUDGET), "{depth}-bit, {threads} threads");
+            }
+        }
+        let worst = store(7680, 4320, &color(C444, 12), 64).and_then(|s| s.bytes()).unwrap();
+        assert!(worst < 6_500_000_000, "{worst}");
+    }
+
+    /// Every frame size level 6.2 allows (8192x4352 samples, 16384 a side; also off the
+    /// superblock grid) fits the 64-bit default in every chroma format and depth at up to 64
+    /// threads, and so does the largest frame the size limits admit at all (2^26 luma samples):
+    /// the default refuses nothing those limits let through.
+    #[test]
+    fn every_admitted_frame_fits_the_default_at_up_to_64_threads() {
+        if !cfg!(target_pointer_width = "64") {
+            return;
+        }
+        let level_6_2 = [(8192, 4352), (16384, 2176), (16321, 2184), (4352, 8192), (2184, 16321)];
+        let at_the_limits = [(8192, 8192), (16384, 4096), (16321, 4111), (4111, 16321)];
+        for (w, h) in level_6_2.into_iter().chain(at_the_limits) {
+            assert!(u64::from(w) * u64::from(h) <= MAX_LUMA_SAMPLES);
+            for ss in FORMATS {
+                for depth in [8, 10, 12] {
+                    for threads in [1, 2, 4, 8, 16, 32, 64] {
+                        assert!(fits(w, h, &color(ss, depth), threads, DECODE_MEMORY_BUDGET), "{w}x{h} {ss:?} {depth}-bit {threads} threads");
+                    }
+                }
+            }
+        }
+    }
+
+    /// The default still binds past the size limits: 16384x16384 4:4:4 (a caller that raised the
+    /// luma limit) does not fit at 64 threads, nor 16384x8192 at 12 bits on 18.
+    #[test]
+    fn the_default_binds_past_the_size_limits() {
+        if !cfg!(target_pointer_width = "64") {
+            return;
+        }
+        assert!(!fits(16384, 16384, &color(C444, 8), 64, DECODE_MEMORY_BUDGET));
+        assert!(!fits(16384, 8192, &color(C444, 12), 18, DECODE_MEMORY_BUDGET));
+        assert!(fits(3840, 2160, &color(C420, 8), 64, 1 << 30));
+    }
 }
 
 #[cfg(test)]
