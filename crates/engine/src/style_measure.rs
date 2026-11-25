@@ -28,6 +28,13 @@
 //! registered them, ours otherwise); sequences render on the GPU frame renderer where the host
 //! has one, else on the CPU, without captions. Frames that cannot be read are skipped and
 //! counted.
+//!
+//! **The fingerprint** (PX6.4) is the measure in about a kilobyte, stable (fixed rounding, no
+//! clock, no randomness) and keyed (`key`, FNV-1a of its canonical JSON), for a catalogue to keep
+//! with an approved video: lengths and rates, `pace` (the local median shot length at 16 points
+//! of the video), `energy` and `loudness` (16 points each), where its bursts are, its stillness,
+//! settle, blur and palette. `summary: true` answers it alone. A fingerprint can be given back as
+//! `reference` to `autocut.direct` and `autocut.quick`.
 use filmcraft_project::ItemId;
 use filmcraft_render::color_balance;
 use filmcraft_time::{FrameRate, TICKS_PER_SECOND, Tick};
@@ -77,6 +84,10 @@ const MOTION_HALF: f64 = 0.25;
 const CUTS_HALF: f64 = 0.5;
 /// Stretches of the energy map and the loudness curve, at most.
 const MAX_BUCKETS: usize = 60;
+/// Points of the fingerprint's curves.
+pub const CURVE_POINTS: usize = 16;
+/// Bursts the fingerprint places, at most.
+const FINGERPRINT_BURSTS: usize = 8;
 /// Sound is measured at this rate, in chunks this long (0.1 s).
 const AUDIO_RATE: u32 = 48_000;
 const AUDIO_CHUNK: usize = 4_800;
@@ -89,6 +100,8 @@ const LOOK_FRAMES: usize = 12;
 const MAX_SHOTS_LISTED: usize = 500;
 const MAX_CUTS_LISTED: usize = 2000;
 const MAX_BURSTS_LISTED: usize = 100;
+/// The fingerprint's layout version.
+pub const FINGERPRINT_VERSION: u64 = 1;
 
 pub fn commands() -> Vec<CommandSpec> {
     vec![CommandSpec {
@@ -96,7 +109,7 @@ pub fn commands() -> Vec<CommandSpec> {
         label: "Measure Editing Style",
         menu: &[],
         shortcut: None,
-        params: r#"{"path":file? | "item":id? (a media item or a sequence) | "sequence":id? (exactly one),"from":seconds?,"to":seconds? (default the whole video),"fps":2..30=10 (frames analysed a second, never above the video's own rate)}"#,
+        params: r#"{"path":file? | "item":id? (a media item or a sequence) | "sequence":id? (exactly one),"from":seconds?,"to":seconds? (default the whole video),"fps":2..30=10 (frames analysed a second, never above the video's own rate),"summary":bool=false (only the fingerprint, about a kilobyte, to keep with an approved video)}"#,
         enabled: always,
         run,
         journal: false,
@@ -163,6 +176,8 @@ struct Analysis {
     palette_pixels: u64,
     looks: Vec<color_balance::Stats>,
     loudness: Value,
+    loudness_buckets: Vec<Option<f64>>,
+    integrated: Option<f64>,
 }
 
 /// The sound of the measured stretch: channels at [`AUDIO_RATE`] from a time, or why not.
@@ -460,9 +475,9 @@ fn analyse(
     let span = to.0.saturating_sub(from.0).max(1);
     let bucket = (span / MAX_BUCKETS as i64).max(TICKS_PER_SECOND);
     let buckets = (span.saturating_add(bucket - 1) / bucket).clamp(1, MAX_BUCKETS as i64 + 1) as usize;
-    let loudness = match audio {
-        None => json!({"measured": false, "reason": "the video has no sound"}),
-        Some(mut read) => measure_sound(&windows, from, bucket, buckets, &mut read).0,
+    let (loudness, loudness_buckets, integrated) = match audio {
+        None => (json!({"measured": false, "reason": "the video has no sound"}), Vec::new(), None),
+        Some(mut read) => measure_sound(&windows, from, bucket, buckets, &mut read),
     };
     Ok(Analysis {
         from,
@@ -482,6 +497,8 @@ fn analyse(
         palette_pixels,
         looks,
         loudness,
+        loudness_buckets,
+        integrated,
     })
 }
 
@@ -689,8 +706,111 @@ fn blur_of(a: &Analysis, shots: &[Shot], motion: &[Option<f64>]) -> (Option<f64>
     ((weight > 0.0).then(|| sum / weight), n)
 }
 
-/// Shot lengths, rates and bursts.
-fn rhythm_json(shots: &[Shot], lengths: &[f64], cut_count: usize, analysed: f64) -> Value {
+/// The values of `buckets` (each `bucket` long from the start of a `span`) at [`CURVE_POINTS`]
+/// points: the mean of the stretches each sixteenth covers.
+fn curve16(values: &[Option<f64>], span: i64, bucket: i64) -> Vec<Option<f64>> {
+    (0..CURVE_POINTS)
+        .map(|k| {
+            let a = i128::from(span) * k as i128 / CURVE_POINTS as i128;
+            let b = i128::from(span) * (k as i128 + 1) / CURVE_POINTS as i128;
+            let picked: Vec<f64> = values
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| {
+                    let s = i128::from(bucket) * *i as i128;
+                    let e = s + i128::from(bucket);
+                    e > a && s < b
+                })
+                .filter_map(|(_, v)| *v)
+                .collect();
+            (!picked.is_empty()).then(|| picked.iter().sum::<f64>() / picked.len() as f64)
+        })
+        .collect()
+}
+
+/// The local median shot length at [`CURVE_POINTS`] points of `[from, from + span)`: the shots
+/// overlapping each sixteenth (sampled gaps take their nearest measured neighbour).
+fn pace16(shots: &[Shot], from: i64, span: i64) -> Vec<Option<f64>> {
+    let mut out: Vec<Option<f64>> = (0..CURVE_POINTS)
+        .map(|k| {
+            let a = i128::from(from) + i128::from(span) * k as i128 / CURVE_POINTS as i128;
+            let b = i128::from(from) + i128::from(span) * (k as i128 + 1) / CURVE_POINTS as i128;
+            median_of(shots.iter().filter(|s| i128::from(s.end) > a && i128::from(s.start) < b).map(Shot::seconds).collect())
+        })
+        .collect();
+    for k in 0..out.len() {
+        if out.get(k).is_some_and(Option::is_none) {
+            let near = (1..CURVE_POINTS).find_map(|d| out.get(k.wrapping_sub(d)).copied().flatten().or_else(|| out.get(k + d).copied().flatten()));
+            if let Some(slot) = out.get_mut(k) {
+                *slot = near;
+            }
+        }
+    }
+    out
+}
+
+/// Write `v` with every object's keys sorted (the same text whatever map the build uses).
+fn canonical(v: &Value, out: &mut String) {
+    match v {
+        Value::Object(m) => {
+            let mut keys: Vec<&String> = m.keys().collect();
+            keys.sort();
+            out.push('{');
+            for (i, k) in keys.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                out.push_str(&Value::String((*k).clone()).to_string());
+                out.push(':');
+                if let Some(x) = m.get(*k) {
+                    canonical(x, out);
+                }
+            }
+            out.push('}');
+        }
+        Value::Array(a) => {
+            out.push('[');
+            for (i, x) in a.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                canonical(x, out);
+            }
+            out.push(']');
+        }
+        other => out.push_str(&other.to_string()),
+    }
+}
+
+/// The FNV-1a key of a fingerprint (its canonical JSON without `key`).
+pub fn fingerprint_key(fp: &Value) -> String {
+    let mut v = fp.clone();
+    if let Some(o) = v.as_object_mut() {
+        o.remove("key");
+    }
+    let mut text = String::new();
+    canonical(&v, &mut text);
+    let h = text.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |h, b| (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3));
+    format!("{h:016x}")
+}
+
+/// The rhythm of shots laid end to end over `span` seconds (`(start, seconds)`, in order): the
+/// fingerprint's lengths and rates, `pace` and burst places, as a measured video's would read.
+/// Direct and Quick Short describe their own plans with it (`reference.achieved` before a render).
+pub fn rhythm_of(shots: &[(f64, f64)], span: f64) -> Value {
+    let span_t = Tick::from_seconds_f64(span.max(0.0)).0.max(1);
+    let list: Vec<Shot> = shots
+        .iter()
+        .take(10_000)
+        .filter(|(s, l)| s.is_finite() && l.is_finite() && *l > 0.0)
+        .map(|(s, l)| Shot { start: Tick::from_seconds_f64(*s).0, end: Tick::from_seconds_f64(s + l).0, complete: true, window: 0, kind: "cut" })
+        .collect();
+    let lengths: Vec<f64> = list.iter().map(Shot::seconds).collect();
+    rhythm_json(&list, &lengths, 0, span_t, list.len().saturating_sub(1), span)
+}
+
+/// The rhythm part of a fingerprint.
+fn rhythm_json(shots: &[Shot], lengths: &[f64], from: i64, span: i64, cut_count: usize, analysed: f64) -> Value {
     let mut sorted = lengths.to_vec();
     sorted.retain(|x| x.is_finite());
     sorted.sort_by(f64::total_cmp);
@@ -705,15 +825,24 @@ fn rhythm_json(shots: &[Shot], lengths: &[f64], cut_count: usize, analysed: f64)
     let bursts = bursts_of(shots, quick);
     let burst_time: i64 = bursts.iter().map(|b| b.1.saturating_sub(b.0)).sum();
     let minutes = (analysed / 60.0).max(1e-9);
+    let at: Vec<Value> = bursts
+        .iter()
+        .take(FINGERPRINT_BURSTS)
+        .map(|b| {
+            let x = |t: i64| r3((t.saturating_sub(from)) as f64 / span.max(1) as f64);
+            json!([x(b.0), x(b.1), b.2])
+        })
+        .collect();
     json!({
         "cutsPerMinute": r2(cut_count as f64 / minutes),
         "shot": {"median": q(0.5), "p10": q(0.1), "p25": q(0.25), "p75": q(0.75), "p90": q(0.9), "mean": mean.map(r2), "cv": cv.map(r3), "count": sorted.len()},
-        "bursts": {"count": bursts.len(), "perMinute": r2(bursts.len() as f64 / minutes), "share": r3(Tick(burst_time).seconds() / analysed.max(1e-9)), "quickShot": r2(quick)},
+        "bursts": {"count": bursts.len(), "perMinute": r2(bursts.len() as f64 / minutes), "share": r3(Tick(burst_time).seconds() / analysed.max(1e-9)), "quickShot": r2(quick), "at": at},
+        "pace": pace16(shots, from, span).iter().map(|v| v.map(r2)).collect::<Vec<_>>(),
     })
 }
 
-/// The report of an analysis.
-fn report(a: &Analysis) -> Value {
+/// The report of an analysis (or its fingerprint alone, `summary`).
+fn report(a: &Analysis, summary: bool) -> Value {
     let span = a.to.0.saturating_sub(a.from.0).max(1);
     let analysed: f64 = a.windows.iter().map(|(x, y)| Tick(y.0.saturating_sub(x.0)).seconds()).sum::<f64>().max(1e-9);
     let fps = a.rate.as_f64();
@@ -721,7 +850,7 @@ fn report(a: &Analysis) -> Value {
     let complete: Vec<&Shot> = shots.iter().filter(|s| s.complete).collect();
     let lengths: Vec<f64> = if complete.is_empty() { shots.iter().map(Shot::seconds).collect() } else { complete.iter().map(|s| s.seconds()).collect() };
     let jump_count = a.cuts.iter().filter(|c| c.1 == "jump").count();
-    let rhythm = rhythm_json(&shots, &lengths, a.cuts.len(), analysed);
+    let rhythm = rhythm_json(&shots, &lengths, a.from.0, span, a.cuts.len(), analysed);
     let motion = motions(a);
     // ---- the energy map
     let bucket = (span / MAX_BUCKETS as i64).max(TICKS_PER_SECOND);
@@ -786,6 +915,30 @@ fn report(a: &Analysis) -> Value {
     let contrast = mean_of(&|s| Some(s.contrast));
     let saturation = mean_of(&|s| Some(s.saturation));
     let warmth = mean_of(&|s| s.grey.map(|g| (g[0] - g[2]) / (g[0] + g[1] + g[2]).max(1e-6) * 3.0));
+    // ---- the fingerprint
+    let curve = |v: &[Option<f64>], round: fn(f64) -> f64, minus: f64| -> Vec<Option<f64>> {
+        curve16(v, span, bucket).iter().map(|x| x.map(|x| round(x - minus))).collect()
+    };
+    let loud_curve = a.integrated.map(|i| curve(&a.loudness_buckets, r1, i));
+    let mut fp = json!({
+        "version": FINGERPRINT_VERSION,
+        "seconds": r2(Tick(span).seconds()),
+        "analysedSeconds": r2(analysed),
+        "cutsPerMinute": rhythm["cutsPerMinute"],
+        "shot": rhythm["shot"],
+        "jumpShare": r3(jump_count as f64 / a.cuts.len().max(1) as f64),
+        "bursts": {"perMinute": rhythm["bursts"]["perMinute"], "share": rhythm["bursts"]["share"], "at": rhythm["bursts"]["at"]},
+        "pace": rhythm["pace"],
+        "energy": curve(&energy, r2, 0.0),
+        "loudness": a.integrated.map(|i| json!({"integrated": r1(i), "range": a.loudness["rangeLu"], "curve": loud_curve})),
+        "stillness": r3(stillness),
+        "settle": settle_median.map(r2),
+        "cutOnMove": cut_on_move.map(r3),
+        "blur": blur.map(r3),
+        "palette": colours.iter().take(5).map(|c| c["hex"].clone()).collect::<Vec<_>>(),
+    });
+    let key = fingerprint_key(&fp);
+    fp["key"] = json!(key);
     let mut out = json!({
         "range": {"from": a.from.0, "to": a.to.0, "seconds": r3(Tick(span).seconds()), "capped": a.capped},
         "analysed": {
@@ -797,11 +950,15 @@ fn report(a: &Analysis) -> Value {
             "sampled": a.windows.len() > 1,
             "windows": a.windows.iter().map(|(x, y)| json!({"from": x.0, "to": y.0})).collect::<Vec<_>>(),
         },
+        "fingerprint": fp,
     });
     if a.failed > 0
         && let Some(o) = out["analysed"].as_object_mut()
     {
         o.insert("errors".into(), json!(a.errors));
+    }
+    if summary {
+        return out;
     }
     let extra = json!({
         "cuts": {
@@ -880,8 +1037,8 @@ pub fn measure(s: &Session, p: &Value) -> Result<Value> {
     if !p.is_object() {
         return Err(bad(CMD, "parameters must be an object: {path} or {item}"));
     }
-    if let Some(k) = p.as_object().and_then(|o| o.keys().find(|k| !matches!(k.as_str(), "path" | "item" | "sequence" | "from" | "to" | "fps"))) {
-        return Err(bad(CMD, format!("unknown parameter `{}`: path, item, sequence, from, to or fps", k.chars().take(64).collect::<String>())));
+    if let Some(k) = p.as_object().and_then(|o| o.keys().find(|k| !matches!(k.as_str(), "path" | "item" | "sequence" | "from" | "to" | "fps" | "summary"))) {
+        return Err(bad(CMD, format!("unknown parameter `{}`: path, item, sequence, from, to, fps or summary", k.chars().take(64).collect::<String>())));
     }
     let path = match p.get("path").filter(|v| !v.is_null()) {
         None => None,
@@ -913,10 +1070,14 @@ pub fn measure(s: &Session, p: &Value) -> Result<Value> {
             .filter(|f| f.is_finite() && (FPS_RANGE.0..=FPS_RANGE.1).contains(f))
             .ok_or_else(|| bad(CMD, format!("`fps` is frames a second, {} to {}", FPS_RANGE.0, FPS_RANGE.1)))?,
     };
+    let summary = match p.get("summary").filter(|v| !v.is_null()) {
+        None => false,
+        Some(v) => v.as_bool().ok_or_else(|| bad(CMD, "`summary` is true or false"))?,
+    };
     match input {
         Input::File(path) => {
             let src = s.media.open_file(&path, s.services.as_ref()).map_err(|e| bad(CMD, e.to_string()))?;
-            let mut v = measure_source(&src, from, to, fps)?;
+            let mut v = measure_source(&src, from, to, fps, summary)?;
             v["source"] = json!("file");
             v["path"] = json!(path);
             Ok(v)
@@ -927,13 +1088,13 @@ pub fn measure(s: &Session, p: &Value) -> Result<Value> {
                 return Err(bad(CMD, format!("item {} has no picture", item.0)));
             }
             let src = crate::vr360::analysis_view(s, item).ok_or_else(|| bad(CMD, "the item's media is offline or unreadable"))?;
-            let mut v = measure_source(&src, from, to, fps)?;
+            let mut v = measure_source(&src, from, to, fps, summary)?;
             v["source"] = json!("item");
             v["item"] = json!(item.0);
             Ok(v)
         }
         Input::Sequence(seq) => {
-            let mut v = measure_sequence(s, seq, from, to, fps)?;
+            let mut v = measure_sequence(s, seq, from, to, fps, summary)?;
             v["source"] = json!("sequence");
             v["sequence"] = json!(seq.0);
             Ok(v)
@@ -942,7 +1103,7 @@ pub fn measure(s: &Session, p: &Value) -> Result<Value> {
 }
 
 /// Measure an opened file or item.
-fn measure_source(src: &filmcraft_media::SharedSource, from: Option<f64>, to: Option<f64>, fps: f64) -> Result<Value> {
+fn measure_source(src: &filmcraft_media::SharedSource, from: Option<f64>, to: Option<f64>, fps: f64, summary: bool) -> Result<Value> {
     let info = src.info();
     let video = info.video.as_ref().ok_or_else(|| bad(CMD, "the video has no picture"))?;
     let (w, h) = (video.width.max(1), video.height.max(1));
@@ -968,13 +1129,13 @@ fn measure_source(src: &filmcraft_media::SharedSource, from: Option<f64>, to: Op
         },
         audio,
     )?;
-    let mut v = report(&analysis);
+    let mut v = report(&analysis, summary);
     v["reader"] = json!("media pool decoders (hardware where the host registered them)");
     Ok(v)
 }
 
 /// Measure sequence `seq` as rendered (GPU first) and mixed.
-fn measure_sequence(s: &Session, seq: ItemId, from: Option<f64>, to: Option<f64>, fps: f64) -> Result<Value> {
+fn measure_sequence(s: &Session, seq: ItemId, from: Option<f64>, to: Option<f64>, fps: f64, summary: bool) -> Result<Value> {
     let project = s.project.clone();
     let q = project.sequence(seq).ok_or_else(|| bad(CMD, "no such sequence"))?;
     q.check_bounds().map_err(|e| bad(CMD, e))?;
@@ -1033,7 +1194,7 @@ fn measure_sequence(s: &Session, seq: ItemId, from: Option<f64>, to: Option<f64>
         },
         audio,
     )?;
-    let mut v = report(&analysis);
+    let mut v = report(&analysis, summary);
     v["renderer"] = json!({"gpuFrames": on_gpu, "cpuFrames": on_cpu, "captions": false});
     Ok(v)
 }

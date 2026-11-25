@@ -5,7 +5,7 @@ use filmcraft_media::generators::GeneratorSource;
 use filmcraft_media::{DemoScene, Generator};
 use filmcraft_project::Label;
 use filmcraft_time::{FrameRate, Tick};
-use serde_json::json;
+use serde_json::{Value, json};
 
 use super::*;
 use crate::Session;
@@ -88,6 +88,14 @@ fn measured_cuts_shots_and_bursts_match_what_was_built() {
     assert!(r["palette"]["brightness"].as_f64().is_some());
     let renderer = &r["renderer"];
     assert_eq!(renderer["gpuFrames"].as_u64().unwrap() + renderer["cpuFrames"].as_u64().unwrap(), r["analysed"]["frames"].as_u64().unwrap());
+    // the fingerprint carries the same rhythm
+    let fp = &r["fingerprint"];
+    assert_eq!(fp["version"], FINGERPRINT_VERSION);
+    assert_eq!(fp["shot"]["median"], shots["median"]);
+    assert_eq!(fp["bursts"]["at"].as_array().unwrap().len(), 1);
+    let pace: Vec<f64> = fp["pace"].as_array().unwrap().iter().map(|v| v.as_f64().unwrap()).collect();
+    assert_eq!(pace.len(), CURVE_POINTS);
+    assert!(pace[4] < 1.0 && pace[0] > 2.0, "quick in the burst, slow at the start: {pace:?}");
 }
 
 /// A 192×108 still of a room with a bright square (the subject) at `x` of the width. Room 0 has a
@@ -137,7 +145,7 @@ fn a_jump_cut_keeps_its_framing_and_a_hard_cut_does_not() {
     assert_eq!(cuts.len(), 2, "{:#}", r["cuts"]);
     assert!((cuts[0].0 - 2.0).abs() < 0.11 && cuts[0].1 == "jump", "the subject moved in the same room: {cuts:?}");
     assert!((cuts[1].0 - 4.0).abs() < 0.11 && cuts[1].1 == "cut", "another room: {cuts:?}");
-    assert_eq!(r["cuts"]["jump"].as_u64(), Some(1));
+    assert_eq!((r["cuts"]["jump"].as_u64(), r["fingerprint"]["jumpShare"].as_f64()), (Some(1), Some(0.5)));
     assert!(r["stillness"]["ratio"].as_f64().unwrap() > 0.9, "stills hold still: {:#}", r["stillness"]);
     assert!(r["loudness"]["measured"] == false, "no sound on the timeline: {:#}", r["loudness"]);
 }
@@ -219,12 +227,59 @@ fn a_long_video_is_sampled_in_windows_within_the_frame_cap() {
     let src = GeneratorSource::new(Generator::Demo(DemoScene::Plasma), 64, 36, FrameRate::FPS_30, Tick::from_seconds_f64(1200.0));
     let pool = s.media.clone();
     let item = crate::demo::add_generator(std::sync::Arc::make_mut(&mut s.project), &pool, src, "long.mov", Label::Iris, None);
-    let r = s.execute(CMD, json!({"item": item.0, "fps": 2})).unwrap();
+    let r = s.execute(CMD, json!({"item": item.0, "fps": 2, "summary": true})).unwrap();
     assert_eq!(r["analysed"]["sampled"], false, "at 2 fps twenty minutes fit: {:#}", r["analysed"]);
-    let r = s.execute(CMD, json!({"item": item.0, "from": 0, "to": 900})).unwrap();
+    let r = s.execute(CMD, json!({"item": item.0, "from": 0, "to": 900, "summary": true})).unwrap();
     assert_eq!(r["analysed"]["sampled"], true, "{:#}", r["analysed"]);
     assert!(r["analysed"]["frames"].as_u64().unwrap() <= MAX_FRAMES as u64);
     assert!(r["analysed"]["seconds"].as_f64().unwrap() < 900.0);
+    assert!(r.get("shots").is_none(), "a summary is the fingerprint alone");
+}
+
+#[test]
+fn the_fingerprint_is_small_stable_and_keyed() {
+    let mut s = Session::default();
+    let items = demo_items(&mut s);
+    let (seq, _) = edit(&mut s, &items, &SHOTS[..5], false);
+    let a = s.execute(CMD, json!({"sequence": seq.0, "summary": true})).unwrap();
+    let b = s.execute(CMD, json!({"sequence": seq.0, "summary": true})).unwrap();
+    assert_eq!(a, b, "the same video measures the same");
+    let fp = &a["fingerprint"];
+    let text = serde_json::to_string(fp).unwrap();
+    assert!(text.len() < 2048, "{} bytes: {text}", text.len());
+    assert_eq!(fp["key"].as_str().unwrap(), fingerprint_key(fp));
+    assert_eq!(fp["key"].as_str().unwrap().len(), 16);
+    // the key does not depend on the order of the keys or on the key itself
+    let mut reordered = serde_json::Map::new();
+    let obj = fp.as_object().unwrap();
+    let mut keys: Vec<&String> = obj.keys().collect();
+    keys.reverse();
+    for k in keys {
+        reordered.insert(k.clone(), obj[k].clone());
+    }
+    reordered.insert("key".into(), json!("anything"));
+    assert_eq!(fingerprint_key(&Value::Object(reordered)), fp["key"].as_str().unwrap());
+    // and changes with the rhythm
+    let (other, _) = edit(&mut s, &items, &SHOTS[4..], false);
+    let c = s.execute(CMD, json!({"sequence": other.0, "summary": true})).unwrap();
+    assert_ne!(c["fingerprint"]["key"], fp["key"]);
+}
+
+#[test]
+fn the_rhythm_of_planned_shots_reads_like_a_measure() {
+    let shots = [(0.0, 2.0), (2.0, 0.4), (2.4, 0.4), (2.8, 0.4), (3.2, 2.0), (5.2, 2.0), (7.2, 0.8)];
+    let r = rhythm_of(&shots, 8.0);
+    assert_eq!(r["shot"]["count"], 7);
+    assert_eq!(r["shot"]["median"], 0.8);
+    assert_eq!(r["bursts"]["count"], 1, "{r:#}");
+    assert_eq!(r["bursts"]["at"][0][2], 3);
+    assert!((r["cutsPerMinute"].as_f64().unwrap() - 45.0).abs() < 1e-6, "{r}");
+    assert_eq!(r["pace"].as_array().unwrap().len(), CURVE_POINTS);
+    // hostile shots are left out, nothing panics
+    let r = rhythm_of(&[(f64::NAN, 1.0), (0.0, -1.0), (0.0, f64::INFINITY)], f64::NAN);
+    assert_eq!(r["shot"]["count"], 0);
+    assert!(r["shot"]["median"].is_null());
+    assert_eq!(rhythm_of(&[], 0.0)["shot"]["count"], 0);
 }
 
 #[test]
@@ -274,6 +329,7 @@ fn hostile_parameters_and_files_are_refused_without_a_panic() {
         json!({"sequence": seq.0, "from": "start"}),
         json!({"sequence": seq.0, "from": 1.5, "to": 0.5}),
         json!({"sequence": seq.0, "from": 30}),
+        json!({"sequence": seq.0, "summary": "yes"}),
         json!({"sequence": seq.0, "colour": true}),
     ] {
         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| s.execute(CMD, p.clone())));
