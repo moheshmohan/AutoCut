@@ -945,3 +945,7 @@ Still-image improvements from upstream craft-libs, ported into AutoCut's own cra
 - **AV121**: AVIF stills import (they were refused), decoded by AutoCut's own AV1 decoder: 8 and
   10-bit, grids, rotations, mirrors and crops, and their alpha; HEIC photos with an alpha image
   keep it too.
+- **AV122**: DNG and CinemaDNG frames decode and develop two to three times faster, with the same
+  output bit for bit; the DNG crate gains raw settings (`ProcessOptions`: white balance as shot or
+  by temperature and tint, exposure, demosaic quality, a reduced-resolution path) for a future
+  Raw panel.
