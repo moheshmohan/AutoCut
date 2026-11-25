@@ -59,7 +59,6 @@ only). "Tested" names the evidence.
 | **OpenEXR** | read + write | stills and sequences: scan-line and tiled (full-resolution level of mip-maps), single- and multi-part, none / RLE / ZIPS / ZIP / PXR24, half / float / uint, RGB(A) or Y(A), kept as linear float (#828); the main picture as compositing apps show it, else the richest named colour layer (renderer multilayer files), a lone channel as grey; no PIZ, B44, DWA or deep parts | sequences from the float compositor (half or 32-bit float, linear RGB / premultiplied RGBA in the working space, its chromaticities; uncompressed, RLE, ZIPS, ZIP or PXR24; #806, #874) | 80% |
 | **DPX** | read + write | yes: luma / RGB / RGBA, 8–16-bit, filled 10/12-bit, either byte order (#821); packed 10/12-bit, Y'CbCr 4:2:2 / 4:4:4 with or without alpha (#841); no RLE | sequences (10-bit RGB, BT.709; #779) | 90% |
 | Targa | read + write | yes: every image type, RLE, colour maps, 15–32-bit (#821) | sequences (24-bit, 32-bit with alpha; #779) | 95% |
-| HEIF / HEIC | read | no | — | 0% |
 | **Radiance HDR** | read | yes: RGBE, flat, old and new run-length scan lines, every axis order, kept as linear float (#1407); no XYZE, EXPOSURE / PRIMARIES lines ignored | — | 70% |
 | AI / EPS, ICO, PTL | read | no | — | 0% |
 
