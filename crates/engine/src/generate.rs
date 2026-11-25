@@ -1093,6 +1093,12 @@ fn image(s: &mut Session, p: &Value) -> Result<Value> {
     let (w, h) = run::size_for(&prov, want, aspect(s)).map_err(|e| bad(cmd, e))?;
     let wants = Ask { references: refs.len() + usize::from(frame_at.is_some()), transparent, negative: negative.is_some(), steps, ..Default::default() };
     run::ask(&prov, &wants).map_err(|e| bad(cmd, e))?;
+    // the playhead frame is a reference too (for a tool without a `capabilities` block, whose
+    // `maxReferences` alone limits it): counted with the others before it is added
+    let most = run::max_references(&prov);
+    if frame_at.is_some() && refs.len() >= most {
+        return Err(bad(cmd, format!("{} takes at most {most} references, the playhead frame among them", prov.name)));
+    }
     let mut taken = Vec::new();
     if let Some(t) = frame_at {
         let frame = frame_png(s, cmd, t, &dir, &taken)?;

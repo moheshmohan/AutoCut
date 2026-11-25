@@ -219,6 +219,7 @@ fn hostile_requests_are_refused_before_any_tool_runs() {
     let mut b = bench("hostile", &[image, plain, gone]);
     let items0 = b.s.project.items.len();
     let long = "x".repeat(MAX_PROMPT + 1);
+    let still = fixture.to_string_lossy().to_string();
     for (cmd, p, why) in [
         ("generate.image", json!({}), "is needed"),
         ("generate.image", json!({"prompt": "   "}), "is needed"),
@@ -231,6 +232,7 @@ fn hostile_requests_are_refused_before_any_tool_runs() {
         ("generate.image", json!({"prompt": "x", "references": ["/nonexistent/a.png"]}), "is not a file"),
         ("generate.image", json!({"prompt": "x", "references": [999_999]}), "not a media file"),
         ("generate.image", json!({"prompt": "x", "references": [1, 1, 1]}), "at most 2"),
+        ("generate.image", json!({"prompt": "x", "references": [still, still], "fromPlayhead": true}), "at most 2"),
         ("generate.image", json!({"prompt": "x", "provider": "plain", "fromPlayhead": true}), "takes no reference"),
         ("generate.image", json!({"prompt": "x", "seconds": 0}), "0.1 to"),
         ("generate.image", json!({"prompt": "x", "seconds": f64::MAX}), "0.1 to"),
