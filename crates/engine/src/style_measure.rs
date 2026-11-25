@@ -1105,6 +1105,9 @@ pub fn measure(s: &Session, p: &Value) -> Result<Value> {
 /// Measure an opened file or item.
 fn measure_source(src: &filmcraft_media::SharedSource, from: Option<f64>, to: Option<f64>, fps: f64, summary: bool) -> Result<Value> {
     let info = src.info();
+    if info.kind == filmcraft_media::MediaKind::Still {
+        return Err(bad(CMD, "a still picture has no editing to measure: give a video, or a sequence that uses it"));
+    }
     let video = info.video.as_ref().ok_or_else(|| bad(CMD, "the video has no picture"))?;
     let (w, h) = (video.width.max(1), video.height.max(1));
     let (a, b, capped) = range_of(from, to, info.duration)?;

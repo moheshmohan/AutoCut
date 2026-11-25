@@ -301,7 +301,12 @@ fn hostile_parameters_and_files_are_refused_without_a_panic() {
     let audio_only = crate::demo::add_generator(std::sync::Arc::make_mut(&mut s.project), &pool, tone, "tone.wav", Label::Iris, None);
     s.execute("file.newSequence", json!({"width": 64, "height": 36, "fps": 30})).unwrap();
     let empty = s.state.active_sequence.unwrap();
+    let photo = dir.join("photo.png");
+    image::RgbImage::from_fn(32, 18, |x, y| image::Rgb([(x * 8) as u8, (y * 14) as u8, 90])).save(&photo).unwrap();
+    let still_item = crate::commands::import_streamed(&mut s, photo.to_str().unwrap(), None).unwrap();
     for p in [
+        json!({"path": photo}),
+        json!({"item": still_item.0}),
         json!({}),
         json!(null),
         json!([1, 2]),
