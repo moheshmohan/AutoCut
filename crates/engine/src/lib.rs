@@ -134,6 +134,7 @@ pub mod speed_ramp;
 pub mod split_edit;
 pub mod stabilize;
 pub mod still_migration;
+pub mod style_measure;
 pub mod sync;
 pub mod taste;
 pub mod taste_history;
