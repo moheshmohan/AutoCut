@@ -1,6 +1,6 @@
 # Parity with Adobe Premiere Pro
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-10 · **Change:** major (full re-measure against Premiere Pro 2026 26.5.2; replaces the scorecard and estimate that lived in ROADMAP.md) · **Target:** Adobe Premiere Pro 2026 (26.5.2, macOS)
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-11-25 · **Change:** minor (H.264 High 10 / 4:2:2 and HEVC 4:2:2 decode in software; the last full re-measure was 2026-10-10) · **Target:** Adobe Premiere Pro 2026 (26.5.2, macOS)
 
 The authoritative assessment of how close FilmCraft is to Premiere Pro, and how much work is left.
 [ROADMAP.md](../ROADMAP.md) summarizes it; [gaps.md](gaps.md) lists every shortfall one at a time.
@@ -109,7 +109,7 @@ agent-hours to close the area to Premiere, sequential.
 |---|---|---|---|---|---|---|
 | Editing, timeline, trimming, multicam | 20% | ~90% | ~70% | 80–140 | Edit algebra, trim modes, Trim Monitor, multicam with audio sync, Premiere default keyboard (143 commands), Source playback and range dragging (10-08). Open: ripple-delete of a gap by column (#668), Backspace on gaps (#648), clip stretching (#653), deselect on empty space (#683), new tracks by dragging media (#483), Escape cancelling drags (#580 fixed), time remapping (#510), effects on a whole track (#623) | [ui-parity.md](ui-parity.md) |
 | Effects and transitions | 12% | 100% (measured) | ~60% | 80–140 | Every effect exists; Warp Stabilizer is 2-D, Auto Reframe approximate, Morph Cut morphs with optical flow but without face tracking (#805); Optical Flow time interpolation is motion compensated on the CPU (#780). 34 effect ids run on the GPU against ~82 of Premiere's ~92 marked Accelerated. No Object Mask (26.0, AI). | [hardware-parity.md](hardware-parity.md) |
-| Media import and codecs | 12% | ~75% | ~60% | 150–250 | Own bit-exact decoders for H.264, HEVC, VP9, AV1, ProRes, DNx, APV, MPEG-2, AAC, AC-3, Opus. But H.264 only 8-bit 4:2:0 and HEVC no 4:2:2 in software (most 10-bit cameras, #626); no camera RAW (R3D, ARRIRAW, BRAW, Sony RAW, Canon RAW, ProRes RAW, #345, #383); no E-AC-3 (#647), AVI (#598), WMV, DV, XAVC / P2 metadata; Sony start timecode (#460); WebM black (#432) | [codec-parity.md](codec-parity.md), [file-format-parity.md](file-format-parity.md) |
+| Media import and codecs | 12% | ~75% | ~60% | 150–250 | Own bit-exact decoders for H.264, HEVC, VP9, AV1, ProRes, DNx, APV, MPEG-2, AAC, AC-3, Opus. H.264 High 10 / 4:2:2 and HEVC 4:2:2 decode in software (AutoCut 0.14, AV99–AV100), but interlaced H.264 and 4:4:4 masters still need hardware (#626); no camera RAW (R3D, ARRIRAW, BRAW, Sony RAW, Canon RAW, ProRes RAW, #345, #383); no E-AC-3 (#647), AVI (#598), WMV, DV, XAVC / P2 metadata; Sony start timecode (#460); WebM black (#432) | [codec-parity.md](codec-parity.md), [file-format-parity.md](file-format-parity.md) |
 | Audio | 10% | ~88% | ~65% | 50–90 | Mixer graph, automation, all 53 effects, Essential Sound, 5.1, voice-over, Remix, multi-stream container audio (#361). Device and playback reports: crackle / cut-outs (#336, #410, #602, #605, #617); Enhance Speech is DSP; Voice Isolation and Enhance Voice run DeepFilterNet 3 (pure Rust, downloaded on consent); ALSA fallback fixed (#254) | |
 | Panels and UI fidelity | 10% | ~88% | ~60% | 120–200 | All main panels. Missing: on-screen transform handles in the Program monitor (#639), Effect Controls keyframe zoom / divider / row lines (#640–#645), docking rearrangement (#493), multi-monitor windows (#466), filmstrip thumbnails (#614), marquee in Project panel (#578) | [ui-parity.md](ui-parity.md) |
 | Colour | 8% | ~90% | ~70% | 40–70 | Lumetri complete incl. scopes, LUTs, colour management, HDR export. Lumetri on the GPU covers basic, creative and vignette only; HDR-aware Lumetri maths, macOS EDR display, D-Log M; a Lumetri report (#628) | |
@@ -211,7 +211,7 @@ full-area depth (e.g. the ~20 common effects rather than all 93 and their approx
 | Area | Weight | Depth | Why |
 |---|---|---|---|
 | Editing and trimming | 28% | 80% | Insert / overwrite, ripple / roll / slip / slide, razor, J/K/L, markers, multicam all work; gap deletion (#648, #668) and deselect (#683) are friction |
-| Importing everyday footage | 14% | 65% | Phone and 8-bit camera H.264 / HEVC, ProRes, DNx, MXF open; 10-bit / 4:2:2 H.264 (Sony XAVC S-I, Canon) does not (#626); E-AC-3, AVI missing |
+| Importing everyday footage | 14% | 65% | Phone and 8-bit camera H.264 / HEVC, ProRes, DNx, MXF open; 10-bit / 4:2:2 H.264 (Sony XAVC S-I, Canon) opens with AutoCut's own decoder; interlaced H.264 needs hardware (#626); E-AC-3, AVI missing |
 | Common effects and transitions | 9% | 75% | Lumetri, Transform, Crop, blurs, Cross Dissolve, keys exist; Warp Stabilizer is 2-D, Object Mask missing |
 | Colour (Lumetri, scopes, LUTs) | 9% | 80% | Complete, parity-tested CPU / GPU; curves / wheels on CPU |
 | Audio (levels, Essential Sound, loudness, ducking) | 11% | 75% | Complete; audio-device reports off macOS |
@@ -305,7 +305,7 @@ Distance to beta: ~19 points of ready-for-real-work plus `.prproj` import, ~400�
 |---|---|
 | `.prproj` import of mainstream projects (sequences, clips, effects' common parameters, markers) | 60–120 |
 | Stability: launch crashes, PR CI running `cargo xtask ci` on all three OSs, crash triage | 40–80 |
-| H.264 High 10 / 4:2:2 and HEVC 4:2:2 software decoding (camera media) | 30–50 |
+| Interlaced H.264 and 4:4:4 H.264 / HEVC software decoding (camera media; High 10 / 4:2:2 done) | 25–45 |
 | Real-world media corpus and scripted workflow acceptance tests | 40–70 |
 | UI fidelity top issues (Program monitor handles, Effect Controls, docking, deselect) | 60–100 |
 | Hardware: zero-copy, VideoToolbox Main 10, Quick Sync / AMF encode, more GPU effects | 60–100 |
@@ -313,7 +313,7 @@ Distance to beta: ~19 points of ready-for-real-work plus `.prproj` import, ~400�
 | Container gaps users hit: E-AC-3, AVI, multi-track audio, still formats | 30–50 |
 | Interchange validation (AAF / OMF in Avid and Pro Tools, XML speed) | 20–40 |
 | Performance: lag / CPU reports, AV1 speed | 30–60 |
-| **Total** | **~400–730** |
+| **Total** | **~395–725** |
 
 ## Calibration
 
