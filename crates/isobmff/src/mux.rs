@@ -508,14 +508,15 @@ fn write_trak(b: &mut BoxBuf, t: &WTrack, movie_ts: u32, qt: bool, shift: u64, f
         }
     }
     b.end(m);
-    let co64 = force_co64 || tb.chunks.iter().any(|&(o, _)| o + shift > u32::MAX as u64);
+    let co64 = force_co64 || tb.chunks.iter().any(|&(o, _)| o.saturating_add(shift) > u32::MAX as u64);
     let m = b.start_full(if co64 { b"co64" } else { b"stco" }, 0, 0);
     b.u32(tb.chunks.len() as u32);
     for &(o, _) in &tb.chunks {
+        let at = o.checked_add(shift).ok_or_else(past_the_last_position)?;
         if co64 {
-            b.u64(o + shift);
+            b.u64(at);
         } else {
-            b.u32((o + shift) as u32);
+            b.u32(at as u32);
         }
     }
     b.end(m);
@@ -598,6 +599,16 @@ fn validate_track(cfg: &TrackConfig) -> Result<Option<u32>> {
     Ok(None)
 }
 
+fn past_the_last_position() -> Error {
+    Error::Mux("the file would end past the last position".into())
+}
+
+/// The position after `bytes` more. A writer that takes bytes past the last position a file can
+/// have is an error here, not an overflow.
+fn advance(pos: u64, bytes: usize) -> Result<u64> {
+    u64::try_from(bytes).ok().and_then(|n| pos.checked_add(n)).ok_or_else(past_the_last_position)
+}
+
 /// Progressive MP4/MOV writer: `ftyp`, then one `mdat` streamed to `W`, then `moov` at [`finish`](Self::finish)
 /// (or moved in front of `mdat` by [`finish_faststart`](Self::finish_faststart)).
 pub struct Mp4Writer<W: Write + Seek> {
@@ -607,6 +618,9 @@ pub struct Mp4Writer<W: Write + Seek> {
     /// against the movie duration at finish.
     opts: Box<WriterOptions>,
     tracks: Vec<WTrack>,
+    /// The writer's position when the file was begun: chunk offsets count from here, the first
+    /// byte of the file, wherever in the writer that is.
+    start: u64,
     /// Offset of the placeholder box (8 bytes) preceding the mdat header.
     pad_pos: u64,
     mdat_pos: u64,
@@ -615,18 +629,23 @@ pub struct Mp4Writer<W: Write + Seek> {
 }
 
 impl<W: Write + Seek> Mp4Writer<W> {
-    /// Start a file: writes `ftyp`, a placeholder box and the `mdat` header.
+    /// Start a file at the writer's current position: writes `ftyp`, a placeholder box and the
+    /// `mdat` header. Chunk offsets count from that position, so a file begun mid-writer (after
+    /// other data in the same stream) is a valid file from there.
     pub fn new(mut w: W, opts: WriterOptions) -> Result<Self> {
         let start = w.stream_position()?;
         let mut b = BoxBuf::new();
         write_ftyp(&mut b, opts.brand, &opts.compatible_brands)?;
-        let pad_pos = start + b.len() as u64;
+        let pad = b.len();
         b.leaf(if opts.brand == Brand::Mov { b"wide" } else { b"free" }, &[]);
-        let mdat_pos = start + b.len() as u64;
+        let mdat = b.len();
         b.leaf(b"mdat", &[]);
+        // a writer positioned at the very end of what a position can count has no room for the
+        // header; the positions below are sums that would overflow
+        let pos = advance(start, b.len())?;
+        let (pad_pos, mdat_pos) = (advance(start, pad)?, advance(start, mdat)?);
         w.write_all(&b.buf)?;
-        let pos = start + b.len() as u64;
-        Ok(Mp4Writer { w, opts: Box::new(opts), tracks: Vec::new(), pad_pos, mdat_pos, pos, last_track: None })
+        Ok(Mp4Writer { w, opts: Box::new(opts), tracks: Vec::new(), start, pad_pos, mdat_pos, pos, last_track: None })
     }
 
     /// Add a track; returns its index (track ids are index + 1).
@@ -695,9 +714,11 @@ impl<W: Write + Seek> Mp4Writer<W> {
         if count == 0 {
             return Ok(());
         }
+        // checked before anything is written: a sample the file cannot hold leaves it as it was
+        let end = advance(self.pos, s.data.len())?;
         self.w.write_all(s.data)?;
-        let offset = self.pos;
-        self.pos += s.data.len() as u64;
+        let offset = self.pos - self.start;
+        self.pos = end;
         let contiguous = self.last_track == Some(track);
         self.last_track = Some(track);
         let tr = &mut self.tracks[track];
@@ -736,9 +757,10 @@ impl<W: Write + Seek> Mp4Writer<W> {
                 _ => 1,
             };
             let d = rescale(vd, vts, tts).max(tc_dur as u64).min(u32::MAX as u64) as u32;
+            let end = advance(self.pos, 4)?;
             self.w.write_all(&start.to_be_bytes())?;
-            let off = self.pos;
-            self.pos += 4;
+            let off = self.pos - self.start;
+            self.pos = end;
             self.last_track = None;
             let t = &mut self.tracks[i].t;
             t.stts.push((1, d));
@@ -813,8 +835,8 @@ impl<W: Write + Seek> Mp4Writer<W> {
         }
         t.comp_end = t.media_duration;
         let count = u32::try_from(chapters.len()).map_err(|_| Error::Mux("too many chapters".into()))?;
-        let off = self.pos;
-        let end = self.pos.checked_add(data.len() as u64).ok_or_else(|| Error::Mux("the file would end past the last position".into()))?;
+        let off = self.pos - self.start;
+        let end = advance(self.pos, data.len())?;
         self.w.write_all(&data)?;
         self.pos = end;
         t.chunks.push((off, count));
@@ -844,6 +866,7 @@ impl<W: Write + Seek> Mp4Writer<W> {
     pub fn finish(mut self) -> Result<W> {
         self.finish_mdat()?;
         let moov = self.build_moov(0, false)?;
+        advance(self.pos, moov.len())?;
         self.w.write_all(&moov)?;
         self.w.flush()?;
         Ok(self.w)
@@ -870,6 +893,7 @@ impl<W: Read + Write + Seek> Mp4Writer<W> {
         let shift = moov.len() as u64;
         let start = self.pad_pos;
         let end = self.pos;
+        let moved_end = advance(end, moov.len())?;
         let mut buf = vec![0u8; 1 << 20];
         let mut cur = end;
         while cur > start {
@@ -877,12 +901,12 @@ impl<W: Read + Write + Seek> Mp4Writer<W> {
             cur -= n as u64;
             self.w.seek(SeekFrom::Start(cur))?;
             self.w.read_exact(&mut buf[..n])?;
-            self.w.seek(SeekFrom::Start(cur + shift))?;
+            self.w.seek(SeekFrom::Start(cur.saturating_add(shift)))?;
             self.w.write_all(&buf[..n])?;
         }
         self.w.seek(SeekFrom::Start(start))?;
         self.w.write_all(&moov)?;
-        self.w.seek(SeekFrom::Start(end + shift))?;
+        self.w.seek(SeekFrom::Start(moved_end))?;
         self.w.flush()?;
         Ok(self.w)
     }
@@ -1480,5 +1504,80 @@ mod tests {
         let mut w = FragmentedWriter::new(Vec::new(), opts);
         w.add_track(TrackConfig::new(avc_entry(), 1000)).unwrap();
         assert!(matches!(w.finish(), Err(Error::Mux(_))));
+    }
+
+    /// A writer positioned where the header's end would pass `u64::MAX` is refused, not overflowed.
+    #[test]
+    fn a_writer_at_the_end_of_the_position_range_is_refused() {
+        for back in [0, 1, 10, 27] {
+            let mut bytes = [0u8; 8];
+            let mut sink = Cursor::new(&mut bytes[..]);
+            sink.set_position(u64::MAX - back);
+            assert!(matches!(Mp4Writer::new(sink, WriterOptions::new(Brand::Mp4)), Err(Error::Mux(_))), "{back} before the end");
+        }
+    }
+
+    /// A writer that keeps taking bytes where positions end makes writing fail, not overflow, and
+    /// the refused sample is not written.
+    #[test]
+    fn samples_past_the_last_position_are_refused() {
+        struct Endless(u64);
+        impl Write for Endless {
+            fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+                self.0 = self.0.wrapping_add(data.len() as u64);
+                Ok(data.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        impl Seek for Endless {
+            fn seek(&mut self, _: SeekFrom) -> std::io::Result<u64> {
+                Ok(self.0)
+            }
+        }
+        let mut w = Mp4Writer::new(Endless(u64::MAX - 100), WriterOptions::new(Brand::Mp4)).unwrap();
+        let v = w.add_track(TrackConfig::new(avc_entry(), 1000)).unwrap();
+        let sample = WriteSample { data: &[0; 40], duration: 40, composition_offset: 0, is_sync: true };
+        w.write_sample(v, sample).unwrap();
+        let before = w.w.0;
+        assert!(matches!(w.write_sample(v, sample), Err(Error::Mux(_))));
+        assert_eq!(w.w.0, before, "nothing of the refused sample was written");
+        // finishing past the end is refused too (the moov does not fit)
+        assert!(matches!(w.finish(), Err(Error::Mux(_))));
+    }
+
+    /// A file begun in the middle of a writer is a file from there: its chunk offsets count from
+    /// its own first byte, with `moov` at the end or in front, a timecode track and chapters.
+    #[test]
+    fn a_file_begun_mid_writer_has_offsets_from_its_start() {
+        let file = |prefix: usize, faststart: bool| {
+            let mut sink = Cursor::new(vec![0xAA; prefix]);
+            sink.set_position(prefix as u64);
+            let mut opts = WriterOptions::new(Brand::Mov);
+            opts.chapters = vec![Chapter { start: 0, title: "one".into() }];
+            let mut w = Mp4Writer::new(sink, opts).unwrap();
+            let v = w.add_track(TrackConfig::new(avc_entry(), 1000)).unwrap();
+            let tc = TimecodeConfig { timescale: 1000, frame_duration: 40, frames_per_second: 25, ..Default::default() };
+            w.add_timecode_track(v, tc, 7).unwrap();
+            for i in 0..4u8 {
+                w.write_sample(v, WriteSample { data: &[i + 1; 10], duration: 40, composition_offset: 0, is_sync: true }).unwrap();
+            }
+            let out = if faststart { w.finish_faststart() } else { w.finish() }.unwrap();
+            assert_eq!(out.position(), out.get_ref().len() as u64);
+            out.into_inner()
+        };
+        for faststart in [false, true] {
+            let (plain, offset) = (file(0, faststart), file(100, faststart));
+            assert!(offset[..100].iter().all(|&b| b == 0xAA));
+            assert!(offset[100..] == plain, "faststart {faststart}");
+            let f = crate::open(plain.as_slice()).unwrap();
+            assert_eq!(f.tracks.len(), 3);
+            for i in 0..4 {
+                assert_eq!(f.read_sample(plain.as_slice(), 0, i).unwrap(), vec![i as u8 + 1; 10]);
+            }
+            assert_eq!(f.read_sample(plain.as_slice(), 1, 0).unwrap(), 7u32.to_be_bytes());
+            assert_eq!(f.read_chapters(plain.as_slice()).unwrap(), vec![Chapter { start: 0, title: "one".into() }]);
+        }
     }
 }

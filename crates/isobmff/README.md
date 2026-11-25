@@ -102,7 +102,10 @@ let bytes = w.finish_faststart()?.into_inner(); // or finish() for moov-at-end
 - `Mp4Writer<W: Write + Seek>` streams samples into a single `mdat`. `finish()` appends `moov`.
   `finish_faststart()` (needs `W: Read + Write + Seek`) moves the media data forward in place and writes
   `moov` before it. If `mdat` goes past 4 GiB the header becomes a large-size header, and chunk offsets
-  switch to `co64` when needed.
+  switch to `co64` when needed. A file begins at the writer's position when `Mp4Writer::new` is called,
+  and its chunk offsets count from there, so a file written after other data in the same stream is a
+  valid file from its first byte. Every position sum is checked: a writer positioned too close to
+  `u64::MAX` for the header, a sample, or the `moov` is an error, and a refused sample is not written.
 - Brands: `Brand::Mp4` writes `isom` with `isom iso2 avc1 mp41 mp42`. `Brand::Mov` writes `qt  `, uses
   QuickTime `hdlr`/Pascal names, and sets `wide` as the placeholder box. `WriterOptions::compatible_brands`
   adds more after those (each brand once, at most `MAX_EXTRA_BRANDS` = 256 distinct ones, more is an
