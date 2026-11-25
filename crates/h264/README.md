@@ -88,7 +88,12 @@ reference has the format of the pictures predicted from it (a mismatch reads gre
 The picture-size limit (`params::MAX_PICTURE_BYTES`) counts every plane and the bytes per
 sample: the memory of an 8-bit 4:2:0 picture of 2^25 luma samples (8K). 10-bit 4:2:0 fits up to
 2^24 luma samples (4096x4096, 5.7K), 8-bit 4:2:2 up to 3 * 2^23 and 10-bit 4:2:2 up to 3 * 2^22
-(4096x3072, past every level 5.2 picture); larger ones are `Error::Unsupported`.
+(4096x3072, past every level 5.2 picture); larger ones are `Error::Unsupported`. A caller that
+decodes pictures past 8K raises the limit with `Decoder::set_max_picture_luma_samples` (in luma
+samples of an 8-bit 4:2:0 picture, default `params::MAX_LUMA_SAMPLES` = 2^25; the bytes are
+`params::picture_bytes_limit`), and the limit keeps counting bytes: at 2^26, 8-bit 4:2:0 fits up
+to 8192x8192 and 10-bit 4:2:2 up to 3 * 2^23 luma samples (6144x4096). It bounds one picture; the
+DPB holds up to 16 more.
 
 ### Threading model
 

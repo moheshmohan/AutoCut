@@ -6,12 +6,24 @@ use crate::picture::Format;
 use crate::tables::*;
 use filmcraft_bitstream::BitReader;
 
+/// The default picture-size limit, in luma samples of an 8-bit 4:2:0 picture
+/// ([`crate::Decoder::set_max_picture_luma_samples`]): 2^25 (8192 x 4096; 8K UHD fits).
+pub const MAX_LUMA_SAMPLES: u64 = 1 << 25;
+
 /// Maximum supported reconstructed picture size in bytes, every plane counted: the bytes of an
 /// 8-bit 4:2:0 picture of 2^25 luma samples (8K UHD fits comfortably), so hostile SPS dimensions
 /// cannot allocate full pictures and decoder work state. Deeper or 4:2:2 pictures get the same
 /// memory: 10-bit 4:2:0 up to 2^24 luma samples (5.7K), 10-bit 4:2:2 up to 3 * 2^22 (beyond any
-/// level 5.2 picture; 6K and 8K are refused).
+/// level 5.2 picture; 6K and 8K are refused). The default of [`picture_bytes_limit`].
 pub const MAX_PICTURE_BYTES: u64 = (1 << 25) * 3 / 2;
+
+/// The picture-size limit in bytes for a limit of `max_luma_samples`: the bytes of an 8-bit 4:2:0
+/// picture of that many luma samples, every plane counted ([`MAX_PICTURE_BYTES`] for
+/// [`MAX_LUMA_SAMPLES`]). A picture whose planes take more is refused, so a 10-bit picture (two
+/// bytes a sample) or a 4:2:2 one (twice the chroma) gets the same memory, not more.
+pub fn picture_bytes_limit(max_luma_samples: u64) -> u64 {
+    Format::YUV420_8.picture_bytes(max_luma_samples)
+}
 
 /// Scaling matrices after applying fall-back rules, stored in raster order (weightScale).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -556,12 +568,19 @@ impl Sps {
         6 * self.bit_depth_chroma.saturating_sub(8).min(8) as i32
     }
 
+    /// Whether this decoder handles the sequence, at the default picture-size limit.
     pub fn check_supported(&self) -> Result<()> {
+        self.check_supported_with_limit(MAX_PICTURE_BYTES)
+    }
+
+    /// [`Sps::check_supported`] with a picture-size limit of `max_picture_bytes` (every plane
+    /// counted, see [`picture_bytes_limit`]).
+    pub fn check_supported_with_limit(&self, max_picture_bytes: u64) -> Result<()> {
         if !self.frame_mbs_only {
             return unsupported("interlaced (field / MBAFF) coding");
         }
         let fmt = self.format()?;
-        if fmt.picture_bytes(u64::from(self.width()).saturating_mul(u64::from(self.height()))) > MAX_PICTURE_BYTES {
+        if fmt.picture_bytes(u64::from(self.width()).saturating_mul(u64::from(self.height()))) > max_picture_bytes {
             return unsupported("picture dimensions exceed the decoder memory limit");
         }
         if self.qpprime_y_zero_transform_bypass {

@@ -124,6 +124,9 @@ pub struct Decoder {
     in_flight: VecDeque<FrameRef>,
     max_in_flight: usize,
     threads: usize,
+    /// The picture-size limit in luma samples of an 8-bit 4:2:0 picture
+    /// ([`Decoder::set_max_picture_luma_samples`]).
+    max_luma_samples: u64,
     /// Draft mode: skip deblocking of non-reference pictures ([`Decoder::set_draft`]).
     draft: bool,
 }
@@ -185,6 +188,7 @@ impl Decoder {
             in_flight: VecDeque::new(),
             max_in_flight: threads.max(1) + 2,
             threads: workers,
+            max_luma_samples: crate::params::MAX_LUMA_SAMPLES,
             draft: false,
         }
     }
@@ -206,6 +210,23 @@ impl Decoder {
 
     pub fn draft(&self) -> bool {
         self.draft
+    }
+
+    /// The largest picture this decoder accepts, as the luma samples of an 8-bit 4:2:0 picture
+    /// (default [`crate::params::MAX_LUMA_SAMPLES`], 2^25: 8192 x 4096, 8K UHD fits). A sequence
+    /// whose pictures take more bytes than such a picture is refused as `Error::Unsupported`
+    /// before anything is allocated for it. Every plane and the bytes per sample are counted,
+    /// so a 10-bit or 4:2:2 picture gets the same memory, not more: at the default, 10-bit
+    /// 4:2:0 fits up to 2^24 luma samples and 10-bit 4:2:2 up to 3 * 2^22. Raise it for pictures
+    /// past 8K; it bounds one picture, the DPB holds up to 16 more. Applies to the slices fed
+    /// from now on.
+    pub fn set_max_picture_luma_samples(&mut self, samples: u64) {
+        self.max_luma_samples = samples;
+    }
+
+    /// The picture-size limit ([`Decoder::set_max_picture_luma_samples`]).
+    pub fn max_picture_luma_samples(&self) -> u64 {
+        self.max_luma_samples
     }
 
     /// Configure from an `avcC` (AVCDecoderConfigurationRecord) box payload.
@@ -379,7 +400,7 @@ impl Decoder {
         let Some((pps, sps)) = found else {
             return Err(Error::MissingParameterSet("PPS".into()));
         };
-        sps.check_supported()?;
+        sps.check_supported_with_limit(crate::params::picture_bytes_limit(self.max_luma_samples))?;
         if pps.num_slice_groups > 1 {
             return unsupported("slice groups (FMO)");
         }

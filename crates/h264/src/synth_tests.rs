@@ -967,6 +967,72 @@ fn the_picture_budget_counts_bytes_per_sample_and_every_plane() {
     assert!(parse(2, 2, (240, 135)).is_ok());
 }
 
+/// A caller past 8K raises the limit (`Decoder::set_max_picture_luma_samples`): at 2^26 the
+/// 8-bit 4:2:0 picture of 8192 x 8192 fits, and the limit still counts bytes, so 10-bit 4:2:2
+/// gets the memory of that picture (3 * 2^23 luma samples), not 2^26 samples at 2.7 times it.
+#[test]
+fn a_raised_picture_limit_still_counts_bytes_per_sample_and_every_plane() {
+    let parse = |chroma: u32, depth: u32, mbs: (u32, u32), samples: u64| {
+        let s = sps_fmt(chroma, (depth, depth), mbs, None);
+        crate::params::Sps::parse(&filmcraft_bitstream::unescape_rbsp(&s[5..])).unwrap().check_supported_with_limit(crate::params::picture_bytes_limit(samples))
+    };
+    let limit = |r: crate::Result<()>| matches!(r, Err(crate::Error::Unsupported(m)) if m.contains("memory limit"));
+    assert_eq!(crate::params::picture_bytes_limit(crate::params::MAX_LUMA_SAMPLES), crate::params::MAX_PICTURE_BYTES);
+    // 8-bit 4:2:0: refused at the default, 2^26 luma samples (8192 x 8192) at the raised limit
+    assert!(limit(parse(1, 0, (512, 257), crate::params::MAX_LUMA_SAMPLES)));
+    assert!(parse(1, 0, (512, 257), 1 << 26).is_ok());
+    assert!(parse(1, 0, (512, 512), 1 << 26).is_ok());
+    assert!(limit(parse(1, 0, (512, 513), 1 << 26)));
+    // 10-bit 4:2:0: 2^25 (8192 x 4096)
+    assert!(parse(1, 2, (512, 256), 1 << 26).is_ok());
+    assert!(limit(parse(1, 2, (512, 257), 1 << 26)));
+    // 10-bit 4:2:2: 3 * 2^23 (6144 x 4096)
+    assert!(parse(2, 2, (384, 256), 1 << 26).is_ok());
+    assert!(limit(parse(2, 2, (384, 257), 1 << 26)));
+    // the extremes neither overflow nor admit what they should not
+    assert!(limit(parse(1, 0, (1, 1), 0)));
+    assert!(parse(2, 2, (1024, 1024), u64::MAX).is_ok());
+}
+
+/// The decoder checks every sequence against its own limit: a 64 x 48 picture (3072 luma
+/// samples) decodes at the default and at a limit of 3072, and is refused one sample below;
+/// the same picture at 10-bit 4:2:2 takes 12288 bytes, which a limit of 3072 samples (4608
+/// bytes) refuses and one of 8192 samples (12288 bytes) admits.
+#[test]
+fn the_decoder_refuses_pictures_over_its_configured_limit() {
+    let stream = |f: Fmt, chroma: u32, depth: u32| {
+        let mut seed = 11u32;
+        let pic =
+            Pic { idr: true, frame_num: 0, ref_idc: 3, mbs: (0..NMB).map(|_| Some(pack_pcm(f, &random_pcm(f, &mut seed)))).collect(), ..Default::default() };
+        let mut s = sps_fmt(chroma, (depth, depth), (MB_W as u32, MB_H as u32), None);
+        s.extend(pps(true, false));
+        s.extend(slice_nal(&pic, true));
+        s
+    };
+    let run = |s: &[u8], samples: Option<u64>| {
+        let mut dec = Decoder::with_threads(1);
+        if let Some(n) = samples {
+            dec.set_max_picture_luma_samples(n);
+            assert_eq!(dec.max_picture_luma_samples(), n);
+        }
+        let first = dec.decode(s, 0).err();
+        let out = dec.flush();
+        (first.or_else(|| dec.take_error()), out.len())
+    };
+    let refused = |r: &(Option<crate::Error>, usize)| matches!(&r.0, Some(crate::Error::Unsupported(m)) if m.contains("memory limit")) && r.1 == 0;
+    let s8 = stream(Fmt { c422: false, bd_y: 8, bd_c: 8 }, 1, 0);
+    let luma = (MB_W * MB_H * 256) as u64;
+    assert_eq!(Decoder::with_threads(1).max_picture_luma_samples(), crate::params::MAX_LUMA_SAMPLES);
+    assert!(matches!(run(&s8, None), (None, 1)));
+    assert!(matches!(run(&s8, Some(luma)), (None, 1)));
+    assert!(refused(&run(&s8, Some(luma - 1))));
+    let s10 = stream(Fmt { c422: true, bd_y: 10, bd_c: 10 }, 2, 2);
+    assert!(matches!(run(&s10, None), (None, 1)));
+    assert!(refused(&run(&s10, Some(luma))));
+    assert!(matches!(run(&s10, Some(luma * 8 / 3)), (None, 1)));
+    assert!(refused(&run(&s10, Some(luma * 8 / 3 - 1))));
+}
+
 /// A sequence that switches sample format mid-stream (8-bit 4:2:0, then 10-bit 4:2:2 on a
 /// non-IDR picture, then a 10-bit IDR) flushes its references: the inter picture after the
 /// switch has none (an error, not a read of the old 8-bit frames as 16-bit; the picture it
