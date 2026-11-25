@@ -1000,6 +1000,8 @@ fn a_3d_scene_is_rendered_headless_and_its_frames_come_in_as_a_clip() {
         (json!({"objects": {"Cube": {"spin": 1}}}), "takes location"),
         (json!({"provider": "nope"}), "no generation tool"),
         (json!({"text": "x".repeat(MAX_PROMPT + 1)}), "longer than"),
+        // (a title the script would refuse once Blender runs is refused here, before)
+        (json!({"text": "x".repeat(crate::generate_scene::MAX_TEXT + 1)}), "at most 1000"),
     ] {
         let e = b.s.execute("generate.render3d", p.clone()).unwrap_err().to_string();
         assert!(e.contains(why), "{p}: {e}");

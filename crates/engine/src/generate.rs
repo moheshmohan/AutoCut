@@ -372,6 +372,9 @@ fn render3d(s: &mut Session, p: &Value) -> Result<Value> {
     };
     let scene = scene.map(|sc| scene3d::scene_file(&sc)).transpose().map_err(|e| bad(cmd, e))?;
     let text = text_p(cmd, p, "text")?;
+    if text.as_ref().is_some_and(|t| t.chars().count() > scene3d::MAX_TEXT) {
+        return Err(bad(cmd, format!("`text` is at most {} characters for a 3D title", scene3d::MAX_TEXT)));
+    }
     let texts = scene3d::texts_p(p).map_err(|e| bad(cmd, e))?;
     let objects = scene3d::objects_p(p).map_err(|e| bad(cmd, e))?;
     let camera = match p.get("camera") {

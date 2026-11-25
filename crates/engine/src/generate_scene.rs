@@ -33,7 +33,8 @@ pub const MAX_FRAME: u32 = 9999;
 /// The most a request to the script may weigh (it is one argument).
 const MAX_REQUEST: usize = 16 * 1024;
 const MAX_TEXTS: usize = 32;
-const MAX_TEXT: usize = 1000;
+/// The longest text a text object is given (the script takes no more).
+pub const MAX_TEXT: usize = 1000;
 const MAX_OBJECTS: usize = 64;
 /// The most a camera track file may weigh, and its most frames.
 const TRACK_MAX: u64 = 16 * 1024 * 1024;
