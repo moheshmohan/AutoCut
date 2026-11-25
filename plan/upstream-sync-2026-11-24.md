@@ -366,3 +366,4 @@ ported in one lane (own worktree and target, lane gate), behaviour only, into th
 | Commit | Port | craft-libs |
 |---|---|---|
 | AV160 | MP4/MOV chapter lists: `WriterOptions::chapters` writes a QuickTime chapter track and a Nero `chpl` list, `Mp4File::chpl_chapters` / `read_chapters` read them; exports write the sequence's chapter markers (MP4, MOV, M4A; an In/Out range counted from its start). `Mp4Writer` now holds its options boxed, so it does not grow with them | `7480fc2ac4` |
+| AV161 | Progressive Matroska index: `OpenOptions::index_limit`, `MkvFile::index_end` / `extend_index` (resumable after a failed read, no element read twice), `Demuxer::build_index` completes a limited index; element header peeks capped at the parent; the EBML magic needs 4 bytes, not the 64 KiB window. Nothing in the fork limits the index yet (the web build could) | `5b58973bc6` |

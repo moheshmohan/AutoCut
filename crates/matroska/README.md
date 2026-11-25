@@ -26,13 +26,23 @@ while let Some(p) = d.next_packet()? {        // file order, all tracks
 }
 ```
 
-- **Open** (`open`, `open_with(src, &OpenOptions { index, verify_crc })`): EBML header (DocType
+- **Open** (`open`, `open_with(src, &OpenOptions { index, verify_crc, index_limit })`): EBML header (DocType
   `matroska`/`webm`), the first Segment, and its level-1 elements: SeekHead (followed for elements
   after the clusters), Info, Tracks, Cues, Chapters, Tags, Attachments (listed; payload located by
   offset/size, never read). With `index: true` (default) every Cluster is scanned — element and block
   headers only, never frame payloads — to build per-track `Sample` tables (`offset`, `size`, `pts`,
   `duration`, `keyframe`, cluster, block offset, lace index) and keyframe lists. With `index: false`
   open stops at the first Cluster.
+- **Progressive index** (`index_limit: Some(offset)`): the scan stops at that byte offset, so a
+  source that has loaded only the front of the file opens at once. The first Cluster is always
+  scanned; later ones only if they end below the limit. `MkvFile::index_end` is `Some(offset)`
+  while the index is incomplete (`indexed` is `false`; the tables are exact for everything before
+  it; Cues and Tags after the scanned part are not read yet), and `MkvFile::extend_index(src, &opts)`
+  continues from there with a larger limit (`None`: to the end, which completes the index)
+  without rescanning. A read that fails part-way (data not loaded yet) can be retried: the
+  clusters scanned before it stay indexed and no element is read twice. `Demuxer::build_index`
+  (and so a seek without Cues) completes a limited index the same way. Element headers are never
+  read past their parent element.
 - **Timestamps.** Matroska ticks are `TimestampScale` ns (usually 1 ms); `Track::timebase` is that
   as a reduced fraction of a second. `pts` is in ticks, `pts_ns` in exact nanoseconds. `CodecDelay`
   is subtracted (RFC 9559), as FFmpeg does (Opus/Vorbis priming gives negative pts). Laced frames get
@@ -104,6 +114,10 @@ CRC-32, Chapters, Tags, Attachments, or content encodings.
   stream. Seeks (indexed, Cues-only, and index-on-demand) must land on the latest keyframe ≤ target.
   Our muxer's laced output (Xiph/EBML/fixed) is read back by ffprobe and compared the same way.
   A damaged file must resync and deliver the packets after the damage; truncated files must not fail.
+  An index built in steps (`index_limit`, `extend_index`) must equal one full open.
+- Progressive index (`src/index_limit_tests.rs`): limits before, inside and past clusters, extending in
+  steps and twice, a source that has loaded only a growing prefix (reads past it fail like the web
+  build's pending reads), a read failing at every position then resumed, truncation and bit flips.
 
 ## Limitations
 

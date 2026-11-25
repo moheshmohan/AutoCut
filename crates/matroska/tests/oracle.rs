@@ -134,12 +134,12 @@ fn h264_aac() {
     assert!(!f.cues.is_empty());
     assert!(!f.seek_head.is_empty());
     check_seeks(&bytes, OpenOptions::default(), v, &packets);
-    check_seeks(&bytes, OpenOptions { index: false, verify_crc: false }, v, &packets);
+    check_seeks(&bytes, OpenOptions { index: false, verify_crc: false, index_limit: None }, v, &packets);
     check_seeks(&bytes, OpenOptions::default(), a, &packets);
     // Read + Seek entry point and CRC verification (ffmpeg writes CRC-32 in level-1 elements)
     let d = Demuxer::from_reader(std::io::Cursor::new(bytes.clone())).unwrap();
     assert_eq!(d.file().tracks.len(), 2);
-    let crc = open_with(&bytes[..], &OpenOptions { index: true, verify_crc: true }).unwrap();
+    let crc = open_with(&bytes[..], &OpenOptions { index: true, verify_crc: true, index_limit: None }).unwrap();
     assert!(crc.crc_checked > 0);
     assert!(crc.crc_errors.is_empty());
     let kf = Demuxer::from_slice(&bytes).unwrap().keyframe_index(v).unwrap();
@@ -158,7 +158,7 @@ fn vp9_opus_webm() {
     let v = f.track_of_kind(TrackKind::Video).unwrap();
     assert!(matches!(f.tracks[v].codec, Codec::Vp9 { .. }));
     check_seeks(&bytes, OpenOptions::default(), v, &packets);
-    check_seeks(&bytes, OpenOptions { index: false, verify_crc: false }, v, &packets);
+    check_seeks(&bytes, OpenOptions { index: false, verify_crc: false, index_limit: None }, v, &packets);
 }
 
 #[test]
@@ -207,7 +207,7 @@ fn cues_at_front() {
     assert!(!f.cues.is_empty());
     assert!(f.clusters.len() >= 5);
     let v = f.track_of_kind(TrackKind::Video).unwrap();
-    check_seeks(&bytes, OpenOptions { index: false, verify_crc: false }, v, &packets);
+    check_seeks(&bytes, OpenOptions { index: false, verify_crc: false, index_limit: None }, v, &packets);
 }
 
 #[test]
@@ -218,8 +218,8 @@ fn live_stream_without_cues() {
     assert!(f.duration_ns().unwrap() > 1_900_000_000);
     let v = f.track_of_kind(TrackKind::Video).unwrap();
     // no cues: seeking builds the index by scanning clusters
-    check_seeks(&bytes, OpenOptions { index: false, verify_crc: false }, v, &packets);
-    let mut d = Demuxer::with_options(&bytes[..], OpenOptions { index: false, verify_crc: false }).unwrap();
+    check_seeks(&bytes, OpenOptions { index: false, verify_crc: false, index_limit: None }, v, &packets);
+    let mut d = Demuxer::with_options(&bytes[..], OpenOptions { index: false, verify_crc: false, index_limit: None }).unwrap();
     assert!(!d.file().indexed);
     assert!(!d.keyframe_index(v).unwrap().is_empty());
     assert!(d.file().indexed);
@@ -369,5 +369,29 @@ fn generate_fixtures() {
     for name in ALL_FIXTURES {
         let out = [fixture_dir().join(name)];
         filmcraft_testkit::fixtures::generate_and_report(&format!("matroska/{name}"), &out, || fixture(&ffmpeg, name));
+    }
+}
+
+/// An index built in steps (`index_limit`, then `extend_index` at each cluster's end and to the
+/// end) on ffmpeg's files (CRC-32 elements, SeekHead, Cues and Tags after the clusters, or Cues in
+/// front) equals the index of one full open.
+#[test]
+fn progressive_index_equals_a_full_open() {
+    for name in ["h264_aac.mkv", "vp9_opus.webm", "cues_front.mkv"] {
+        let Some((bytes, full, _)) = run(name) else { return };
+        let mut f = open_with(&bytes[..], &OpenOptions { index_limit: Some(0), ..Default::default() }).unwrap();
+        assert!(!f.indexed && f.index_end.is_some(), "{name}");
+        assert_eq!(f.clusters.len(), 1, "{name}: the first cluster is always scanned");
+        for c in &full.clusters {
+            f.extend_index(&bytes[..], &OpenOptions { index_limit: Some(c.end), ..Default::default() }).unwrap();
+        }
+        f.extend_index(&bytes[..], &OpenOptions::default()).unwrap();
+        assert!(f.indexed && f.index_end.is_none(), "{name}");
+        assert_eq!(f.clusters, full.clusters, "{name}");
+        for (a, b) in f.tracks.iter().zip(&full.tracks) {
+            assert_eq!(a.samples, b.samples, "{name}");
+        }
+        assert_eq!(f.cues, full.cues, "{name}");
+        assert_eq!(f.tags, full.tags, "{name}");
     }
 }

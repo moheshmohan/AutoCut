@@ -149,7 +149,7 @@ fn synthetic() -> Vec<u8> {
 #[test]
 fn synthetic_file() {
     let bytes = synthetic();
-    let f = open_with(&bytes[..], &OpenOptions { index: true, verify_crc: true }).unwrap();
+    let f = open_with(&bytes[..], &OpenOptions { index: true, verify_crc: true, index_limit: None }).unwrap();
     assert!(f.live);
     assert!(f.warnings.is_empty(), "{:?}", f.warnings);
     assert_eq!((f.crc_checked, f.crc_errors.len()), (1, 0));
@@ -198,11 +198,11 @@ fn synthetic_file() {
     let mut bad = bytes.clone();
     let title = bad.windows(9).position(|w| w == b"Synthetic").unwrap();
     bad[title] = b's';
-    let f = open_with(&bad[..], &OpenOptions { index: true, verify_crc: true }).unwrap();
+    let f = open_with(&bad[..], &OpenOptions { index: true, verify_crc: true, index_limit: None }).unwrap();
     assert_eq!(f.crc_errors.len(), 1);
 
     // seeking without index or cues builds the index
-    let mut d = Demuxer::with_options(&bytes[..], OpenOptions { index: false, verify_crc: false }).unwrap();
+    let mut d = Demuxer::with_options(&bytes[..], OpenOptions { index: false, verify_crc: false, index_limit: None }).unwrap();
     assert_eq!(d.file().tracks.len(), 2);
     assert_eq!(d.seek(0, 1_100_000_000).unwrap().pts, 1000);
     assert_eq!(d.seek(0, 1_130_000_000).unwrap().pts, 1120);
@@ -327,7 +327,7 @@ fn overlapping_seek_head_targets_are_read_once() {
     }
     f.resize(f.len() + pad, 0xEC);
     let src = Counting(&f, std::cell::Cell::new(0));
-    let file = open_with(&src, &OpenOptions { index: false, verify_crc: false }).unwrap();
+    let file = open_with(&src, &OpenOptions { index: false, verify_crc: false, index_limit: None }).unwrap();
     assert_eq!(file.seek_head.len(), n as usize);
     assert!(src.1.get() <= 4 * f.len() as u64, "read {} bytes of a {}-byte file", src.1.get(), f.len());
 }
@@ -483,7 +483,7 @@ fn damaged_before_a_cluster() -> Vec<u8> {
 #[test]
 fn building_the_index_gets_its_own_recovery_budget() {
     let f = damaged_before_a_cluster();
-    let opts = OpenOptions { index: false, verify_crc: false };
+    let opts = OpenOptions { index: false, verify_crc: false, index_limit: None };
     let one = open_with(&f[..], &OpenOptions::default()).unwrap();
     assert_eq!(one.tracks[0].samples.len(), 1, "one pass finds the cluster: {:?}", one.warnings);
     let mut d = Demuxer::with_options(&f[..], opts).unwrap();
@@ -508,7 +508,7 @@ fn packet_reading_keeps_its_recovery_budget_after_the_index_is_built() {
     write_unknown_size(&mut f, 8);
     el_uint(&mut f, TIMESTAMP, 10);
     el(&mut f, SIMPLE_BLOCK, &block(1, 0, 0x80, &[2]));
-    let mut d = Demuxer::with_options(&f[..], OpenOptions { index: false, verify_crc: false }).unwrap();
+    let mut d = Demuxer::with_options(&f[..], OpenOptions { index: false, verify_crc: false, index_limit: None }).unwrap();
     d.build_index().unwrap();
     assert_eq!(d.file().tracks[0].samples.len(), 2, "the index found both clusters: {:?}", d.file().warnings);
     let mut n = 0;
@@ -554,7 +554,7 @@ fn cue_position_past_the_file_falls_back_to_the_index() {
         let mut el_cues = Vec::new();
         el(&mut el_cues, CUES, &cues);
         bytes.splice(at..at, el_cues);
-        let mut d = Demuxer::with_options(bytes, OpenOptions { index: false, verify_crc: false }).unwrap();
+        let mut d = Demuxer::with_options(bytes, OpenOptions { index: false, verify_crc: false, index_limit: None }).unwrap();
         assert_eq!(d.file().cues.len(), 1);
         assert_eq!(d.seek(0, 0).unwrap().pts, 1000);
     }
