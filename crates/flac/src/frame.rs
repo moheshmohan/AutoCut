@@ -95,7 +95,8 @@ pub struct FrameSpec<'a> {
     pub channels: &'a [(&'a [i32], Subframe, u8)],
 }
 
-fn write_residual(w: &mut BitWriter, residual: &Residual, r: &[i64], block: usize, order: usize) {
+fn write_residual(w: &mut BitWriter, residual: &Residual, block: usize, order: usize) {
+    let r = &residual.folded;
     let wide = residual.wide();
     w.write_bits(u32::from(wide), 2);
     w.write_bits(u32::from(residual.partition_order), 4);
@@ -105,8 +106,8 @@ fn write_residual(w: &mut BitWriter, residual: &Residual, r: &[i64], block: usiz
     for (p, &k) in residual.params.iter().enumerate() {
         w.write_bits(u32::from(k), if wide { 5 } else { 4 });
         let n = if p == 0 { len.saturating_sub(order) } else { len };
-        for &v in r.get(start..start + n).unwrap_or_default() {
-            let u = if v >= 0 { (v as u64) << 1 } else { ((-v - 1) as u64) << 1 | 1 };
+        for &u in r.get(start..start + n).unwrap_or_default() {
+            let u = u64::from(u);
             let mut q = u >> k;
             while q >= 32 {
                 w.write_bits(0, 32);
@@ -153,8 +154,7 @@ fn write_coded(w: &mut BitWriter, x: &[i32], sub: &Subframe, bps: u8, wasted: u8
             header(w, 0b001000 | u32::from(*order));
             let o = usize::from(*order);
             x.iter().take(o).for_each(|&v| sample(w, v));
-            let r = crate::predict::fixed_residual(x, o).unwrap_or_default();
-            write_residual(w, residual, &r, x.len(), o);
+            write_residual(w, residual, x.len(), o);
         }
         Subframe::Lpc { coefs, precision, shift, residual } => {
             let o = coefs.len();
@@ -163,8 +163,7 @@ fn write_coded(w: &mut BitWriter, x: &[i32], sub: &Subframe, bps: u8, wasted: u8
             w.write_bits(u32::from(*precision) - 1, 4);
             w.write_bits(u32::from(*shift), 5);
             coefs.iter().for_each(|&c| w.write_bits(c as u32, u32::from(*precision)));
-            let r = crate::predict::lpc_residual(x, coefs, *shift).unwrap_or_default();
-            write_residual(w, residual, &r, x.len(), o);
+            write_residual(w, residual, x.len(), o);
         }
         // `choose` does not nest them
         Subframe::Wasted { coded, .. } => write_coded(w, x, coded, bps, wasted),

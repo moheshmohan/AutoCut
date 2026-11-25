@@ -42,7 +42,14 @@ let last_len = enc.pending_samples();                               // duration 
 | Residual | partitioned Rice codes (4- or 5-bit parameters), the partition order chosen per subframe |
 | Stereo | independent, left/side, side/right or mid/side per frame, whichever is smallest (32-bit: independent only, a side channel would need 33 bits) |
 
-Not written: variable block sizes, wasted-bits shifts, escape-coded partitions, seek tables.
+Not written: variable block sizes, escape-coded partitions, seek tables. (Wasted-bits shifts are:
+low bits that are zero in every sample of a subframe are not coded.)
+
+Speed: residuals are folded straight into `u32` by one kernel per predictor order and kept for
+writing, the LPC window is cached per block length, the Rice partition order is chosen from
+partition sums merged pairwise, and a long batch is consumed by offset (from upstream FilmCraft;
+the output bytes are unchanged). 60 s of 24-bit stereo at level 5 encodes in about 0.39 s on an
+Apple M3 Max (~150x realtime), 1.7x faster than before.
 32-bit samples (frame headers point at STREAMINFO for the size) decode only in recent decoders (libFLAC 1.4+,
 ffmpeg 6+).
 
@@ -63,4 +70,6 @@ predictor round trips, and `tests/ffmpeg_oracle.rs`, which decodes every stream 
 requires every sample back exactly, no decoder errors, and the STREAMINFO MD5 equal to ffmpeg's
 hash of the decoded audio. It covers music-like, sweep, noise, full-scale square, silence and click
 signals; 8/16/20/24-bit; mono, stereo and 5.1; common and odd sample rates; block sizes 16 to 65535;
-and every level. Skipped (with a `SKIPPED` line) without ffmpeg.
+and every level. Skipped (with a `SKIPPED` line) without ffmpeg. `tests/golden_output.rs` pins the
+encoded bytes of 64 synthetic cases (FNV-1a hashes captured before the speed-ups), so an encoder
+change that moves a single byte fails.

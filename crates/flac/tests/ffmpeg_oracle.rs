@@ -259,3 +259,14 @@ fn the_channel_mask_comment_sets_the_layout_decoders_read() {
     assert_eq!(layout("mask-side-5.1", 6, Some(0x60F)), "5.1(side)", "no comment is needed");
     assert_eq!(layout("mask-stereo", 2, Some(0x3)), "stereo");
 }
+
+/// One large batch encodes exactly like many small ones. (Blocks used to be drained from the front of the
+/// buffer, moving the rest every frame; a timing check of that belongs in a benchmark, not a default test.)
+#[test]
+fn one_large_batch_matches_small_batches() {
+    let n = 48_000 * 60;
+    let planar: Vec<Vec<i32>> = (0..2).map(|c| (0..n).map(|i| ((i * 7 + c * 13) % 2000) as i32 - 1000).collect()).collect();
+    let cfg = || EncoderConfig { level: 0, ..EncoderConfig::new(48_000, 2, 16) };
+    let whole = encode(&planar, cfg(), n).unwrap();
+    assert_eq!(whole, encode(&planar, cfg(), 4_801).unwrap());
+}
