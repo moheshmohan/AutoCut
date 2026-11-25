@@ -35,7 +35,8 @@
 //! **What comes back.** `shots` (id `shot-01`…, chapter, start, end, duration, frames, the shown
 //! and spoken text, hints, sentences, subtitles), `chapters` (title, start, end, its shots),
 //! `subtitles` (with `words`), `markers` (a chapter marker at each chapter start, named by its
-//! title, and a comment marker `shot-NN` at each shot start, its comment the shot's first hint)
+//! title, and a comment marker `shot-NN` spanning each shot, its comment the first hint, which
+//! `script.shots` reads)
 //! and `narration` (speech, gaps, how many sentences came from the caches). With `out` (a new or
 //! empty folder): `timeline.json` and one `shot-NN.json` a shot, times relative to the shot in
 //! seconds and frames, for the composition that draws it. With `place`: in one undo step a new
@@ -500,6 +501,16 @@ struct Shot {
     end: Tick,
     speech: Tick,
     placed: Vec<Placed>,
+}
+
+/// A marker to place: a chapter's start, or a shot's span.
+#[derive(Clone, Debug)]
+struct MarkerPlan {
+    start: Tick,
+    duration: Tick,
+    kind: MarkerKind,
+    name: String,
+    comment: String,
 }
 
 /// The gaps, seconds.
@@ -972,19 +983,28 @@ fn run(s: &mut Session, p: &Value) -> Result<Value> {
                 "words": b.words.iter().map(|(w, a, e)| json!({"text": w, "start": a.0, "end": e.0})).collect::<Vec<_>>()})
         })
         .collect();
-    let mut markers: Vec<(Tick, MarkerKind, String, String)> = Vec::new();
+    // a chapter marker at each chapter start (named by its title; an untitled chapter's is
+    // unnamed), and a shot marker spanning each shot (its comment the first hint)
+    let mut markers: Vec<MarkerPlan> = Vec::new();
     for (ci, c) in chapters.iter().enumerate() {
         if let Some(first) = shots.iter().find(|x| x.chapter == ci) {
-            let name = if c.title.is_empty() { format!("Chapter {}", ci + 1) } else { c.title.clone() };
-            markers.push((first.start, MarkerKind::Chapter, name, String::new()));
+            markers.push(MarkerPlan { start: first.start, duration: Tick::ZERO, kind: MarkerKind::Chapter, name: c.title.clone(), comment: String::new() });
         }
     }
     for (i, sh) in shots.iter().enumerate() {
-        markers.push((sh.start, MarkerKind::Comment, shot_id(i), sh.hints.first().cloned().unwrap_or_default()));
+        markers.push(MarkerPlan {
+            start: sh.start,
+            duration: sh.end - sh.start,
+            kind: MarkerKind::Comment,
+            name: shot_id(i),
+            comment: sh.hints.first().cloned().unwrap_or_default(),
+        });
     }
     let markers_json: Vec<Value> = markers
         .iter()
-        .map(|(t, k, n, c)| json!({"start": t.0, "kind": if *k == MarkerKind::Chapter { "chapter" } else { "shot" }, "name": n, "comment": c}))
+        .map(|m| {
+            json!({"start": m.start.0, "duration": m.duration.0, "kind": if m.kind == MarkerKind::Chapter { "chapter" } else { "shot" }, "name": m.name, "comment": m.comment})
+        })
         .collect();
     let speech: Tick = spoken.iter().fold(Tick::ZERO, |a, x| a + x.duration);
     let cached = spoken.iter().filter(|x| x.cached).count();
@@ -1141,7 +1161,7 @@ fn place_timeline(
     shots: &[Shot],
     spoken: &[Spoken],
     subs: &[Block],
-    markers: &[(Tick, MarkerKind, String, String)],
+    markers: &[MarkerPlan],
     sentence_gap: Tick,
     total: Tick,
     size: (u32, u32),
@@ -1240,15 +1260,15 @@ fn place_timeline(
     // ---- chapter and shot markers
     if opts.markers {
         let n = s.edit_sequence("Script Markers", |q, ctx, _| {
-            for (t, kind, name, comment) in markers {
-                let color = if *kind == MarkerKind::Chapter { Label::Violet } else { Label::Cerulean };
+            for m in markers {
+                let color = if m.kind == MarkerKind::Chapter { Label::Violet } else { Label::Cerulean };
                 q.markers.push(Marker {
                     id: MarkerId(ctx.alloc()),
-                    start: at + *t,
-                    duration: Tick::ZERO,
-                    name: name.clone(),
-                    comment: comment.clone(),
-                    kind: *kind,
+                    start: at + m.start,
+                    duration: m.duration,
+                    name: m.name.clone(),
+                    comment: m.comment.clone(),
+                    kind: m.kind,
                     color,
                 });
             }

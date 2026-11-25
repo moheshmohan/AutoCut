@@ -12,10 +12,10 @@ use serde_json::{Value, json};
 
 use super::*;
 
-struct Bench {
+pub(crate) struct Bench {
     _turn: MutexGuard<'static, ()>,
-    dir: PathBuf,
-    s: Session,
+    pub(crate) dir: PathBuf,
+    pub(crate) s: Session,
 }
 
 const CHECK_REPORT: &str = r#"{"file":"motion.tsx","fps":30.0,"findings":[
@@ -124,7 +124,7 @@ fn write_providers(body: &str) {
 
 /// A session with the demo project open, a stand-in RAEA named in providers.json, the fixtures
 /// and a composition file.
-fn bench(name: &str) -> Bench {
+pub(crate) fn bench(name: &str) -> Bench {
     let turn = run::LIST_TURN.lock().unwrap_or_else(PoisonError::into_inner);
     let dir = std::env::temp_dir().join(format!("fc-motion-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -140,13 +140,13 @@ fn bench(name: &str) -> Bench {
 }
 
 impl Bench {
-    fn source(&self) -> String {
+    pub(crate) fn source(&self) -> String {
         self.dir.join("comp").join("motion.tsx").to_string_lossy().into_owned()
     }
     fn out(&self, name: &str) -> PathBuf {
         self.dir.join("fx").join(name)
     }
-    fn calls(&self) -> Vec<String> {
+    pub(crate) fn calls(&self) -> Vec<String> {
         std::fs::read_to_string(self.dir.join("calls.log")).unwrap_or_default().lines().map(str::to_string).collect()
     }
     fn fixture(&self, name: &str) -> PathBuf {

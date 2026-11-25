@@ -59,6 +59,8 @@ pub const MAX_RECIPE_BYTES: usize = 256 * 1024;
 pub const MAX_STEPS: usize = 64;
 /// Most parameters of a recipe.
 pub const MAX_PARAMS: usize = 32;
+/// Longest text parameter (a script), bytes.
+pub const MAX_TEXT_PARAM: usize = 64 * 1024;
 /// Largest step parameters (serialized).
 const MAX_STEP_PARAMS_BYTES: usize = 64 * 1024;
 /// Deepest nesting of step parameters.
@@ -72,8 +74,8 @@ const MAX_JOB_WAIT: Duration = Duration::from_secs(6 * 3600);
 
 /// Command families a recipe may run (checked for every command step and every command an
 /// intent plans): editing, transcripts, captions, effects, sound, graphics, narration, markers,
-/// applying templates, exporting and publishing. Never preferences, the app, the UI, jobs or
-/// other recipes.
+/// applying templates, explainer scripts (`script.*`), the review packet, exporting and
+/// publishing. Never preferences, the app, the UI, jobs or other recipes.
 pub const ALLOWED: &[&str] = &[
     "delivery.preflight",
     "delivery.prepare",
@@ -107,6 +109,8 @@ pub const ALLOWED: &[&str] = &[
     "publish.preflight",
     "publish.fixCopy",
     "autocut.makeShowcase",
+    "script.",
+    "review.packet",
 ];
 
 /// Whether a recipe may run command `id`.
@@ -343,7 +347,9 @@ impl Param {
                 }
                 _ => false,
             },
-            ParamKind::Text | ParamKind::Path | ParamKind::Template => v.as_str().is_some_and(|s| s.len() <= 4096 && !s.contains('\0')),
+            // a text may hold a script (64 KB); a path or a template id is short
+            ParamKind::Text => v.as_str().is_some_and(|s| s.len() <= MAX_TEXT_PARAM && !s.contains('\0')),
+            ParamKind::Path | ParamKind::Template => v.as_str().is_some_and(|s| s.len() <= 4096 && !s.contains('\0')),
             ParamKind::Choice => match v.as_str() {
                 Some(s) if self.choices.iter().any(|c| c == s) => true,
                 Some(s) => return Err(format!("`{s}` is not one of {}", self.choices.join(", "))),
@@ -812,6 +818,39 @@ pub fn builtin_json() -> Vec<Value> {
             "description":"Check privacy at cuts, changed narration, subtitle alignment, screens, motion and audio continuity before a cached 4K delivery. No upload.",
             "params":[{"id":"output","name":"New output file","kind":"path","default":""},{"id":"short","name":"Short with burned captions","kind":"bool","default":false},{"id":"qa","name":"Explicit QA policy","kind":"json","default":{}}],
             "steps":[{"label":"Quality gate and 4K export","command":"delivery.prepare","params":{"path":"${output}","short":"${short}","qa":"${qa}"}}]}),
+        // PX7.4: a researched script to a checked explainer (the idea after anything2explainer,
+        // written fresh); research and writing are the agent's, so it starts from the script
+        json!({
+            "format": FORMAT, "formatVersion": 1, "id": "builtin:topic-explainer", "name": "Topic to explainer",
+            "description": "From a researched script to a checked explainer: the script read (markup and limits) and its facts checked against their sources, the narration spoken and laid out as shots, subtitles, chapters and markers in a new sequence, one composition a shot (RAEA when there are compositions and it is installed, else cards), a chapter bar, the explainer's craft and motion checks, a review packet and the delivery pre-flight. No export, no upload.",
+            "params": [
+                {"id": "script", "name": "Script", "kind": "text", "default": "", "help": "In script.timeline's markup: `# Chapter` headings, blank-line paragraphs (one a shot), [shot: …] hints for the picture (names and numbers go there, not in the voice), [pause 1s]. At most 64 KB."},
+                {"id": "title", "name": "Sequence name", "kind": "text", "default": "Explainer"},
+                {"id": "voice", "name": "Voice", "kind": "text", "default": "basic-female", "help": "A voice of tts.voices, or a cloned voice (clone:<name>)."},
+                {"id": "language", "name": "Language", "kind": "choice", "choices": ["en-US", "ml-IN"], "default": "en-US"},
+                {"id": "delivery", "name": "Delivery", "kind": "choice", "choices": ["plain", "conversational", "warm", "excited", "amazed", "curious", "calm", "dramatic"], "default": "warm"},
+                {"id": "width", "name": "Width", "kind": "number", "default": 1920, "min": 16, "max": 16384},
+                {"id": "height", "name": "Height", "kind": "number", "default": 1080, "min": 16, "max": 16384},
+                {"id": "fps", "name": "Frame rate", "kind": "number", "default": 30, "min": 1, "max": 120},
+                {"id": "source", "name": "Compositions (RAEA)", "kind": "path", "default": "", "help": "An absolute .tsx or .html with one composition a shot, named shot-01…, written from script.timeline's shot files. Empty: cards."},
+                {"id": "renders", "name": "Render folder", "kind": "path", "default": "", "help": "A new or empty folder for the compositions' renders (with a source)."},
+                {"id": "facts", "name": "Fact ledger", "kind": "json", "default": null, "help": "Every figure and claim the film states, each {\"text\", \"source\"}. Empty: the ledger checks are skipped here, and the pre-flight reads build/facts.json beside the project."},
+                {"id": "chapterBar", "name": "Chapter bar", "kind": "bool", "default": true},
+                {"id": "review", "name": "Review packet", "kind": "bool", "default": true, "help": "The finish reviewer's packet in build/review beside the project: save the project first."},
+            ],
+            "steps": [
+                {"label": "Read the script (markup and limits, no voice yet)", "command": "script.timeline", "params": {"text": "${script}", "language": "${language}", "estimate": true}},
+                {"label": "Check the script's facts against their sources", "command": "script.factLedger", "params": {"text": "${script}", "facts": "${facts}"}, "when": "facts"},
+                {"label": "Voice and timeline", "command": "script.timeline", "params": {"text": "${script}", "voice": "${voice}", "language": "${language}", "delivery": "${delivery}", "place": {"sequence": "new", "name": "${title}", "width": "${width}", "height": "${height}", "fps": "${fps}"}}},
+                {"label": "One composition a shot", "command": "script.shots", "params": {"source": "${source}", "output": "${renders}"}},
+                {"label": "Chapter bar", "command": "graphics.chapterBar", "params": {}, "when": "chapterBar"},
+                {"label": "Craft checks (explainer rules)", "command": "sequence.checkCraft", "params": {"explainer": true}},
+                {"label": "Motion checks (explainer rules)", "command": "sequence.checkMotion", "params": {"explainer": true}},
+                {"label": "Facts on screen", "command": "script.factLedger", "params": {"facts": "${facts}"}, "when": "facts"},
+                {"label": "Review packet", "command": "review.packet", "params": {}, "when": "review"},
+                {"label": "Delivery pre-flight", "command": "delivery.preflight", "params": {"explainer": true, "facts": "${facts}"}},
+            ],
+        }),
     ]
 }
 
@@ -1178,7 +1217,7 @@ fn run(s: &mut Session, p: &Value) -> Result<Value> {
 }
 
 /// Serve the job's commands until it finishes (a `wait: true` call: nobody else pumps the port).
-fn wait_for(s: &mut Session, job: u64) {
+pub(crate) fn wait_for(s: &mut Session, job: u64) {
     loop {
         let done = s.jobs.iter().find(|j| j.id == job).is_none_or(|j| j.progress.finished.load(Ordering::Relaxed));
         if done {
@@ -1332,7 +1371,7 @@ fn run_command(
 }
 
 /// Wait for job `job` (started by a step), polling `jobs.list` through the port.
-fn wait_job(job: u64, port: &CommandPort, prog: &Arc<filmcraft_export::Progress>, base: u64) -> std::result::Result<Value, String> {
+pub(crate) fn wait_job(job: u64, port: &CommandPort, prog: &Arc<filmcraft_export::Progress>, base: u64) -> std::result::Result<Value, String> {
     let t0 = web_time::Instant::now();
     loop {
         if port.cancelled() {

@@ -45,6 +45,7 @@ pub mod elements;
 pub mod embed;
 pub mod essential_sound;
 pub mod explainer;
+pub mod explainer_shots;
 pub mod export_tools;
 pub mod faces;
 pub mod fact_ledger;

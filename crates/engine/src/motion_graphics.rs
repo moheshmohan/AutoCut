@@ -1404,4 +1404,4 @@ fn land_render(s: &mut Session, q: &Pending, alpha: bool, v: &Value) -> Result<V
 
 #[cfg(test)]
 #[path = "motion_graphics_tests.rs"]
-mod tests;
+pub(crate) mod tests;

@@ -87,7 +87,13 @@ fn the_built_in_recipes_read_and_check() {
     assert_eq!(all.len(), builtin_json().len());
     assert_eq!(
         all.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
-        ["builtin:talking-head-clean-up", "builtin:vertical-short", "builtin:template-publish-youtube", "builtin:delivery-quality-gate"]
+        [
+            "builtin:talking-head-clean-up",
+            "builtin:vertical-short",
+            "builtin:template-publish-youtube",
+            "builtin:delivery-quality-gate",
+            "builtin:topic-explainer"
+        ]
     );
     let mut s = Session::default();
     s.execute("file.openDemoProject", json!({})).unwrap();
@@ -157,7 +163,7 @@ fn save_list_inspect_and_delete_in_the_recipes_folder() {
     // listed with the built-ins
     let l = s.execute("recipe.list", json!({})).unwrap();
     let ids: Vec<&str> = l["recipes"].as_array().unwrap().iter().map(|r| r["id"].as_str().unwrap()).collect();
-    assert_eq!(ids.len(), 5, "{ids:?}");
+    assert_eq!(ids.len(), builtin_json().len() + 1, "the built-ins and the one saved: {ids:?}");
     assert!(ids.contains(&"user:my-routine"));
     assert!(l["userFolder"].as_str().unwrap().ends_with("Recipes"));
     // inspected by name, with parameters: the steps as they would run
