@@ -22,6 +22,7 @@ pub mod autocut;
 pub mod autosave;
 pub mod beat_pulse;
 pub mod captions;
+pub mod carry_check;
 pub mod catalog_edit;
 pub mod choreograph;
 pub mod clip_ops;
