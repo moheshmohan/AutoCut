@@ -186,6 +186,33 @@ fn the_rhythm_adds_up_and_opens_and_closes() {
     }
 }
 
+/// PX6.2: a reference's rhythm adds up the same way, follows its shot lengths and never asks
+/// for more slots than there are moments.
+#[test]
+fn the_reference_rhythm_adds_up_and_follows_its_pace() {
+    let target = |median: f64| {
+        crate::reference::Targets::from_fingerprint(&json!({
+            "version": 1, "seconds": 30.0, "cutsPerMinute": 60.0 / median,
+            "shot": {"median": median, "p25": median, "p75": median}, "pace": vec![median; 16],
+        }))
+        .unwrap()
+    };
+    let beat = beat_of(120.0);
+    for (total, available) in [(40u32, 6usize), (60, 40), (12, 3), (8, 1), (5, 10), (1, 1), (64, 200)] {
+        for median in [0.3, 1.0, 4.0] {
+            let r = rhythm_like(total, beat, available, &target(median));
+            assert_eq!(r.iter().map(|s| s.beats).sum::<u32>(), total, "{total} {available} {median}: {r:?}");
+            assert_eq!(r[0].role, Role::Hook);
+            assert!(r.len() <= available.max(2), "{r:?}");
+            assert!(r.iter().all(|s| s.beats >= 1));
+        }
+    }
+    let fast = rhythm_like(60, beat, 100, &target(0.5));
+    let slow = rhythm_like(60, beat, 100, &target(4.0));
+    assert!(fast.len() > 3 * slow.len(), "{} against {}", fast.len(), slow.len());
+    assert!(fast.iter().filter(|s| s.role == Role::Body).all(|s| s.beats == 1), "{fast:?}");
+}
+
 #[test]
 fn the_models_picks_fill_the_rhythm_and_are_repaired() {
     let o = opts(json!({"brief": "a 20 s reel", "seconds": 20}));
