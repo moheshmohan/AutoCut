@@ -953,3 +953,5 @@ Still-image improvements from upstream craft-libs, ported into AutoCut's own cra
   vignette and distortion corrections, trims) and applies them when asked
   (`ProcessOptions::apply_opcodes`); off by default, as upstream keeps it until its readings of
   the specification are checked against real camera files.
+- **AV124**: lossy JPEG DNGs (the "lossy compressed" and proxy DNGs some cameras and converters
+  write) open as stills and CinemaDNG frames; they were refused.

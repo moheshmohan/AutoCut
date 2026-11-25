@@ -58,7 +58,13 @@ the raw image in a SubIFD, and arbitrary extra tags.
 - **Raw data:** 1–16-bit unsigned samples, uncompressed (8 and 16-bit in file byte order, other
   depths packed most significant bit first) or lossless JPEG (all predictors 1–7, 1–4 components,
   point transform, restart intervals of whole lines), in strips or tiles; tiles decode in
-  parallel.
+  parallel. Lossy JPEG (Compression 34892, DNG 1.4: 8-bit LinearRaw only; CFA or other depths
+  are refused naming it) of one component (grey) or three (colour), decoded by a baseline JPEG
+  decoder the caller registers (`set_lossy_jpeg_decoder`: this crate depends on no image codec;
+  `filmcraft-media` registers the image crate's), which runs under `catch_unwind` with a budget
+  of about its tile, must give as many components as SamplesPerPixel and at least the tile's
+  samples; a tiny file cannot claim a huge picture (at least two bits per 8 × 8 block). Without
+  a decoder such files are refused as unsupported.
 - **Processing:** ActiveArea, LinearizationTable, per-site black levels with row / column deltas,
   per-sample white levels, as-shot white balance (clipped highlights stay neutral), demosaic
   (Malvar–He–Cutler for 2 × 2 Bayer patterns of any phase, bilinear for other patterns up to
@@ -105,7 +111,7 @@ the raw image in a SubIFD, and arbitrary extra tags.
 
 ## Not supported (errors name them)
 
-Lossy JPEG and JPEG XL DNG, deflate / floating-point DNG (HDR merges), planar raw data, colour
+JPEG XL DNG, deflate / floating-point DNG (HDR merges), planar raw data, colour
 filters other than red / green / blue (CMY, RGBE), non-rectangular CFA layouts, DefaultScale and
 BestQualityScale (non-square pixels are shown square), DNG 1.6 IlluminantData for illuminant 255
 (calibration 1 is used), lossless JPEG restart intervals that split a line, and MXF-wrapped

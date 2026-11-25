@@ -114,7 +114,12 @@ pub fn layout(t: &Tiff, ifd: &Ifd) -> Result<RawLayout> {
         }
         7 => {}
         8 => return Err(Error::Unsupported("deflate-compressed DNG".into())),
-        34892 => return Err(Error::Unsupported("lossy JPEG DNG".into())),
+        // DNG 1.4: lossy JPEG only for 8-bit LinearRaw (or mask) data
+        34892 if photometric != PHOTOMETRIC_LINEAR_RAW => {
+            return Err(Error::Unsupported("lossy JPEG DNG of CFA data (DNG allows it only for 8-bit LinearRaw)".into()));
+        }
+        34892 if bits != 8 => return Err(Error::Unsupported(format!("lossy JPEG DNG with {bits}-bit samples (DNG allows only 8)"))),
+        34892 => {}
         52546 => return Err(Error::Unsupported("JPEG XL DNG".into())),
         c => return Err(Error::Unsupported(format!("DNG compression {c}"))),
     }
@@ -242,6 +247,12 @@ fn decode_budget(c: &Chunk, l: &RawLayout) -> Option<usize> {
     let spp = l.samples_per_pixel;
     match l.compression {
         1 => c.w.checked_mul(c.h)?.checked_mul(spp),
+        // a baseline JPEG codes whole 8 × 8 (or, subsampled, 16 × 16) blocks: up to 15 columns
+        // and rows past the chunk, and the decoder's own working buffers
+        LOSSY_JPEG => {
+            let n = c.w.checked_add(15)?.checked_mul(c.h.checked_add(15)?)?.checked_mul(spp)?;
+            n.checked_add(n / 4)?.checked_add(4096)
+        }
         _ => {
             let coded = c.w.checked_mul(c.coded_h)?.checked_mul(spp)?;
             coded.checked_add(coded / 8)?.checked_add(64)
@@ -263,11 +274,44 @@ fn decode_charge(c: &Chunk, l: &RawLayout, budget: usize) -> Option<usize> {
     Some(budget.max(n).max(read))
 }
 
+/// Compression 34892: baseline (lossy) JPEG tiles or strips (DNG 1.4).
+const LOSSY_JPEG: u64 = 34892;
+
+/// Decode a baseline (lossy) JPEG tile or strip (Compression 34892) into `need` 8-bit samples
+/// with the caller's JPEG decoder ([`crate::set_lossy_jpeg_decoder`]): one component (greyscale)
+/// or three (colour, converted from YCbCr by the JPEG decoder as the JPEG says), as many as
+/// SamplesPerPixel, in raster order. The decoder may produce at most `budget` samples and runs
+/// under `catch_unwind`: a panic in it is an error for this file, not a crash.
+fn lossy_jpeg(bytes: &[u8], need: usize, spp: usize, budget: usize) -> Result<Vec<u16>> {
+    let Some(decode) = crate::lossy_jpeg_decoder() else {
+        return Err(Error::Unsupported("lossy JPEG DNG (no JPEG decoder is registered)".into()));
+    };
+    let d = std::panic::catch_unwind(|| decode(bytes, budget))
+        .map_err(|_| Error::Malformed("lossy JPEG decoder failed"))?
+        .map_err(|_| Error::Malformed("lossy JPEG tile"))?;
+    let channels = usize::from(d.components);
+    if !matches!(channels, 1 | 3) {
+        return Err(Error::Unsupported(format!("lossy JPEG DNG tile of {channels} components")));
+    }
+    if channels != spp {
+        return Err(Error::Malformed("lossy JPEG components differ from SamplesPerPixel"));
+    }
+    let total = (d.width as usize).checked_mul(d.height as usize).and_then(|v| v.checked_mul(channels)).ok_or(Error::TooLarge)?;
+    if total > budget {
+        return Err(Error::TooLarge);
+    }
+    if total < need || d.samples.len() < need {
+        return Err(Error::Malformed("lossy JPEG smaller than its tile or strip"));
+    }
+    Ok(d.samples.iter().take(need).map(|&v| u16::from(v)).collect())
+}
+
 /// Decode one chunk into `w` × `h` × `spp` samples, allocating at most `budget` samples.
 fn decode_chunk(c: &Chunk, l: &RawLayout, big_endian: bool, budget: usize) -> Result<Vec<u16>> {
     let need = c.w * c.h * l.samples_per_pixel;
     match l.compression {
         1 => unpack(c.bytes, c.w, c.h, l.samples_per_pixel, l.bits, big_endian),
+        LOSSY_JPEG => lossy_jpeg(c.bytes, need, l.samples_per_pixel, budget),
         _ => {
             // the JPEG's samples fill the chunk in raster order (its own width × components may
             // differ from the chunk's, e.g. two components of half the width); the samples past
@@ -292,9 +336,12 @@ pub fn read(t: &Tiff, ifd: &Ifd) -> Result<RawImage> {
         return Err(Error::TooLarge);
     }
     let chunks = chunks(t, ifd, &l)?;
-    // every sample takes at least one bit of file (a Huffman code is at least one bit long)
+    // every sample takes at least one bit of file (a Huffman code is at least one bit long);
+    // lossy JPEG at least two bits per 8 × 8 block and component (a DC code and an end of
+    // block), so a tiny file cannot claim a huge picture
+    let per_byte = if l.compression == LOSSY_JPEG { 256 } else { 8 };
     let coded: usize = chunks.iter().map(|c| c.bytes.len()).fold(0usize, usize::saturating_add);
-    if total.div_ceil(8) > coded {
+    if total.div_ceil(per_byte) > coded {
         return Err(Error::Truncated);
     }
     // what decoding may allocate and read, chunk by chunk, within one decoded frame's worth
@@ -308,7 +355,7 @@ pub fn read(t: &Tiff, ifd: &Ifd) -> Result<RawImage> {
         if n > MAX_SAMPLES || decoded_samples > MAX_DECODED_TILE_SAMPLES {
             return Err(Error::TooLarge);
         }
-        if n.div_ceil(8) > c.bytes.len() {
+        if n.div_ceil(per_byte) > c.bytes.len() {
             return Err(Error::Truncated);
         }
         budgets.push(budget);

@@ -79,6 +79,42 @@ pub enum Compression {
         restart_lines: usize,
         pt: u8,
     },
+    /// Chunks the caller coded itself, [`Options::precoded`] in strip / tile order, under this
+    /// Compression tag value (baseline JPEG tiles for 34892, made with an image codec this
+    /// crate does not depend on).
+    Precoded {
+        compression: u16,
+    },
+}
+
+/// The chunks of a `width` × `height` × `spp` picture as the writer lays them out (strips or
+/// tiles in order, tiles past the image edge repeating the edge pixel): each chunk's width, rows
+/// and samples. For callers coding [`Compression::Precoded`] chunks.
+pub fn chunk_samples(samples: &[u16], o: &Options) -> Vec<(usize, usize, Vec<u16>)> {
+    let spp = o.samples_per_pixel;
+    let (cw, ch) = match o.layout {
+        Layout::Strips { rows } => (o.width, rows.max(1)),
+        Layout::Tiles { width, height } => (width.max(1), height.max(1)),
+    };
+    let tiles = matches!(o.layout, Layout::Tiles { .. });
+    let mut out = Vec::new();
+    for ty in (0..o.height).step_by(ch) {
+        for tx in (0..o.width).step_by(cw) {
+            let rows = if tiles { ch } else { ch.min(o.height - ty) };
+            let mut chunk = Vec::with_capacity(cw * rows * spp);
+            for r in 0..rows {
+                let y = (ty + r).min(o.height - 1);
+                for c in 0..cw {
+                    let x = (tx + c).min(o.width - 1);
+                    for s in 0..spp {
+                        chunk.push(samples.get((y * o.width + x) * spp + s).copied().unwrap_or(0));
+                    }
+                }
+            }
+            out.push((cw, rows, chunk));
+        }
+    }
+    out
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -105,6 +141,8 @@ pub struct Options {
     pub main_tags: Vec<(u16, Value)>,
     /// Extra tags of the raw IFD (black and white levels, crop…).
     pub raw_tags: Vec<(u16, Value)>,
+    /// The chunks' bytes for [`Compression::Precoded`], in strip / tile order.
+    pub precoded: Vec<Vec<u8>>,
 }
 
 impl Default for Options {
@@ -121,6 +159,7 @@ impl Default for Options {
             preview: false,
             main_tags: Vec::new(),
             raw_tags: Vec::new(),
+            precoded: Vec::new(),
         }
     }
 }
@@ -354,40 +393,22 @@ fn put_ifd(buf: &mut Vec<u8>, mut entries: Vec<(u16, Value)>, be: bool) -> u32 {
 /// Encode the strips or tiles of `samples`, appending them to `buf`; returns (offsets, counts).
 fn put_chunks(buf: &mut Vec<u8>, samples: &[u16], o: &Options) -> (Vec<u32>, Vec<u32>) {
     let spp = o.samples_per_pixel;
-    let (cw, ch) = match o.layout {
-        Layout::Strips { rows } => (o.width, rows.max(1)),
-        Layout::Tiles { width, height } => (width.max(1), height.max(1)),
-    };
-    let tiles = matches!(o.layout, Layout::Tiles { .. });
     let (mut offs, mut counts) = (Vec::new(), Vec::new());
-    for ty in (0..o.height).step_by(ch) {
-        for tx in (0..o.width).step_by(cw) {
-            let rows = if tiles { ch } else { ch.min(o.height - ty) };
-            // the chunk's samples; tiles past the image edge repeat the edge pixel
-            let mut chunk = Vec::with_capacity(cw * rows * spp);
-            for r in 0..rows {
-                let y = (ty + r).min(o.height - 1);
-                for c in 0..cw {
-                    let x = (tx + c).min(o.width - 1);
-                    for s in 0..spp {
-                        chunk.push(samples.get((y * o.width + x) * spp + s).copied().unwrap_or(0));
-                    }
-                }
+    for (k, (cw, rows, chunk)) in chunk_samples(samples, o).into_iter().enumerate() {
+        let data = match o.compression {
+            Compression::None => pack(&chunk, cw * spp, o.bits, o.big_endian),
+            Compression::LosslessJpeg { predictor, components, restart_lines, pt } => {
+                let comps = components.max(1);
+                lj92(&chunk, cw * spp / comps, rows, comps, o.bits as u8, predictor, restart_lines, pt)
             }
-            let data = match o.compression {
-                Compression::None => pack(&chunk, cw * spp, o.bits, o.big_endian),
-                Compression::LosslessJpeg { predictor, components, restart_lines, pt } => {
-                    let comps = components.max(1);
-                    lj92(&chunk, cw * spp / comps, rows, comps, o.bits as u8, predictor, restart_lines, pt)
-                }
-            };
-            if buf.len() % 2 == 1 {
-                buf.push(0);
-            }
-            offs.push(buf.len() as u32);
-            counts.push(data.len() as u32);
-            buf.extend(data);
+            Compression::Precoded { .. } => o.precoded.get(k).cloned().unwrap_or_default(),
+        };
+        if buf.len() % 2 == 1 {
+            buf.push(0);
         }
+        offs.push(buf.len() as u32);
+        counts.push(data.len() as u32);
+        buf.extend(data);
     }
     (offs, counts)
 }
@@ -402,7 +423,14 @@ pub fn write(samples: &[u16], o: &Options) -> Vec<u8> {
         (tags::IMAGE_WIDTH, Value::Long(vec![o.width as u32])),
         (tags::IMAGE_LENGTH, Value::Long(vec![o.height as u32])),
         (tags::BITS_PER_SAMPLE, Value::Short(vec![o.bits as u16; o.samples_per_pixel])),
-        (tags::COMPRESSION, Value::Short(vec![if o.compression == Compression::None { 1 } else { 7 }])),
+        (
+            tags::COMPRESSION,
+            Value::Short(vec![match o.compression {
+                Compression::None => 1,
+                Compression::LosslessJpeg { .. } => 7,
+                Compression::Precoded { compression } => compression,
+            }]),
+        ),
         (tags::SAMPLES_PER_PIXEL, Value::Short(vec![o.samples_per_pixel as u16])),
         (tags::PLANAR_CONFIGURATION, Value::Short(vec![1])),
     ];

@@ -51,6 +51,35 @@ pub enum Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// One baseline JPEG as a [`LossyJpegDecoder`] decoded it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LossyJpeg {
+    pub width: u32,
+    pub height: u32,
+    /// 1 (greyscale) or 3 (colour, converted from YCbCr as the JPEG says).
+    pub components: u8,
+    /// `width × height × components` 8-bit samples, in raster order.
+    pub samples: Vec<u8>,
+}
+
+/// A baseline JPEG decoder for lossy JPEG DNG tiles and strips (Compression 34892): this crate
+/// depends on no image codec, so its caller supplies one ([`set_lossy_jpeg_decoder`]). It gets
+/// one chunk's bytes and the most samples it may produce (refusing a larger picture before
+/// building it); its errors are reported as a damaged tile.
+pub type LossyJpegDecoder = fn(bytes: &[u8], max_samples: usize) -> std::result::Result<LossyJpeg, String>;
+
+static LOSSY_JPEG: std::sync::OnceLock<LossyJpegDecoder> = std::sync::OnceLock::new();
+
+/// Register the JPEG decoder lossy JPEG DNGs use, for the whole process (the first registration
+/// stays). Without one they are refused as unsupported.
+pub fn set_lossy_jpeg_decoder(decoder: LossyJpegDecoder) {
+    let _ = LOSSY_JPEG.set(decoder);
+}
+
+pub(crate) fn lossy_jpeg_decoder() -> Option<LossyJpegDecoder> {
+    LOSSY_JPEG.get().copied()
+}
+
 /// Whether `b` is a DNG: a TIFF file whose first IFD has a DNGVersion tag.
 pub fn sniff(b: &[u8]) -> bool {
     let Ok((t, first)) = Tiff::new(b) else { return false };
@@ -94,7 +123,7 @@ pub struct Info {
     pub samples_per_pixel: usize,
     /// Colour filter array data (else LinearRaw).
     pub cfa: bool,
-    /// "uncompressed" or "lossless JPEG".
+    /// "uncompressed", "lossless JPEG" or "lossy JPEG".
     pub compression: &'static str,
     pub dng_version: [u8; 4],
     /// CinemaDNG FrameRate (numerator, denominator).
@@ -338,7 +367,11 @@ impl<'a> Dng<'a> {
             bits: l.bits,
             samples_per_pixel: l.samples_per_pixel,
             cfa: p.cfa.is_some(),
-            compression: if l.compression == 7 { "lossless JPEG" } else { "uncompressed" },
+            compression: match l.compression {
+                7 => "lossless JPEG",
+                34892 => "lossy JPEG",
+                _ => "uncompressed",
+            },
             dng_version,
             frame_rate,
             timecode,

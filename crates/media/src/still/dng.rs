@@ -42,8 +42,42 @@ fn error(name: &str, e: filmcraft_dng::Error) -> MediaError {
     }
 }
 
+/// A baseline JPEG tile or strip of a lossy JPEG DNG (Compression 34892), decoded by the image
+/// crate's JPEG decoder (the one the still importer uses): one component as greyscale, three as
+/// colour. A picture of more than `max_samples` samples is refused before it is decoded, and the
+/// decoder may allocate little more than the picture.
+fn lossy_jpeg(bytes: &[u8], max_samples: usize) -> std::result::Result<filmcraft_dng::LossyJpeg, String> {
+    use image::ImageDecoder;
+    let mut d = image::codecs::jpeg::JpegDecoder::new(std::io::Cursor::new(bytes)).map_err(|e| e.to_string())?;
+    let components: u8 = match d.color_type() {
+        image::ColorType::L8 => 1,
+        image::ColorType::Rgb8 => 3,
+        c => return Err(format!("a JPEG of colour type {c:?}")),
+    };
+    let (width, height) = d.dimensions();
+    let total = (width as usize).checked_mul(height as usize).and_then(|n| n.checked_mul(usize::from(components))).ok_or("too large")?;
+    if total > max_samples {
+        return Err(format!("a {width} × {height} JPEG is larger than its tile"));
+    }
+    let mut limits = image::Limits::default();
+    limits.max_alloc = Some((total as u64).saturating_mul(4).saturating_add(1 << 20));
+    d.set_limits(limits).map_err(|e| e.to_string())?;
+    let mut samples = Vec::new();
+    samples.try_reserve_exact(total).map_err(|_| "not enough memory")?;
+    samples.resize(total, 0);
+    d.read_image(&mut samples).map_err(|e| e.to_string())?;
+    Ok(filmcraft_dng::LossyJpeg { width, height, components, samples })
+}
+
+/// Give `filmcraft-dng` its JPEG decoder for lossy JPEG DNGs (once for the process; every DNG
+/// this crate develops comes through [`decode`], which calls it).
+pub fn register_lossy_jpeg() {
+    filmcraft_dng::set_lossy_jpeg_decoder(lossy_jpeg);
+}
+
 /// Develop a DNG file.
 pub fn decode(name: &str, bytes: &[u8]) -> Result<Decoded> {
+    register_lossy_jpeg();
     let img = filmcraft_dng::decode(bytes).map_err(|e| error(name, e))?;
     let (w, h) = (u32::try_from(img.width), u32::try_from(img.height));
     let (Ok(w), Ok(h)) = (w, h) else { return Err(MediaError::Decode(format!("{name}: picture too large"))) };

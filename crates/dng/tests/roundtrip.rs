@@ -469,7 +469,19 @@ fn cyclic_ifds_huge_sizes_and_bad_offsets() {
     assert!(matches!(decode(&write(&px, &o)), Err(Error::Malformed(_))));
     // unsupported compressions and depths are named
     let o = Options { raw_tags: vec![(tags::COMPRESSION, Value::Short(vec![34892]))], ..Default::default() };
-    assert_eq!(decode(&write(&px, &o)).err(), Some(Error::Unsupported("lossy JPEG DNG".into())));
+    assert!(matches!(decode(&write(&px, &o)), Err(Error::Unsupported(m)) if m.contains("lossy JPEG") && m.contains("CFA")));
+    // 8-bit LinearRaw lossy JPEG needs a JPEG decoder from the caller; none is registered here
+    let o = Options {
+        bits: 8,
+        cfa: None,
+        compression: Compression::Precoded { compression: 34892 },
+        precoded: vec![vec![0xFF, 0xD8, 0xFF, 0xD9]; 1],
+        raw_tags: vec![(tags::ROWS_PER_STRIP, Value::Long(vec![8]))],
+        ..Default::default()
+    };
+    let lossy = write(&[0u16; 64], &o);
+    assert_eq!(probe(&lossy).map(|i| i.compression), Ok("lossy JPEG"));
+    assert!(matches!(decode(&lossy), Err(Error::Unsupported(m)) if m.contains("no JPEG decoder")));
 }
 
 /// A 16-bit CFA DNG of `width` × `height` in one strip holding every row in full, whose
