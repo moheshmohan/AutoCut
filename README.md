@@ -574,8 +574,8 @@ Nothing below the front ends depends on a UI toolkit or OS API. `cargo xtask ci`
 
 ## FilmCraft downloads
 
-AutoCut has no prebuilt releases yet: build it from source as in [Run it](#run-it). The downloads below are
-**upstream FilmCraft**, which is the editor without AutoCut's pipeline.
+AutoCut's own builds are under [Download](#download-macos-apple-silicon) above (or build from source as in
+[Run it](#run-it)). The downloads below are **upstream FilmCraft**, which is the editor without AutoCut's pipeline.
 
 **New to FilmCraft?** Download it from the [FilmCraft page on getartcraft.com](https://getartcraft.com/apps/filmcraft). That's the easiest way to install it.
 

@@ -971,3 +971,12 @@ Still-image improvements from upstream craft-libs, ported into AutoCut's own cra
   Opus decoder refuses a concealment longer than 120 ms instead of allocating without limit.
 - **AV171**: caption and title layout reuses each font's shaping plans (a few percent faster,
   same glyphs).
+
+## Update 2026-11-25 (release 0.15.0)
+
+- **Release 0.15.0** (tag `autocut-v0.15.0`): the updates above since release 0.14.0 — AV99–AV101
+  (H.264 High 10 / 4:2:2), PX6 (edit like a reference), PX7 (topic to explainer), AV105–AV109
+  (HEVC 4:4:4, 12-bit and RExt; ProRes over-limit slate), AV110–AV115 (decoder limits), PX9
+  (capabilities, ComfyUI, headless Blender), AV116–AV124 (stills), AV160–AV174 (containers,
+  captions, audio, text and docs). Notes in [autocut-releases.md](autocut-releases.md). 962
+  commands.

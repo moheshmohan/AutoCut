@@ -2,6 +2,92 @@
 
 Newest first. Each release is tagged `autocut-v<version>` on [moheshmohan/AutoCut](https://github.com/moheshmohan/AutoCut/releases) (the `v<version>` tags in a clone that also fetches upstream are FilmCraft's own); its downloads are on the release page. How a release is cut: [releasing.md](releasing.md) (FilmCraft's process; AutoCut's macOS build is `packaging/macos/package.sh` with `AUTOCUT_APP_NAME=AutoCut`).
 
+## 0.15.0 — 25 November 2026
+
+Camera footage without hardware, explainers from a script, and more tools behind the generation
+list: everything that was still pending after 0.14.0.
+
+### Download
+
+- **macOS, Apple silicon:** `autocut-0.15.0-macos-aarch64.dmg` (the app) and
+  `filmcraft-cli-0.15.0-macos-aarch64.zip` (the command line and MCP server). Ad-hoc signed, not
+  notarized: the first time, right-click AutoCut.app and choose **Open**.
+- Windows, Linux and Intel Macs: build from source.
+
+### What's new
+
+**Camera footage in software**
+- **10-bit and 4:2:2 H.264** decode with AutoCut's own decoder: High 10, High 4:2:2 and their
+  Intra profiles (Sony XAVC S-I, Panasonic AVC-Intra, Canon XF-AVC, the 10-bit modes of
+  mirrorless cameras), bit-exact with ffmpeg on 61 streams. 8-bit H.264 got about 7 % faster.
+- **HEVC 4:4:4, monochrome and 12-bit** (Main 4:4:4 / 10 / 12, Main 12, 4:2:2 12, Monochrome),
+  and the range-extension coding tools (transform skip up to 32×32, RDPCM, persistent Rice
+  adaptation, cross-component prediction, chroma QP offsets, SAO offset scaling): bit-exact on
+  142 ffmpeg streams at 1, 3 and all threads, plus x265's own reconstructions for 12-bit. A few
+  rare range-extension uses that ffmpeg decodes differently from the spec are refused rather than
+  decoded unverified.
+- **One setting for pictures past 8K:** the H.264, ProRes, VP8, MPEG-2 and VP9 decoders check
+  frame size and picture memory against limits a workflow can raise; the defaults admit every
+  file that opened before. A ProRes frame over the limit now shows the unreadable-clip slate.
+
+**Edit like a reference, and explainers**
+- `media.measureStyle` measures how a video is edited (cuts and jump cuts, shot lengths, bursts,
+  stillness, an energy map, loudness and palette), `reference` on Direct and Quick Short cuts like
+  it, and `sequence.checkCarry` scores how each cut carries the eye.
+- **Topic to explainer:** `script.timeline` turns a marked-up script into a narrated timeline
+  (shots, word-timed subtitles, chapters), `graphics.chapterBar` shows the chapters,
+  `script.factLedger` checks every figure and claim on screen against its sources (a new
+  `factSources` check in `delivery.preflight`), the explainer rules catch long stills, small heroes
+  and cuts that do not settle, and the `builtin:topic-explainer` recipe goes from script to a
+  checked explainer.
+
+**More tools behind the generation list** (none is installed or downloaded by AutoCut)
+- Each tool in `providers.json` can say what it can make (`capabilities`: sizes, aspects, lengths,
+  frames, references…); `generate.*` refuses what a tool cannot do before it starts and names the
+  nearest allowed value.
+- A tool can be a **ComfyUI workflow** on a local server (loopback only, the GPU freed after every
+  job, a model-licence allow-list per workflow), checked with `generate.checkTool`.
+- `generate.render3d` renders a 3D scene with your own **Blender**, headless, frames with alpha
+  imported as a sequence.
+
+**Files**
+- **Chapters:** MP4, MOV and M4A exports carry the sequence's chapter markers as chapters
+  (QuickTime chapter track and Nero `chpl`).
+- **EXR:** files show their main picture the way compositing apps do; tiled, mip-mapped and
+  multi-part files open; one-channel depth and mask files open grey. EXR sequences export from the
+  float picture in half or 32-bit float (new Bit depth row, PXR24), with chromaticities; HDR
+  sequences export linear BT.2020.
+- **AVIF** stills import, decoded by AutoCut's AV1 decoder, alpha included (for HEIC too).
+- **DNG / CinemaDNG** decode and develop 1.9–2.8× faster with identical output; lossy-JPEG DNGs
+  open; DNG opcode lists can be applied (off by default).
+- **TIFF / MXF:** YCbCr TIFFs with unusable colour fields open with the TIFF defaults; CinemaDNG in
+  MXF reports its real depth and levels.
+- **Captions:** SCC and MCC exports count from the sequence's start timecode (and import counts
+  from it); `captions.export {everyFrame: true}` writes an MCC packet on every frame for SDI and
+  MXF deliveries.
+- **Audio:** 5.1 FLAC exports record their speaker layout. Faster with identical output: MP2
+  decoding about 2.7×, AAC encoding 2.2–2.3×, the FLAC encoder about 1.7×, and AAC, Opus and AC-3
+  decoding take 7–43 % less time.
+- AV1 MP4 exports list the `av01` brand; Matroska dependent frames name their real reference frame.
+
+**Fixes**
+- Opus concealment is capped at 120 ms (a huge request used to allocate without limit).
+- A generation tool limit under 0.1 s no longer crashes; a generation job that panics ends with an
+  error instead of staying "running"; `generate.image` with the playhead frame no longer passes a
+  tool one reference too many.
+- The MP4 writer counts chunk offsets from the file's start and refuses a track's 2^32nd sample
+  instead of overflowing.
+- Interrupted media requests no longer leave their cancel, draft or catch-up hints behind.
+
+### Known limits
+
+- Only the macOS Apple-silicon build is published, and it isn't notarized.
+- Interlaced and 4:4:4 H.264 still need a hardware decoder.
+- ComfyUI and Blender were tested with stand-ins only; Cryptomatte passes and the camera-track
+  format have not run on a real Blender.
+- EXR PIZ, B44 and DWA compression are not read or written.
+- Built without the optional Japanese interface fonts (craft-fonts).
+
 ## 0.14.0 — 25 November 2026
 
 Faster, wider decoding in AutoCut's own pure-Rust decoders, and the follow-ups to 0.13.0.
