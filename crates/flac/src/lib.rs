@@ -1,7 +1,9 @@
 //! Clean-room FLAC encoder (RFC 9639, Free Lossless Audio Codec).
 //!
 //! - [`Encoder`]: planar integer samples (8–32 bit, 1–8 channels) → a `.flac` stream: the
-//!   [`Encoder::header`] (`fLaC`, STREAMINFO, a VORBIS_COMMENT naming the encoder), then frames of
+//!   [`Encoder::header`] (`fLaC`, STREAMINFO, a VORBIS_COMMENT naming the encoder, with
+//!   [`Encoder::header_with_comments`] the speaker layout's [`channel_mask_comment`] when
+//!   decoders would assume another), then frames of
 //!   a fixed block size. Each channel of each frame is coded as constant, verbatim, a fixed
 //!   polynomial predictor or linear prediction, whichever is smallest, with partitioned Rice codes;
 //!   stereo frames also try left/side, side/right and mid/side.
@@ -42,6 +44,34 @@ use predict::{Effort, Subframe};
 
 /// Byte offset of the 34-byte STREAMINFO body in [`Encoder::header`].
 pub const STREAMINFO_OFFSET: u64 = 8;
+
+/// The vendor string of the VORBIS_COMMENT block.
+const VENDOR: &str = concat!("filmcraft-flac ", env!("CARGO_PKG_VERSION"));
+
+/// The speaker layout, as a WAV channel mask (`dwChannelMask`), that decoders assume for a FLAC
+/// stream of `channels` channels without a `WAVEFORMATEXTENSIBLE_CHANNEL_MASK` comment: the
+/// channel assignment of RFC 9639 §9.1.3, with the surround pair of 5 and 6 channels read as side
+/// surrounds, as libFLAC and ffmpeg do. 0 (no assignment) outside 1–8.
+pub fn assumed_channel_mask(channels: u8) -> u32 {
+    match channels {
+        1 => 0x4,   // front centre
+        2 => 0x3,   // front left, right
+        3 => 0x7,   // + front centre
+        4 => 0x33,  // front left, right, back left, right
+        5 => 0x607, // front left, right, centre, side left, right
+        6 => 0x60F, // + LFE
+        7 => 0x70F, // front left, right, centre, LFE, back centre, side left, right
+        8 => 0x63F, // front left, right, centre, LFE, back left, right, side left, right
+        _ => 0,
+    }
+}
+
+/// The `WAVEFORMATEXTENSIBLE_CHANNEL_MASK` comment (RFC 9639 §8.6.2) that records the speaker
+/// layout `mask` (a WAV channel mask) of a `channels`-channel stream, when decoders would assume
+/// another one ([`assumed_channel_mask`]); None when they read it right without one.
+pub fn channel_mask_comment(channels: u8, mask: u32) -> Option<String> {
+    (mask != assumed_channel_mask(channels)).then(|| format!("WAVEFORMATEXTENSIBLE_CHANNEL_MASK=0x{mask:04X}"))
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum Error {
@@ -120,18 +150,34 @@ impl Encoder {
     /// `fLaC`, the STREAMINFO block (sizes and MD5 unknown yet: see [`Encoder::streaminfo`]) and a
     /// VORBIS_COMMENT block with the vendor string.
     pub fn header(&self) -> Vec<u8> {
+        // the vendor string alone always fits the block
+        self.header_with_comments(&[]).unwrap_or_default()
+    }
+
+    /// [`Encoder::header`] with `comments` (`NAME=value`, such as [`channel_mask_comment`]'s) in
+    /// the VORBIS_COMMENT block, or [`Error::InvalidConfig`] when they do not fit its 24-bit
+    /// length.
+    pub fn header_with_comments(&self, comments: &[&str]) -> Result<Vec<u8>, Error> {
+        let too_long = Error::InvalidConfig("comments longer than a metadata block holds");
+        // vendor length, vendor, comment count, then a length and the text per comment
+        let len =
+            comments.iter().try_fold(4 + VENDOR.len() + 4, |n, c| n.checked_add(4)?.checked_add(c.len())).filter(|&n| n < 1 << 24).ok_or(too_long.clone())?;
+        let le = |n: usize| u32::try_from(n).map(u32::to_le_bytes).map_err(|_| too_long.clone());
         let mut v = b"fLaC".to_vec();
         v.extend_from_slice(&[0, 0, 0, 34]);
         v.extend_from_slice(&self.streaminfo_with(0, 0, 0, [0; 16]));
-        let vendor = concat!("filmcraft-flac ", env!("CARGO_PKG_VERSION"));
-        let len = 4 + vendor.len() + 4;
         // last metadata block, type 4 (VORBIS_COMMENT), little-endian lengths inside
         v.push(0x84);
-        v.extend_from_slice(&(len as u32).to_be_bytes()[1..]);
-        v.extend_from_slice(&(vendor.len() as u32).to_le_bytes());
-        v.extend_from_slice(vendor.as_bytes());
-        v.extend_from_slice(&0u32.to_le_bytes());
-        v
+        let be = u32::try_from(len).map(u32::to_be_bytes).map_err(|_| too_long.clone())?;
+        v.extend_from_slice(be.get(1..).unwrap_or_default());
+        v.extend_from_slice(&le(VENDOR.len())?);
+        v.extend_from_slice(VENDOR.as_bytes());
+        v.extend_from_slice(&le(comments.len())?);
+        for c in comments {
+            v.extend_from_slice(&le(c.len())?);
+            v.extend_from_slice(c.as_bytes());
+        }
+        Ok(v)
     }
 
     /// The final STREAMINFO body: frame sizes, total samples and MD5 of what has been encoded.
@@ -248,5 +294,73 @@ impl Encoder {
         self.min_frame = if self.min_frame == 0 { size } else { self.min_frame.min(size) };
         self.max_frame = self.max_frame.max(size);
         data
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The VORBIS_COMMENT block of a header: (vendor, comments).
+    fn comments(header: &[u8]) -> (String, Vec<String>) {
+        let block = &header[4 + 4 + 34..];
+        assert_eq!(block[0], 0x84, "the last block, VORBIS_COMMENT");
+        let len = u32::from_be_bytes([0, block[1], block[2], block[3]]) as usize;
+        let body = &block[4..];
+        assert_eq!(body.len(), len);
+        let u32_at = |at: usize| u32::from_le_bytes(body[at..at + 4].try_into().unwrap()) as usize;
+        let vendor_len = u32_at(0);
+        let vendor = String::from_utf8(body[4..4 + vendor_len].to_vec()).unwrap();
+        let mut at = 4 + vendor_len;
+        let n = u32_at(at);
+        at += 4;
+        let mut out = Vec::new();
+        for _ in 0..n {
+            let l = u32_at(at);
+            out.push(String::from_utf8(body[at + 4..at + 4 + l].to_vec()).unwrap());
+            at += 4 + l;
+        }
+        assert_eq!(at, body.len());
+        (vendor, out)
+    }
+
+    #[test]
+    fn the_mask_comment_is_written_only_when_decoders_would_assume_otherwise() {
+        let comment = |m: &str| Some(format!("WAVEFORMATEXTENSIBLE_CHANNEL_MASK={m}"));
+        for channels in 1..=8 {
+            assert_eq!(channel_mask_comment(channels, assumed_channel_mask(channels)), None, "{channels}");
+        }
+        // 5.0 and 5.1 with back surrounds (WAV's usual 5.1 mask) are read as side surrounds without it
+        assert_eq!(channel_mask_comment(5, 0x37), comment("0x0037"));
+        assert_eq!(channel_mask_comment(6, 0x3F), comment("0x003F"));
+        assert_eq!(channel_mask_comment(7, 0x13F), comment("0x013F"));
+        // no speaker assignment
+        assert_eq!(channel_mask_comment(2, 0), comment("0x0000"));
+        assert_eq!(channel_mask_comment(6, 0x3_FFFF), comment("0x3FFFF"));
+        assert_eq!((assumed_channel_mask(0), assumed_channel_mask(9), assumed_channel_mask(u8::MAX)), (0, 0, 0));
+    }
+
+    #[test]
+    fn the_header_carries_its_comments() {
+        let enc = Encoder::new(EncoderConfig::new(48_000, 6, 24)).unwrap();
+        assert_eq!(comments(&enc.header()), (VENDOR.to_string(), Vec::new()));
+        assert_eq!(enc.header_with_comments(&[]).unwrap(), enc.header());
+        let mask = channel_mask_comment(6, 0x3F).unwrap();
+        let header = enc.header_with_comments(&[&mask, "TITLE=x"]).unwrap();
+        assert_eq!(comments(&header), (VENDOR.to_string(), vec![mask, "TITLE=x".to_string()]));
+        assert_eq!(header[..STREAMINFO_OFFSET as usize + 34], enc.header()[..STREAMINFO_OFFSET as usize + 34]);
+    }
+
+    /// Comments past the block's 24-bit length are refused, not written with a wrapped length.
+    #[test]
+    fn comments_too_long_for_the_block_are_an_error() {
+        let enc = Encoder::new(EncoderConfig::new(48_000, 2, 16)).unwrap();
+        let room = (1 << 24) - 1 - (4 + VENDOR.len() + 4 + 4);
+        let fits = "x".repeat(room);
+        assert!(enc.header_with_comments(&[&fits]).is_ok());
+        let over = "x".repeat(room + 1);
+        assert!(matches!(enc.header_with_comments(&[&over]), Err(Error::InvalidConfig(_))));
+        let many = vec![""; 1 << 22];
+        assert!(enc.header_with_comments(&many).is_err());
     }
 }

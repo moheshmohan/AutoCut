@@ -149,6 +149,33 @@ fn wav_51_is_extensible_and_sample_exact() {
     }
 }
 
+/// A 5.1 FLAC export records the WAV export's back-surround layout (`0x3F`) in a
+/// WAVEFORMATEXTENSIBLE_CHANNEL_MASK comment: decoders read a 6-channel FLAC without one as side
+/// surrounds. A stereo export needs none.
+#[test]
+fn flac_51_records_the_wav_layout_and_is_sample_exact() {
+    let (p, seq, m) = surround();
+    let path = out_path("s51.flac");
+    export(&p, seq, &settings(Format::Flac, &path), &m, &Progress::default()).unwrap();
+    let bytes = std::fs::read(&path).unwrap();
+    let has_mask = |b: &[u8]| b.windows(40).any(|w| w == b"WAVEFORMATEXTENSIBLE_CHANNEL_MASK=0x003F");
+    assert!(has_mask(&bytes[..256.min(bytes.len())]), "the mask comment in the header");
+    let wav = out_path("s51-layout.wav");
+    export(&p, seq, &settings(Format::Wav, &wav), &m, &Progress::default()).unwrap();
+    if let (Some((n, layout)), Some((_, wav_layout))) = (probe(&path), probe(&wav)) {
+        assert_eq!(n, 6);
+        assert_eq!(layout, wav_layout, "the FLAC and WAV exports name the same speakers");
+    }
+    if let Some(ch) = decode(&path) {
+        assert_sample_exact(&ch, SR as usize);
+    }
+    let stereo = out_path("s20.flac");
+    let mut st = settings(Format::Flac, &stereo);
+    st.audio.channels = 2;
+    export(&p, seq, &st, &m, &Progress::default()).unwrap();
+    assert!(!std::fs::read(&stereo).unwrap().windows(33).any(|w| w == b"WAVEFORMATEXTENSIBLE_CHANNEL_MASK"), "stereo needs no comment");
+}
+
 #[test]
 fn prores_mov_carries_six_pcm_channels() {
     let (p, seq, m) = surround();

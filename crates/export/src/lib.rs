@@ -1451,6 +1451,16 @@ impl AudioEncoder for AacEncoder {
     }
 }
 
+/// The speaker layout of `channels` exported channels as a WAV channel mask: 5.1 is L R C LFE Ls Rs
+/// with back surrounds, as the WAV export declares (`0x3F`); other counts (mono, stereo) take
+/// FLAC's own channel assignment.
+fn flac_speaker_mask(channels: u16) -> u32 {
+    match channels {
+        6 => 0x3F,
+        n => u8::try_from(n).map_or(0, filmcraft_flac::assumed_channel_mask),
+    }
+}
+
 /// FLAC (our encoder) in MP4 / QuickTime: one frame of 4096 samples per access unit.
 pub(crate) struct FlacAudio {
     enc: filmcraft_flac::Encoder,
@@ -2398,7 +2408,12 @@ fn export_here(project: &Arc<Project>, seq: ItemId, settings: &ExportSettings, s
             };
             let head = match &writer {
                 AudioWriter::Pcm(c) => pcm::header(*c, ch, sr, fmt, frames).map_err(ExportError::Unsupported)?,
-                AudioWriter::Flac(enc) => enc.header(),
+                AudioWriter::Flac(enc) => {
+                    // decoders read 5.1 FLAC as side surrounds: record the layout the WAV export declares
+                    let comment = filmcraft_flac::channel_mask_comment(ch as u8, flac_speaker_mask(ch));
+                    let comments: Vec<&str> = comment.iter().map(String::as_str).collect();
+                    enc.header_with_comments(&comments).map_err(|e| ExportError::Unsupported(format!("FLAC: {e}")))?
+                }
             };
             // one second per chunk: memory stays flat however long the range is
             let chunk = i64::from(sr.max(1));

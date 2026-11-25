@@ -201,3 +201,61 @@ fn full_scale_32_bit_stereo_round_trips() {
     let mut enc = Encoder::new(EncoderConfig::new(48_000, 2, 32)).unwrap();
     assert!(enc.encode(&[&[i32::MIN, i32::MAX], &[0, -1]]).is_ok());
 }
+
+/// Left and right at opposite full scale: the side channel needs its extra bit at every depth.
+#[test]
+fn opposite_polarity_stereo_round_trips() {
+    for bps in [16u8, 24] {
+        let left = signal("square", 9_000, bps, 1);
+        let right: Vec<i32> = left.iter().map(|&v| !v).collect();
+        let planar = vec![left, right];
+        if round_trip(&format!("opposite-{bps}"), &planar, EncoderConfig::new(48_000, 2, bps), 4096).is_none() {
+            return;
+        }
+    }
+}
+
+#[test]
+fn streaminfo_states_the_block_and_frame_sizes() {
+    // silence in the middle: the smallest frame is neither the first nor the last
+    let channel = |seed| [signal("noise", 4096, 16, seed), signal("silence", 4096, 16, seed), signal("noise", 1000, 16, seed)].concat();
+    let planar = [channel(21), channel(22)];
+    let mut enc = Encoder::new(EncoderConfig::new(48_000, 2, 16)).unwrap();
+    let parts: Vec<&[i32]> = planar.iter().map(Vec::as_slice).collect();
+    let mut sizes: Vec<usize> = enc.encode_frames(&parts).unwrap().iter().map(Vec::len).collect();
+    sizes.push(enc.finish().len());
+    let si = enc.streaminfo();
+    let u24 = |b: &[u8]| usize::from(b[0]) << 16 | usize::from(b[1]) << 8 | usize::from(b[2]);
+    assert_eq!(&si[..4], &[0x10, 0x00, 0x10, 0x00]);
+    assert_eq!(u24(&si[4..7]), sizes.iter().copied().min().unwrap());
+    assert_eq!(u24(&si[7..10]), sizes.iter().copied().max().unwrap());
+}
+
+/// ffprobe reads a 5.1 stream as side surrounds without a mask comment and as WAV's back-surround
+/// 5.1 (`0x3F`) with `channel_mask_comment`'s; the layouts it assumes need none.
+#[test]
+fn the_channel_mask_comment_sets_the_layout_decoders_read() {
+    let Some(ffprobe) = filmcraft_testkit::ffprobe_or_skip("flac channel mask oracle") else { return };
+    let layout = |name: &str, channels: u8, mask: Option<u32>| -> String {
+        let planar: Vec<Vec<i32>> = (0..channels).map(|c| signal("music", 2_000, 16, u64::from(c) + 1)).collect();
+        let mut enc = Encoder::new(EncoderConfig::new(48_000, channels, 16)).unwrap();
+        let comment = mask.and_then(|m| filmcraft_flac::channel_mask_comment(channels, m));
+        let comments: Vec<&str> = comment.iter().map(String::as_str).collect();
+        let mut file = enc.header_with_comments(&comments).unwrap();
+        let refs: Vec<&[i32]> = planar.iter().map(Vec::as_slice).collect();
+        file.extend(enc.encode(&refs).unwrap());
+        file.extend(enc.finish());
+        let o = STREAMINFO_OFFSET as usize;
+        file[o..o + 34].copy_from_slice(&enc.streaminfo());
+        let path = filmcraft_testkit::fixtures_dir("flac").join(format!("{name}.flac"));
+        std::fs::write(&path, &file).unwrap();
+        let out =
+            Command::new(&ffprobe).args(["-v", "error", "-show_entries", "stream=channel_layout", "-of", "default=nw=1:nk=1"]).arg(&path).output().unwrap();
+        assert!(out.status.success(), "ffprobe failed: {}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    assert_eq!(layout("mask-none-5.1", 6, None), "5.1(side)");
+    assert_eq!(layout("mask-back-5.1", 6, Some(0x3F)), "5.1");
+    assert_eq!(layout("mask-side-5.1", 6, Some(0x60F)), "5.1(side)", "no comment is needed");
+    assert_eq!(layout("mask-stereo", 2, Some(0x3)), "stereo");
+}

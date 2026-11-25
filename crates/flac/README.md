@@ -17,6 +17,8 @@ let mut cfg = EncoderConfig::new(48_000, 2, 24);   // rate, channels (1–8), bi
 cfg.level = 8;                                     // 0 fastest … 8 smallest; 5 by default
 let mut enc = Encoder::new(cfg)?;
 let mut file = enc.header();                       // fLaC + STREAMINFO + VORBIS_COMMENT (vendor)
+// or with the speaker layout, when decoders would assume another (5.1 with back surrounds here)
+let mask = filmcraft_flac::channel_mask_comment(6, 0x3F);  // Some("WAVEFORMATEXTENSIBLE_CHANNEL_MASK=0x003F")
 file.extend(enc.encode(&[&left, &right])?);        // planar i32 samples, any chunk size → whole frames
 file.extend(enc.finish());                         // the last, shorter frame
 // frame sizes, total samples and MD5 are only known now: patch STREAMINFO (or seek back in a file)
@@ -32,7 +34,8 @@ let last_len = enc.pending_samples();                               // duration 
 
 | Part | |
 |---|---|
-| Metadata | STREAMINFO (block size, frame sizes, rate, channels, sample size, total samples, MD5 of the audio) and a VORBIS_COMMENT with the vendor string |
+| Metadata | STREAMINFO (block size, frame sizes, rate, channels, sample size, total samples, MD5 of the audio) and a VORBIS_COMMENT with the vendor string and the caller's comments (`header_with_comments`) |
+| Speaker layout | `channel_mask_comment(channels, mask)` gives the `WAVEFORMATEXTENSIBLE_CHANNEL_MASK` comment (RFC 9639 §8.6.2) when the layout differs from what decoders assume (`assumed_channel_mask`: RFC 9639 §9.1.3, with 5 and 6 channels read as side surrounds, as libFLAC and ffmpeg do). FilmCraft's 5.1 FLAC export records the WAV export's back-surround `0x3F` this way |
 | Frames | fixed block size (4096 by default), frame numbers, sample rate and size codes, CRC-8 header and CRC-16 frame checksums |
 | Subframes | constant, verbatim, fixed predictors (order 0–4) and linear prediction (up to order 12), whichever is smallest |
 | Linear prediction | Tukey(0.5) windowed autocorrelation, Levinson–Durbin, 12/15-bit quantised coefficients with error feedback |
