@@ -81,10 +81,11 @@ pub enum SliceType {
 /// Explicit weighted prediction parameters for one reference (7.4.7.3), already derived.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct WpEntry {
-    /// LumaWeightLX, luma_offset_lX (8-bit units).
+    /// LumaWeightLX, luma_offset_lX (in units of 1 << WpOffsetBdShiftY: 8-bit units, or sample
+    /// units with high_precision_offsets_enabled_flag).
     pub luma: (i32, i32),
     pub luma_flag: bool,
-    /// ChromaWeightLX, ChromaOffsetLX (8-bit units) for Cb and Cr.
+    /// ChromaWeightLX, ChromaOffsetLX (units of 1 << WpOffsetBdShiftC) for Cb and Cr.
     pub chroma: [(i32, i32); 2],
     pub chroma_flag: bool,
 }
@@ -126,6 +127,8 @@ pub struct SliceHeader {
     pub qp_delta: i32,
     pub cb_qp_offset: i32,
     pub cr_qp_offset: i32,
+    /// cu_chroma_qp_offset_enabled_flag (chroma QP offset lists).
+    pub cu_chroma_qp_offset_enabled: bool,
     pub deblocking_disabled: bool,
     pub beta_offset_div2: i32,
     pub tc_offset_div2: i32,
@@ -211,6 +214,7 @@ impl SliceHeader {
                 qp_delta: 0,
                 cb_qp_offset: 0,
                 cr_qp_offset: 0,
+                cu_chroma_qp_offset_enabled: false,
                 deblocking_disabled: pps.deblocking_disabled,
                 beta_offset_div2: pps.beta_offset_div2,
                 tc_offset_div2: pps.tc_offset_div2,
@@ -347,6 +351,9 @@ impl SliceHeader {
                 sh.cr_qp_offset = r.read_se()?;
                 ensure!((-12..=12).contains(&sh.cb_qp_offset) && (-12..=12).contains(&sh.cr_qp_offset), "slice chroma QP offset out of range");
             }
+            if pps.rext.chroma_qp_offset_list.is_some() {
+                sh.cu_chroma_qp_offset_enabled = r.read_flag()?;
+            }
             let override_flag = if pps.deblocking_override_enabled { r.read_flag()? } else { false };
             if override_flag {
                 sh.deblocking_disabled = r.read_flag()?;
@@ -418,17 +425,20 @@ fn parse_pwt(r: &mut BitReader, sh: &SliceHeader, sps: &Sps) -> Result<PredWeigh
                 x.chroma_flag = r.read_flag()?;
             }
         }
+        // WpOffsetHalfRangeY / C (7-54, 7-56): 128, or half the sample range with
+        // high_precision_offsets_enabled_flag
+        let half_range = |bd: u32| if sps.rext.high_precision_offsets { 1i32 << (bd.clamp(1, 16) - 1) } else { 128 };
+        let (half_y, half) = (half_range(sps.bit_depth_luma), half_range(sps.bit_depth_chroma));
         for x in e.iter_mut() {
             x.luma = (1 << t.luma_log2_denom, 0);
             if x.luma_flag {
                 let dw = r.read_se()?;
                 let off = r.read_se()?;
-                ensure!((-128..=127).contains(&dw) && (-128..=127).contains(&off), "luma weight out of range");
+                ensure!((-128..=127).contains(&dw) && (-half_y..half_y).contains(&off), "luma weight out of range");
                 x.luma = ((1 << t.luma_log2_denom) + dw, off);
             }
             x.chroma = [(1 << t.chroma_log2_denom, 0); 2];
             if x.chroma_flag {
-                let half = 128; // wpOffsetHalfRangeC (no high_precision_offsets)
                 for c in 0..2 {
                     let dw = r.read_se()?;
                     let doff = r.read_se()?;

@@ -386,6 +386,7 @@ impl Decoder {
         )?;
         sps.check_supported()?;
         pps.check_supported()?;
+        pps.check_with(&sps)?;
         // `start_picture` creates the frame and DPB state. Do not allocate those for a NAL that
         // contains only a syntactically valid slice header and no CABAC payload.
         ensure!(sh.data_offset < rbsp.len(), "empty slice segment data");

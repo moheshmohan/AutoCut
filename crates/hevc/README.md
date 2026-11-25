@@ -36,7 +36,8 @@ and fixture generators.
 | Monochrome (Main 4:0:0 / 4:0:0 10 / 4:0:0 12, `chroma_format_idc` 0): luma only, no chroma syntax (modes, cbfs, residuals, PCM samples, SAO, weights) or planes; `Picture::chroma` is `C400` with empty `u` / `v` planes, and the chroma depth is the luma depth | done (bit-exact on 14 libx265 fixtures) |
 | 12-bit (Main 12, Main 4:2:2 12, Main 4:4:4 12, Monochrome 12, RExt profiles without RExt tools): QpBdOffset 24, interpolation shifts 4 / 2, weighted prediction offsets << 4, deblocking tc / beta << 4, SAO band shift 7 with unscaled offsets (`log2_sao_offset_scale` 0) | done (bit-exact on 27 libx265 fixtures, and on 4 coarse x265 streams against the encoder's own reconstruction) |
 | Separate colour planes (`separate_colour_plane_flag`: three monochrome-coded planes with their own slices) | not supported (`Error::Unsupported`) |
-| Range-extension coding tools (RDPCM, cross-component prediction, extended precision, persistent Rice adaptation, bypass alignment, chroma QP offset lists, SAO offset scaling, transform-skip rotation / contexts / sizes, intra smoothing off, high-precision weighted prediction offsets) | not yet (`Error::Unsupported`) |
+| Range-extension coding tools (SPS / PPS range extensions): transform skip up to 32x32 (`log2_max_transform_skip_block_size`), transform-skip rotation and contexts, implicit (intra) and explicit (inter) RDPCM with their sign-hiding exception, intra smoothing off, persistent Rice adaptation (StatCoeff kept with the contexts, so slices, tiles, WPP and dependent slices start, store and synchronise it as they do the contexts; Rice parameters past 4), cross-component prediction (4:4:4; residuals without coded chroma coefficients included), chroma QP offset lists of one entry (`cu_chroma_qp_offset_flag`), SAO offset scaling (`log2_sao_offset_scale`), high-precision weighted prediction offsets at 8 bits | done (bit-exact with ffmpeg on randomised synthetic streams in every chroma format at 8-12 bits, `src/rext_tests.rs`) |
+| Range-extension uses no available decoder confirms: residual rotation or implicit RDPCM together with lossless (transquant bypass) CUs (ffmpeg neither rotates their residuals nor drops their intra boundary filters), chroma QP offset lists of more than one entry (ffmpeg's `cu_chroma_qp_offset_idx`, which it reports as untested, parses otherwise), high-precision weighted prediction offsets above 8 bits (ffmpeg scales them as 8-bit offsets), extended precision processing and CABAC bypass alignment (ffmpeg implements neither) | refused (`Error::Unsupported`) |
 | SCC, multilayer (SHVC / MV-HEVC), 3D extensions | not supported (layers > 0 are ignored) |
 
 ## API
@@ -111,6 +112,21 @@ with ffmpeg; tests print a message and skip when ffmpeg is absent).
   and at the start of a tile), long-term reference pictures, reference list modification. Expected
   output is known exactly where filters leave PCM samples alone; every stream is also compared with
   ffmpeg.
+- Range-extension streams (`src/rext_tests.rs`): libx265 writes no range-extension coding tool, so
+  a randomised encoder (the same CABAC engine) writes streams that use them: random coding and
+  transform trees (CTB 32 down to 4x4, partial CTBs at the picture edge), intra modes and chroma
+  modes, skip / merge / AMVP CUs in P pictures, lossless CUs, cbfs, SAO parameters and coefficients
+  (small to large levels, Rice parameters past 4), with every context derived as the decoder does
+  and no picture computed. Each of 11 streams (4:2:0, 4:2:2, 4:4:4, monochrome; 8, 10, 12 bits;
+  WPP and one slice per CTB row) is decoded by ffmpeg and by this decoder at 1 and 4 threads, and
+  every plane of every picture must agree; a stream ffmpeg reports errors on fails. The encoder
+  counts each tool's uses, and each test checks its stream exercises them. Undoing any one tool in
+  the decoder fails its tests. The refused uses are shown refused (and the same streams without
+  them decoding); damaged range-extension streams never panic. Two places where ffmpeg 9 differs
+  from the specification outside the range extension are kept out of these streams: chroma SAO on
+  some 4:2:0 / 4:2:2 lossless CUs (which the specification, and this decoder, leave unfiltered),
+  and residuals beyond 16 bits (12-bit transform skip with large levels; ffmpeg wraps them, this
+  decoder keeps 32 bits).
 - Robustness: hvcC input with pts round trip; randomly corrupted, truncated and garbage input never
   panics or deadlocks (single- and multi-threaded).
 - Conformance (`tests/conformance.rs`): every fixture is decoded with 1 thread, 3 threads and every
@@ -176,6 +192,7 @@ libx265 unless noted (x265 enables WPP by default, so most streams carry entry p
 | intra_400 / intra_400_10 / intra_400_nosao_nodbk / medium_400 / slow_400_10 / bframes_400_10 | 352x288 | monochrome intra, presets, B pyramid |
 | tskip_400 / weightp_400 / lossless_400 / cu_lossless_400_10 / odd_201x117_400 | 352x288 / 176x144 / 201x117 | monochrome tool toggles, lossless, odd size |
 | synthetic (7 + 4 + 2 streams) | 96x64 | tiles, PCM, slices, dependent segments, LTR, list modification; 4:2:2, 4:4:4 and monochrome PCM at 8-12 bits (mixed depths), deblocked, cropped by odd lines |
+| synthetic range extensions (11 streams) | 120x72 | every range-extension tool above, randomised, in 4:2:0 / 4:2:2 / 4:4:4 / monochrome at 8-12 bits, intra and P pictures, with and without lossless CUs, WPP, one slice per CTB row |
 
 `cargo test -p filmcraft-hevc --test conformance coverage_report -- --ignored --nocapture` prints the
 decoder statistics per fixture.
@@ -244,11 +261,13 @@ streams that decode. CPU cycles per frame, one thread, release, alternating roun
 
 ## Known gaps
 
-- The range extension coding tools (implicit / explicit RDPCM, cross-component prediction,
-  extended precision, persistent Rice adaptation, bypass alignment, chroma QP offset lists, SAO
-  offset scaling) are rejected with `Error::Unsupported`, and so are separately coded colour planes.
-  4:2:2, 4:4:4 and monochrome streams that use none of those tools (what cameras and libx265 write)
-  decode.
+- Refused with `Error::Unsupported` because no available decoder confirms the pictures: extended
+  precision processing and CABAC bypass alignment (ffmpeg implements neither); residual rotation
+  and implicit RDPCM in streams with lossless CUs, chroma QP offset lists of more than one entry
+  and high-precision weighted prediction offsets above 8 bits (ffmpeg decodes each otherwise than
+  this decoder reads the specification). Separately coded colour planes are refused too.
+- The range-extension tools are checked against ffmpeg on synthetic streams only (no encoder at
+  hand writes them); the RExt conformance streams of the JCT-VC suite have not been run.
 - Tiles and WPP substreams are decoded sequentially (entry points are parsed but the decoder finds
   substream starts itself); parallelism is at the picture level.
 - Error concealment is minimal: missing references are replaced by grey pictures, undecodable

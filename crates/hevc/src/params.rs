@@ -485,9 +485,56 @@ pub struct Sps {
     pub temporal_mvp: bool,
     pub strong_intra_smoothing: bool,
     pub vui: Option<Vui>,
-    /// Range extension flags that change decoding (any set -> unsupported for now).
+    /// The range-extension coding tools (sps_range_extension(), 7.3.2.2.2).
+    pub rext: SpsRangeExtension,
+    /// Any range-extension tool enabled (hardware decoders that take none of them check this).
     pub range_extension: bool,
     pub extension_flags: u8,
+}
+
+/// sps_range_extension() (7.3.2.2.2): the range-extension coding tools a sequence enables.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SpsRangeExtension {
+    pub transform_skip_rotation: bool,
+    pub transform_skip_context: bool,
+    pub implicit_rdpcm: bool,
+    pub explicit_rdpcm: bool,
+    pub extended_precision_processing: bool,
+    pub intra_smoothing_disabled: bool,
+    pub high_precision_offsets: bool,
+    pub persistent_rice_adaptation: bool,
+    pub cabac_bypass_alignment: bool,
+}
+
+impl SpsRangeExtension {
+    fn parse(r: &mut BitReader) -> Result<Self> {
+        let mut f = [false; 9];
+        for v in f.iter_mut() {
+            *v = r.read_flag()?;
+        }
+        let [
+            transform_skip_rotation,
+            transform_skip_context,
+            implicit_rdpcm,
+            explicit_rdpcm,
+            extended_precision_processing,
+            intra_smoothing_disabled,
+            high_precision_offsets,
+            persistent_rice_adaptation,
+            cabac_bypass_alignment,
+        ] = f;
+        Ok(SpsRangeExtension {
+            transform_skip_rotation,
+            transform_skip_context,
+            implicit_rdpcm,
+            explicit_rdpcm,
+            extended_precision_processing,
+            intra_smoothing_disabled,
+            high_precision_offsets,
+            persistent_rice_adaptation,
+            cabac_bypass_alignment,
+        })
+    }
 }
 
 impl Sps {
@@ -572,16 +619,15 @@ impl Sps {
         let temporal_mvp = r.read_flag()?;
         let strong_intra_smoothing = r.read_flag()?;
         let vui = if r.read_flag()? { Some(parse_vui(&mut r, max_sub_layers_minus1)?) } else { None };
-        let mut range_extension = false;
+        let mut rext = SpsRangeExtension::default();
         let mut extension_flags = 0;
         if r.read_flag()? {
             extension_flags = r.read_bits(8)? as u8;
             if extension_flags & 0x80 != 0 {
-                // sps_range_extension(): any enabled tool is outside Main / Main 10
-                let bits = r.read_bits(9)?;
-                range_extension = bits != 0;
+                rext = SpsRangeExtension::parse(&mut r)?;
             }
         }
+        let range_extension = rext != SpsRangeExtension::default();
         Ok(Sps {
             vps_id,
             max_sub_layers_minus1,
@@ -620,6 +666,7 @@ impl Sps {
             temporal_mvp,
             strong_intra_smoothing,
             vui,
+            rext,
             range_extension,
             extension_flags,
         })
@@ -670,8 +717,13 @@ impl Sps {
         if self.bit_depth_luma > 12 || self.bit_depth_chroma > 12 {
             return unsupported(format!("bit depth {}/{}", self.bit_depth_luma, self.bit_depth_chroma));
         }
-        if self.range_extension {
-            return unsupported("SPS range extension tools");
+        // Range-extension tools that no available decoder implements, so their output could not
+        // be verified: refused rather than decoded to unchecked pictures.
+        if self.rext.extended_precision_processing {
+            return unsupported("extended_precision_processing_flag");
+        }
+        if self.rext.cabac_bypass_alignment {
+            return unsupported("cabac_bypass_alignment_enabled_flag");
         }
         if self.extension_flags & 0x7f != 0 {
             return unsupported("SPS multilayer / 3D / SCC extensions");
@@ -722,8 +774,78 @@ pub struct Pps {
     pub lists_modification_present: bool,
     pub log2_parallel_merge_level: u32,
     pub slice_header_extension_present: bool,
+    /// The range-extension tools (pps_range_extension(), 7.3.2.3.2).
+    pub rext: PpsRangeExtension,
+    /// Any range-extension tool enabled (hardware decoders that take none of them check this).
     pub range_extension: bool,
     pub extension_flags: u8,
+}
+
+/// Chroma QP offset lists (pps_range_extension()): the offsets CUs select with
+/// cu_chroma_qp_offset_idx.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ChromaQpOffsetList {
+    /// diff_cu_chroma_qp_offset_depth.
+    pub depth: u32,
+    /// cb_qp_offset_list / cr_qp_offset_list (1 to 6 entries each).
+    pub cb: Vec<i32>,
+    pub cr: Vec<i32>,
+}
+
+/// pps_range_extension() (7.3.2.3.2).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PpsRangeExtension {
+    /// Log2MaxTransformSkipSize (2 without the extension).
+    pub log2_max_transform_skip_size: u32,
+    pub cross_component_prediction: bool,
+    pub chroma_qp_offset_list: Option<ChromaQpOffsetList>,
+    pub log2_sao_offset_scale_luma: u32,
+    pub log2_sao_offset_scale_chroma: u32,
+}
+
+impl Default for PpsRangeExtension {
+    fn default() -> Self {
+        PpsRangeExtension {
+            log2_max_transform_skip_size: 2,
+            cross_component_prediction: false,
+            chroma_qp_offset_list: None,
+            log2_sao_offset_scale_luma: 0,
+            log2_sao_offset_scale_chroma: 0,
+        }
+    }
+}
+
+impl PpsRangeExtension {
+    fn parse(r: &mut BitReader, transform_skip: bool) -> Result<Self> {
+        let mut x = PpsRangeExtension::default();
+        if transform_skip {
+            let v = r.read_ue()?;
+            // (at most MaxTbLog2SizeY - 2, checked with the SPS)
+            ensure!(v <= 3, "log2_max_transform_skip_block_size_minus2 out of range");
+            x.log2_max_transform_skip_size = v + 2;
+        }
+        x.cross_component_prediction = r.read_flag()?;
+        if r.read_flag()? {
+            let depth = r.read_ue()?;
+            ensure!(depth <= 3, "diff_cu_chroma_qp_offset_depth out of range");
+            let len = r.read_ue_plus(1)?;
+            ensure!(len <= 6, "chroma_qp_offset_list_len_minus1 out of range");
+            let mut list = ChromaQpOffsetList { depth, cb: Vec::new(), cr: Vec::new() };
+            for _ in 0..len {
+                let (cb, cr) = (r.read_se()?, r.read_se()?);
+                ensure!((-12..=12).contains(&cb) && (-12..=12).contains(&cr), "chroma QP offset list entry out of range");
+                list.cb.push(cb);
+                list.cr.push(cr);
+            }
+            x.chroma_qp_offset_list = Some(list);
+        }
+        let (luma, chroma) = (r.read_ue()?, r.read_ue()?);
+        // (at most Max(0, BitDepth - 10), checked with the SPS)
+        ensure!(luma <= 6 && chroma <= 6, "log2_sao_offset_scale out of range");
+        x.log2_sao_offset_scale_luma = luma;
+        x.log2_sao_offset_scale_chroma = chroma;
+        Ok(x)
+    }
 }
 
 impl Pps {
@@ -795,28 +917,15 @@ impl Pps {
         let log2_parallel_merge_level = r.read_ue_plus(2)?;
         ensure!(log2_parallel_merge_level <= 6, "log2_parallel_merge_level out of range");
         let slice_header_extension_present = r.read_flag()?;
-        let mut range_extension = false;
+        let mut rext = PpsRangeExtension::default();
         let mut extension_flags = 0;
         if r.read_flag()? {
             extension_flags = r.read_bits(8)? as u8;
             if extension_flags & 0x80 != 0 {
-                // pps_range_extension(): treated as unsupported when it enables anything
-                let mut any = false;
-                if transform_skip {
-                    any |= r.read_ue()? != 0;
-                }
-                any |= r.read_flag()?; // cross_component_prediction
-                let chroma_qp_offset_list = r.read_flag()?;
-                any |= chroma_qp_offset_list;
-                if !chroma_qp_offset_list {
-                    // SAO offsets are applied unscaled. (With the list enabled the PPS is
-                    // unsupported already, and the list's fields come before these.)
-                    any |= r.read_ue()? != 0; // log2_sao_offset_scale_luma
-                    any |= r.read_ue()? != 0; // log2_sao_offset_scale_chroma
-                }
-                range_extension = any;
+                rext = PpsRangeExtension::parse(&mut r, transform_skip)?;
             }
         }
+        let range_extension = rext != PpsRangeExtension::default();
         Ok(Pps {
             id,
             sps_id,
@@ -856,17 +965,53 @@ impl Pps {
             lists_modification_present,
             log2_parallel_merge_level,
             slice_header_extension_present,
+            rext,
             range_extension,
             extension_flags,
         })
     }
 
     pub fn check_supported(&self) -> Result<()> {
-        if self.range_extension {
-            return unsupported("PPS range extension tools");
-        }
         if self.extension_flags & 0x7f != 0 {
             return unsupported("PPS multilayer / 3D / SCC extensions");
+        }
+        Ok(())
+    }
+
+    /// The range-extension fields whose limits depend on the SPS (7.4.3.3.2): cross-component
+    /// prediction only in 4:4:4, SAO offset scales up to Max(0, BitDepth - 10), the chroma QP
+    /// offset depth within the coding tree. Then the range-extension uses this decoder refuses
+    /// because their output could not be verified: ffmpeg, the oracle, decodes them otherwise
+    /// than this decoder reads the specification (`rext_tests` shows each), so a picture made
+    /// with them would be a guess.
+    pub fn check_with(&self, sps: &Sps) -> Result<()> {
+        let x = &self.rext;
+        ensure!(!x.cross_component_prediction || sps.chroma_array_type() == 3, "cross-component prediction outside 4:4:4");
+        let max_scale = |bd: u32| bd.saturating_sub(10);
+        ensure!(
+            x.log2_sao_offset_scale_luma <= max_scale(sps.bit_depth_luma) && x.log2_sao_offset_scale_chroma <= max_scale(sps.bit_depth_chroma),
+            "log2_sao_offset_scale beyond the bit depth"
+        );
+        if let Some(l) = &x.chroma_qp_offset_list {
+            ensure!(l.depth <= sps.log2_ctb - sps.log2_min_cb, "diff_cu_chroma_qp_offset_depth beyond the coding tree");
+            // ffmpeg parses cu_chroma_qp_offset_idx differently (it reports the syntax as untested)
+            if l.cb.len() > 1 {
+                return unsupported("chroma QP offset lists of more than one entry (cu_chroma_qp_offset_idx)");
+            }
+        }
+        // the residual rotation and the intra boundary filters of lossless (transquant bypass)
+        // CUs: ffmpeg neither rotates their residuals nor drops their boundary filters
+        if self.transquant_bypass && sps.rext.transform_skip_rotation {
+            return unsupported("transform-skip rotation with lossless (transquant bypass) CUs");
+        }
+        if self.transquant_bypass && sps.rext.implicit_rdpcm {
+            return unsupported("implicit RDPCM with lossless (transquant bypass) CUs");
+        }
+        // weighted-prediction offsets at the sample precision: ffmpeg scales them as 8-bit ones
+        // (identical at 8 bits)
+        let deep = sps.bit_depth_luma > 8 || (sps.chroma_array_type() != 0 && sps.bit_depth_chroma > 8);
+        if sps.rext.high_precision_offsets && (self.weighted_pred || self.weighted_bipred) && deep {
+            return unsupported("high-precision weighted prediction offsets above 8 bits");
         }
         Ok(())
     }

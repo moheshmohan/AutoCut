@@ -17,22 +17,22 @@ const WC: usize = W / CTB;
 const HC: usize = H / CTB;
 
 /// CABAC encoder.
-struct Enc {
-    w: BitWriter,
+pub(crate) struct Enc {
+    pub(crate) w: BitWriter,
     low: u32,
     range: u32,
     outstanding: u32,
     first: bool,
-    ctx: Contexts,
+    pub(crate) ctx: Contexts,
 }
 
 impl Enc {
-    fn new(w: BitWriter, qp: i32, init_type: usize) -> Self {
+    pub(crate) fn new(w: BitWriter, qp: i32, init_type: usize) -> Self {
         let mut ctx: Contexts = [0u8; NUM_CTX.next_power_of_two()];
         init_contexts(&mut ctx, qp, init_type);
         Enc { w, low: 0, range: 510, outstanding: 0, first: true, ctx }
     }
-    fn reset_engine(&mut self) {
+    pub(crate) fn reset_engine(&mut self) {
         self.low = 0;
         self.range = 510;
         self.outstanding = 0;
@@ -64,7 +64,7 @@ impl Enc {
             self.low <<= 1;
         }
     }
-    fn decision(&mut self, ctx: usize, bin: u32) {
+    pub(crate) fn decision(&mut self, ctx: usize, bin: u32) {
         let s = self.ctx[ctx] as usize;
         let q = ((self.range >> 6) & 3) as usize;
         let lps = RANGE_TAB_LPS[s >> 1][q] as u32;
@@ -78,9 +78,31 @@ impl Enc {
         }
         self.renorm();
     }
+    /// A bypass bin (9.3.5.5).
+    pub(crate) fn bypass(&mut self, bin: u32) {
+        self.low <<= 1;
+        if bin != 0 {
+            self.low += self.range;
+        }
+        if self.low >= 1024 {
+            self.put(1);
+            self.low -= 1024;
+        } else if self.low < 512 {
+            self.put(0);
+        } else {
+            self.low -= 512;
+            self.outstanding += 1;
+        }
+    }
+    /// `n` bypass bins: the low `n` bits of `v`, most significant first.
+    pub(crate) fn bypass_bits(&mut self, v: u32, n: u32) {
+        for i in (0..n).rev() {
+            self.bypass((v >> i) & 1);
+        }
+    }
     /// Terminating bin; a 1 flushes the engine (9.3.5.6) — its last written bit is the stop /
     /// alignment bit.
-    fn terminate(&mut self, bin: u32) {
+    pub(crate) fn terminate(&mut self, bin: u32) {
         self.range -= 2;
         if bin != 0 {
             self.low += self.range;
@@ -154,7 +176,7 @@ fn subsampling(idc: u32) -> (usize, usize) {
     }
 }
 
-fn nal(t: u8, rbsp: &[u8]) -> Vec<u8> {
+pub(crate) fn nal(t: u8, rbsp: &[u8]) -> Vec<u8> {
     let mut out = vec![0, 0, 0, 1, t << 1, 1];
     out.extend(escape_rbsp(rbsp));
     out
@@ -1112,15 +1134,22 @@ fn pps_rbsp_with_sao_offset_scale(luma: u32, chroma: u32) -> Vec<u8> {
     w.finish()
 }
 
-/// SAO offsets are applied unscaled, so a PPS scaling them (a range-extension tool a 4:2:2
-/// stream may carry) must be refused rather than decoded to wrong samples; a range extension
-/// that enables nothing is fine.
+/// A PPS range extension's SAO offset scales are read (SaoOffsetVal = offset << scale, 7-71) and
+/// checked against the bit depth: a range extension that enables nothing changes nothing, scales
+/// up to Max(0, BitDepth - 10) are taken, larger ones are invalid. (Before the range-extension
+/// tools any scale was refused as unsupported, the offsets being applied unscaled; the scaled
+/// decoding is checked against ffmpeg in `rext_tests`.)
 #[test]
-fn a_pps_scaling_sao_offsets_is_unsupported() {
-    let plain = crate::params::Pps::parse(&pps_rbsp_with_sao_offset_scale(0, 0)).expect("parses");
-    assert!(plain.check_supported().is_ok());
-    for (luma, chroma) in [(1, 0), (0, 2)] {
-        let pps = crate::params::Pps::parse(&pps_rbsp_with_sao_offset_scale(luma, chroma)).expect("parses");
-        assert!(pps.check_supported().is_err(), "luma {luma}, chroma {chroma}");
+fn pps_sao_offset_scales_are_read_and_checked_against_the_bit_depth() {
+    let pps = |luma, chroma| crate::params::Pps::parse(&pps_rbsp_with_sao_offset_scale(luma, chroma)).expect("parses");
+    let sps = |luma, chroma| crate::params::Sps::parse(&filmcraft_bitstream::unescape_rbsp(&sps_with_depths(true, luma, chroma)[6..])).expect("parses");
+    let plain = pps(0, 0);
+    assert!(plain.check_supported().is_ok() && !plain.range_extension);
+    assert!(plain.check_with(&sps(8, 8)).is_ok());
+    for ((luma, chroma), depths, ok) in [((1, 0), (10, 10), false), ((0, 2), (12, 11), false), ((2, 1), (12, 11), true), ((1, 2), (11, 12), true)] {
+        let p = pps(luma, chroma);
+        assert!(p.check_supported().is_ok() && p.range_extension, "{luma}/{chroma}");
+        assert_eq!((p.rext.log2_sao_offset_scale_luma, p.rext.log2_sao_offset_scale_chroma), (luma, chroma));
+        assert_eq!(p.check_with(&sps(depths.0, depths.1)).is_ok(), ok, "scales {luma}/{chroma} at {depths:?}");
     }
 }

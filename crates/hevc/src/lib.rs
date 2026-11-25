@@ -1,8 +1,11 @@
 //! Clean-room pure-Rust H.265 / HEVC decoder, implemented from ITU-T Rec. H.265 (ISO/IEC 23008-2).
 //!
 //! Supported: Main, Main 10, Main 12, Main 4:2:2 10 / 12, Main 4:4:4 (10, 12) and monochrome
-//! profiles (4:2:0, 4:2:2, 4:4:4 and 4:0:0 at 8 to 12 bits) without range-extension tools, all
-//! coding tools of those profiles: CABAC, coding / transform quadtrees, AMP, PCM,
+//! profiles (4:2:0, 4:2:2, 4:4:4 and 4:0:0 at 8 to 12 bits) and the range-extension coding tools
+//! (residual DPCM, transform-skip rotation / contexts / sizes, persistent Rice adaptation,
+//! cross-component prediction, chroma QP offsets, SAO offset scaling, intra smoothing off; see the
+//! README for the uses refused), all coding tools of those profiles: CABAC, coding / transform
+//! quadtrees, AMP, PCM,
 //! transform skip, scaling lists, sign data hiding, 35 intra modes with strong intra smoothing,
 //! merge / AMVP / TMVP, weighted prediction, deblocking, SAO, tiles, wavefront parallel processing
 //! (parsing), dependent slice segments, short- and long-term reference picture sets.
@@ -37,6 +40,8 @@ mod slicedec;
 #[rustfmt::skip]
 #[allow(dead_code)]
 mod spec_tables;
+#[cfg(test)]
+mod rext_tests;
 #[cfg(test)]
 mod synth_tests;
 mod tables;

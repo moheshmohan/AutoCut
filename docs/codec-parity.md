@@ -1,6 +1,6 @@
 # Codec parity
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-11-25 · **Change:** minor (HEVC 4:4:4 and monochrome decoding) · **Target:** Adobe Premiere Pro 2026 (26.5.2) and Media Encoder 2026
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-11-25 · **Change:** minor (HEVC 4:4:4, monochrome, 12-bit and range-extension decoding) · **Target:** Adobe Premiere Pro 2026 (26.5.2) and Media Encoder 2026
 
 Video and audio codecs, decode and encode, with fidelity and how each is tested. Containers,
 project and interchange files are in [file-format-parity.md](file-format-parity.md); hardware
@@ -16,7 +16,7 @@ contents). Percent is ready-for-real-work for that codec: depth, profiles, speed
 | Codec | Premiere | Our decode | Our encode | Fidelity and tests | % | Est. |
 |---|---|---|---|---|---|---|
 | H.264 / AVC | decode all common profiles incl. High 10, 4:2:2 (XAVC S-I, AVC-Intra); encode 8/10-bit | own decoder Baseline / Main / High, **High 10, High 4:2:2 and their Intra profiles** (8- and 10-bit 4:2:0 / 4:2:2, CABAC / CAVLC); no 4:4:4, interlaced field / MBAFF, lossless, monochrome | own encoder (High / Main / Baseline, B-frames, CBR / VBR / 2-pass); 8-bit 4:2:0 only; hardware VideoToolbox / NVENC | decode bit-exact on 97 conformance streams (61 High 10 / 4:2:2, incl. 1080p 10-bit 4:2:2 all-intra), 500–600 fps 1080p 8-bit, ~360 fps 10-bit 4:2:2 (14 threads); encode ffprobe-checked, byte-identical across machines | 80% | 20–35 h |
-| HEVC / H.265 | decode Main, Main 10, 4:2:2 10 (XAVC HS); encode 8/10-bit, HDR | own decoder Main / Main 10 / Main 12 / Main Still Picture / Main 4:2:2 10 / 12 / Main 4:4:4 (10, 12) / monochrome (8-, 10- and 12-bit 4:2:0, 4:2:2, 4:4:4 and 4:0:0), bit-exact on 142 fixtures, ~225 fps 1080p; **no RExt coding tools** | **hardware only** (VideoToolbox 8-bit; NVENC 8-bit and Main 10 HDR on Windows); no software encoder | NVENC round trip 48.9 dB (8-bit), 71.1 dB (10-bit); ffprobe | 60% | 30–60 h |
+| HEVC / H.265 | decode Main, Main 10, 4:2:2 10 (XAVC HS); encode 8/10-bit, HDR | own decoder Main / Main 10 / Main 12 / Main Still Picture / Main 4:2:2 10 / 12 / Main 4:4:4 (10, 12) / monochrome (8-, 10- and 12-bit 4:2:0, 4:2:2, 4:4:4 and 4:0:0), and the RExt coding tools (RDPCM, rotation, persistent Rice, cross-component prediction, chroma QP offsets, SAO scaling), bit-exact on 142 fixtures and 11 synthetic RExt streams, ~225 fps 1080p; **refused: extended precision, bypass alignment, separate colour planes, the RExt uses ffmpeg decodes differently** | **hardware only** (VideoToolbox 8-bit; NVENC 8-bit and Main 10 HDR on Windows); no software encoder | NVENC round trip 48.9 dB (8-bit), 71.1 dB (10-bit); ffprobe | 60% | 30–60 h |
 | ProRes 422 family / 4444 / XQ | decode + encode all | own decode + encode, all six profiles, alpha | yes (export UI exposes 422 flavours; 4444 / XQ request #342) | ±1 LSB, 318 fps; alpha final-run conformance and native macOS HD decode checked ([details](../crates/prores/README.md#alpha-bitstream-conformance)) | 85% | 3–6 h |
 | ProRes RAW | decode | none (#345) | — | — | 0% | 30–50 h (spec availability uncertain) |
 | DNxHD / DNxHR | decode + encode, MXF / MOV | own decode (all SMPTE ST 2019-1 CIDs, 8/10/12-bit, 4:2:2 / 4:4:4, interlaced, alpha) and encode LB / SQ / HQ / HQX / 444 | yes, MOV + MXF | within IDCT precision of ffmpeg on 22 fixtures | 90% | 2–4 h |
@@ -61,6 +61,7 @@ contents). Percent is ready-for-real-work for that codec: depth, profiles, speed
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-25 | minor | HEVC range-extension coding tools decode in software |
 | 2026-11-25 | minor | HEVC 12-bit (4:2:0, 4:2:2, 4:4:4, monochrome) verified bit-exact |
 | 2026-11-25 | minor | HEVC 4:4:4 and monochrome (8- and 10-bit) decode in software |
 | 2026-11-25 | minor | H.264 High 10 / High 4:2:2 (8- and 10-bit, Intra profiles) decode in software |

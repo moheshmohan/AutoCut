@@ -209,6 +209,10 @@ impl<A: Accel> Front<A> {
         .map_err(decode_err)?;
         sps.check_supported().map_err(decode_err)?;
         pps.check_supported().map_err(decode_err)?;
+        // (the software decoder takes the range-extension tools; this front passes none of them on)
+        if sps.range_extension || pps.range_extension {
+            return Err(unsupported("HEVC range extension tools"));
+        }
         if first {
             self.start_picture(&sh, &sps, &pps, pts, frames)?;
         }

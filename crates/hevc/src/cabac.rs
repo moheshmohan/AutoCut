@@ -60,22 +60,45 @@ pub(crate) static NEXT_STATE: [[u8; 2]; 128] = {
     t
 };
 
-/// Context states, padded to a power of two so that the per-bin index needs no bounds check.
-pub type Contexts = [u8; CTX_SLOTS];
-const CTX_SLOTS: usize = NUM_CTX.next_power_of_two();
+/// The contexts of the cross-component prediction syntax (7.3.8.12), after the generated ones:
+/// log2_res_scale_abs_plus1[c] (ctxInc 4 * c + binIdx) and res_scale_sign_flag[c] (ctxInc c),
+/// initValue 154 for every initType.
+pub const LOG2_RES_SCALE_ABS: usize = NUM_CTX;
+pub const RES_SCALE_SIGN: usize = NUM_CTX + 8;
+/// StatCoeff[sbType] of persistent Rice adaptation (the Rice parameter initialization states of
+/// 9.3.2), kept with the context variables: they are initialised, stored and synchronised (WPP,
+/// dependent slice segments) exactly when the contexts are.
+pub const STAT_COEFF: usize = NUM_CTX + 10;
+const USED_SLOTS: usize = NUM_CTX + 14;
 
-/// Initialise all context variables for `slice_qp` and `init_type` (9.3.2.2). Each context is stored as
-/// `pStateIdx << 1 | valMps`.
+/// Context states (and StatCoeff), padded to a power of two so that the per-bin index needs no
+/// bounds check.
+pub type Contexts = [u8; CTX_SLOTS];
+const CTX_SLOTS: usize = USED_SLOTS.next_power_of_two();
+
+/// The context state (`pStateIdx << 1 | valMps`) of `init_value` at `qp` (9.3.2.2).
+#[inline]
+fn init_state(init_value: u8, qp: i32) -> u8 {
+    let slope = (init_value >> 4) as i32;
+    let offset = (init_value & 15) as i32;
+    let m = slope * 5 - 45;
+    let n = (offset << 3) - 16;
+    let pre = (((m * qp) >> 4) + n).clamp(1, 126);
+    if pre <= 63 { ((63 - pre) << 1) as u8 } else { (((pre - 64) << 1) | 1) as u8 }
+}
+
+/// Initialise all context variables for `slice_qp` and `init_type` (9.3.2.2), and StatCoeff to 0.
+/// Each context is stored as `pStateIdx << 1 | valMps`.
 pub fn init_contexts(ctx: &mut Contexts, slice_qp: i32, init_type: usize) {
     let qp = slice_qp.clamp(0, 51);
     for (c, &v) in ctx.iter_mut().zip(CABAC_INIT[init_type].iter()) {
-        let slope = (v >> 4) as i32;
-        let offset = (v & 15) as i32;
-        let m = slope * 5 - 45;
-        let n = (offset << 3) - 16;
-        let pre = (((m * qp) >> 4) + n).clamp(1, 126);
-        *c = if pre <= 63 { ((63 - pre) << 1) as u8 } else { (((pre - 64) << 1) | 1) as u8 };
+        *c = init_state(v, qp);
     }
+    let ccp = init_state(154, qp);
+    for c in &mut ctx[LOG2_RES_SCALE_ABS..STAT_COEFF] {
+        *c = ccp;
+    }
+    ctx[STAT_COEFF..USED_SLOTS].fill(0);
 }
 
 pub struct Cabac<'a> {
