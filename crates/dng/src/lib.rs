@@ -17,6 +17,7 @@
 pub mod color;
 pub mod demosaic;
 pub mod ljpeg;
+pub mod opcode;
 pub mod options;
 pub mod process;
 pub mod raw;
@@ -217,6 +218,11 @@ impl<'a> Dng<'a> {
 
     /// The processing tags of the raw image.
     pub fn params(&self) -> Result<Params> {
+        self.params_with(true)
+    }
+
+    /// [`Dng::params`], reading the opcode lists only when `opcodes` is set.
+    fn params_with(&self, opcodes: bool) -> Result<Params> {
         let uint_pair = |tag| -> Result<Option<(usize, usize)>> {
             match self.raw_tag(tag) {
                 Some(e) => match self.tiff.uints(e)?[..] {
@@ -265,7 +271,19 @@ impl<'a> Dng<'a> {
             crop_origin: pair(tags::DEFAULT_CROP_ORIGIN)?,
             crop_size: pair(tags::DEFAULT_CROP_SIZE)?,
             cfa: self.cfa()?,
+            opcodes: opcode::Lists {
+                list1: if opcodes { self.opcode_list(tags::OPCODE_LIST_1)? } else { Vec::new() },
+                list2: if opcodes { self.opcode_list(tags::OPCODE_LIST_2)? } else { Vec::new() },
+                list3: if opcodes { self.opcode_list(tags::OPCODE_LIST_3)? } else { Vec::new() },
+            },
         })
+    }
+
+    fn opcode_list(&self, tag: u16) -> Result<Vec<opcode::Opcode>> {
+        match self.raw_ifd().get(tag) {
+            Some(e) => opcode::parse(self.tiff.value_bytes(e)?),
+            None => Ok(Vec::new()),
+        }
     }
 
     /// The colour tags.
@@ -290,7 +308,7 @@ impl<'a> Dng<'a> {
     /// Size, depth and CinemaDNG metadata.
     pub fn info(&self) -> Result<Info> {
         let l = raw::layout(&self.tiff, self.raw_ifd())?;
-        let p = self.params()?;
+        let p = self.params_with(false)?;
         let (_, _, aw, ah) = process::active_rect(&p, l.width, l.height)?;
         let (_, _, width, height) = process::crop_rect(&p, aw, ah);
         let dng_version = self
@@ -354,8 +372,10 @@ impl<'a> Dng<'a> {
     /// Develop the main image with raw settings.
     pub fn develop_with(&self, o: &ProcessOptions) -> Result<Image> {
         let info = self.info()?;
-        let p = self.params()?;
-        let raw = self.raw()?;
+        let p = self.params_with(o.apply_opcodes)?;
+        let mut raw = self.raw()?;
+        let preview = process::preview(&p, o, &info);
+        process::apply_list1(&mut raw, &p, preview)?;
         let mut calibration = self.calibration()?;
         calibration.baseline_exposure += o.exposure_stops();
         if let WhiteBalance::Custom { temperature, tint } = o.white_balance

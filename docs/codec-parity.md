@@ -30,7 +30,7 @@ contents). Percent is ready-for-real-work for that codec: depth, profiles, speed
 | DV / DVCPRO / DV100 | decode + encode | none | none | — | 0% | 15–25 h |
 | MPEG-4 Part 2 | decode | none | none | — | 0% | 10–20 h |
 | WMV / VC-1 | decode, encode on Windows | none | none | — | 0% | 20–35 h |
-| CinemaDNG / DNG | decode | own decoder (#1065): uncompressed and lossless JPEG raw, Bayer and LinearRaw, DNG colour model to linear Rec. 709 floats; folders of `.dng` frames as one clip with the CinemaDNG frame rate and time code; **no** lossy / JPEG XL DNG, MXF-wrapped CinemaDNG, opcode lists or Raw settings UI | — | raw samples bit-exact (and identical to LibRaw's on our synthetic files), processing against hand-computed values | 60% | 10–20 h |
+| CinemaDNG / DNG | decode | own decoder (#1065): uncompressed and lossless JPEG raw, Bayer and LinearRaw, DNG colour model to linear Rec. 709 floats; folders of `.dng` frames as one clip with the CinemaDNG frame rate and time code; raw settings and opcode lists (DNG 1.7.1 chapter 7) in the crate API, the lists applied on request (`ProcessOptions::apply_opcodes`, off by default); **no** lossy / JPEG XL DNG, MXF-wrapped CinemaDNG or Raw settings UI | — | raw samples bit-exact (and identical to LibRaw's on our synthetic files), processing against hand-computed values | 60% | 10–20 h |
 | Camera RAW: R3D (incl. R3D NE), ARRIRAW, Sony RAW / X-OCN, Canon RAW, BRAW (plug-in) | decode (vendor SDKs) | none (#383) | — | — | 0% | 50–90 h for the ones with public specs; vendor-SDK-only formats need an owner decision |
 | GIF (animated) | encode | decode as still | encode | — | 80% | — |
 | Uncompressed / v210 / RGB | decode + encode (AVI, MOV) | partial (MOV PCM-style video not verified) | none | — | 30% | 8–15 h |

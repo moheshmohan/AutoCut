@@ -949,3 +949,7 @@ Still-image improvements from upstream craft-libs, ported into AutoCut's own cra
   output bit for bit; the DNG crate gains raw settings (`ProcessOptions`: white balance as shot or
   by temperature and tint, exposure, demosaic quality, a reduced-resolution path) for a future
   Raw panel.
+- **AV123**: the DNG crate reads a file's opcode lists (lens shading gain maps, bad pixel maps,
+  vignette and distortion corrections, trims) and applies them when asked
+  (`ProcessOptions::apply_opcodes`); off by default, as upstream keeps it until its readings of
+  the specification are checked against real camera files.

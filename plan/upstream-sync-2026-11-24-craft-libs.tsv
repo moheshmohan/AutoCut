@@ -441,12 +441,12 @@ interchange	79c6602a35	2026-10-11	#1065: clean-room DNG / CinemaDNG decoder crat
 interchange	440e14c7f2	2026-10-11	#1065: clean-room DNG / CinemaDNG decoder crate	refactor	already	crates/dng/src/lib.rs, color.rs, demosaic.rs, process.rs	skip		replay of FilmCraft #1065 lib/color/demosaic/process (fork commit 28247afa)
 interchange	fab94c80fe	2026-11-15	raw: bound opcode area count validation	crash	n/a	-	skip		opcode area count validation; the fork has no opcodes
 interchange	75cff558e5	2026-11-15	raw: parse DNG opcode parameters into typed values	feature	n/a	-	skip		typed DNG opcode parameters; the fork has no opcodes
-interchange	cb3f76848b	2026-10-11	#1065: DNG opcode lists (OpcodeList1/2/3)	feature	applies	crates/dng/src/process.rs	list		DNG OpcodeList1/2/3 (FilmCraft #1065 decode-plus, never in the fork): the fork ignores opcode lists (no tags 51008/51009/51022). Large feature
+interchange	cb3f76848b	2026-10-11	#1065: DNG opcode lists (OpcodeList1/2/3)	feature	applies	crates/dng/src/process.rs	list	AV123	DNG OpcodeList1/2/3 (FilmCraft #1065 decode-plus, never in the fork): the fork ignores opcode lists (no tags 51008/51009/51022). Large feature
 interchange	58d6844dad	2026-11-16	raw: carry the linearization table through DngImage views	refactor	n/a	-	skip		craft-raw DngImage views carry the linearization table (writer)
 interchange	2d271b95bd	2026-11-15	raw: expose opcode encoding as a fallible API without panics	crash	n/a	-	skip		fallible opcode encoding; the fork has no opcodes
 interchange	cbc6172375	2026-11-15	raw: reject unrepresentable opcode envelope lengths before encoding	crash	n/a	-	skip		unrepresentable opcode envelope lengths; the fork has no opcodes
 interchange	c48cf22a03	2026-11-15	Adapt attributed FilmCraft opcode envelopes to shared bounded API	refactor	n/a	-	skip		opcode envelope history adaptation
-interchange	c31578e1ff	2026-10-11	#1065: DNG opcode lists (OpcodeList1/2/3)	feature	applies	crates/dng/src/process.rs	list		opcode list envelope, same #1065 opcode feature as cb3f76848b
+interchange	c31578e1ff	2026-10-11	#1065: DNG opcode lists (OpcodeList1/2/3)	feature	applies	crates/dng/src/process.rs	list	AV123	opcode list envelope, same #1065 opcode feature as cb3f76848b
 interchange	00dbe7449a	2026-11-16	raw: initialize linearization_table in the dngwrite test image	refactor	n/a	-	skip		test image field init (craft-raw writer)
 interchange	cbf14205dc	2026-11-16	raw: initialize linearization_table in the dngwrite test image	refactor	n/a	-	skip		test image field init (craft-raw writer)
 interchange	e6a9bcf338	2026-11-15	Adapt attributed FilmCraft DNG raw history to shared line decoder	refactor	n/a	-	skip		history adaptation of the fork's raw.rs into dng_lines (own Error, craft-tiff, feature name)
