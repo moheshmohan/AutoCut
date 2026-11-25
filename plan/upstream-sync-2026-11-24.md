@@ -370,3 +370,14 @@ ported in one lane (own worktree and target, lane gate), behaviour only, into th
 | AV162 | QuickTime `logs` box read and written as `VideoParams::log_transfer_function` (refused at `add_track` when the reader would not accept it); `TrackSpec::colour` writes a video track's Matroska `Colour` element. The laced-remux test change was not taken: the fork's muxer laces audio whatever its timestamps, so its `laced_remux` passes without it (noted as a fork muxer bug, not fixed). Nothing maps the `logs` identifier to `ColorSpace::AppleLog` yet | `ce31f42e76` |
 | AV163 | `WriterOptions::compatible_brands` (`Vec<FourCc>`; unlike upstream each brand is written once, and more than 256 distinct extra brands is an error); AV1 MP4 exports list `av01` (AV1-ISOBMFF §2.1). `MkvWriter` writes a dependent BlockGroup's real ReferenceBlock delta (`el_sint`); unlike upstream's 0, a track's first frame keeps -1 | `057b0e3e01` |
 | AV164 | `Mp4Writer` counts chunk offsets from the file's first byte (a file begun mid-writer is valid, `moov` at the end or in front); the header, sample, timecode, chapter, faststart and `moov` position sums are checked (`advance`), and unlike upstream a refused sample is checked before it is written. The fork's exports start at 0, so no export changes | `63712c33e6`, `098eb2e43a`, `e5fa1ac2f9` (Mp4Writer parts) |
+| AV165 | `with_cancel`, `with_draft` and `with_catch_up` restore the hint they replaced on unwind too, as `with_background` and `Context::run` already did; the fork's `Context` (all four hints) is kept rather than upstream's cancel-only one | `5d25fa3d22` |
+
+Visible to users: AV160 (chapter markers become MP4/MOV/M4A chapters) and AV163 (AV1 MP4 exports
+list `av01`); the rest is container API and crash guards. Left out, with reasons in the commit
+messages: imported chapters becoming markers (`MediaInfo` has no chapter list; MKV chapters are not
+imported either), mapping the `logs` identifier to `ColorSpace::AppleLog` (a media-layer change),
+upstream's laced-remux test change (not needed by the fork's muxer). Noticed, not changed: the
+fork's `MkvWriter` laces audio frames whatever their timestamps (laced frames after the first read
+back at the block time plus multiples of DefaultDuration, or the block time without one), and
+`Mp4Writer::write_sample` computes `sample_count as u32 + 1` for a sync sample, which overflows past
+2^32 - 1 samples in one track (upstream's `too_many_samples` guard, from another commit).

@@ -17,6 +17,10 @@
 //! [`with_background`] marks work nobody waits on interactively (thumbnails of the Project panel,
 //! the Media Browser and the timeline): sources should not keep expensive state, such as a
 //! frame-threaded 4K decoder, for it once it is done.
+//!
+//! Every scope restores the hint it replaced however its closure ends, a panic caught further up
+//! included, so a worker thread never carries a failed job's flag or hints into the next one.
+//! [`Context`] carries all of them to another thread the same way.
 
 use std::cell::{Cell, RefCell};
 use std::sync::Arc;
@@ -52,13 +56,19 @@ pub fn background() -> bool {
     BACKGROUND.with(Cell::get)
 }
 
-/// Run `f` with the draft-decoding hint `on` (restoring the previous one after). Frames decoded
-/// in draft mode are only handed to requests made in draft mode.
+/// Run `f` with the draft-decoding hint `on` (restoring the previous one however `f` ends).
+/// Frames decoded in draft mode are only handed to requests made in draft mode.
 pub fn with_draft<R>(on: bool, f: impl FnOnce() -> R) -> R {
-    let prev = DRAFT.with(|c| c.replace(on));
-    let r = f();
-    DRAFT.with(|c| c.set(prev));
-    r
+    /// Restores the previous hint on return or unwind (a request that panics, caught further up,
+    /// must not leave its worker thread decoding in draft mode).
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            DRAFT.with(|c| c.set(self.0));
+        }
+    }
+    let _restore = Restore(DRAFT.with(|c| c.replace(on)));
+    f()
 }
 
 /// Whether the work running on this thread accepts draft-quality decoding (off unless inside
@@ -67,15 +77,21 @@ pub fn draft() -> bool {
     DRAFT.with(Cell::get)
 }
 
-/// Run `f` with the catch-up hint `margin` (restoring the previous one after): frames shown more
-/// than `margin` before the requested time are late (`Some(Tick::ZERO)`: everything before it).
-/// The margin is measured in media time at normal speed; a wrong guess (a sped-up or reversed
-/// clip) only costs a later re-seek, never a wrong frame.
+/// Run `f` with the catch-up hint `margin` (restoring the previous one however `f` ends): frames
+/// shown more than `margin` before the requested time are late (`Some(Tick::ZERO)`: everything
+/// before it). The margin is measured in media time at normal speed; a wrong guess (a sped-up or
+/// reversed clip) only costs a later re-seek, never a wrong frame.
 pub fn with_catch_up<R>(margin: Option<Tick>, f: impl FnOnce() -> R) -> R {
-    let prev = CATCH_UP.with(|c| c.replace(margin));
-    let r = f();
-    CATCH_UP.with(|c| c.set(prev));
-    r
+    /// Restores the previous margin on return or unwind (a later request on the thread must not
+    /// treat its frames as late).
+    struct Restore(Option<Tick>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            CATCH_UP.with(|c| c.set(self.0));
+        }
+    }
+    let _restore = Restore(CATCH_UP.with(|c| c.replace(margin)));
+    f()
 }
 
 /// The catch-up margin of the work running on this thread (None: no frame is late).
@@ -83,12 +99,20 @@ pub fn catch_up() -> Option<Tick> {
     CATCH_UP.with(Cell::get)
 }
 
-/// Run `f` with `flag` as this thread's cancellation flag (restoring the previous one after).
+/// Run `f` with `flag` as this thread's cancellation flag (restoring the previous one however `f`
+/// ends).
 pub fn with_cancel<R>(flag: &Arc<AtomicBool>, f: impl FnOnce() -> R) -> R {
-    let prev = CURRENT.with(|c| c.replace(Some(flag.clone())));
-    let r = f();
-    CURRENT.with(|c| *c.borrow_mut() = prev);
-    r
+    /// Restores the previous flag on return or unwind (a request that panics, caught further up,
+    /// must not leave its flag on the worker, cancelling the next job or keeping the old one's).
+    struct Restore(Option<Arc<AtomicBool>>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            let prev = self.0.take();
+            CURRENT.with(|c| *c.borrow_mut() = prev);
+        }
+    }
+    let _restore = Restore(CURRENT.with(|c| c.replace(Some(flag.clone()))));
+    f()
 }
 
 /// Whether the work running on this thread has been cancelled.
@@ -193,6 +217,64 @@ mod tests {
         let r = std::panic::catch_unwind(|| with_background(true, || panic!("boom")));
         assert!(r.is_err());
         assert!(!background());
+    }
+
+    /// A panic inside any scoped hint, caught further up, leaves the thread with the enclosing
+    /// hints, live: the outer flag still cancels, the outer margin and draft hint still hold.
+    #[test]
+    fn a_panic_inside_a_scope_restores_the_enclosing_hints() {
+        let outer = Arc::new(AtomicBool::new(false));
+        let inner = Arc::new(AtomicBool::new(true));
+        with_cancel(&outer, || {
+            let r = std::panic::catch_unwind(|| with_cancel(&inner, || panic!("request failed")));
+            assert!(r.is_err());
+            assert!(!cancelled(), "the inner, cancelled flag is gone");
+            outer.store(true, Ordering::Relaxed);
+            assert!(cancelled(), "the outer flag is live again");
+        });
+        assert!(!cancelled());
+        with_draft(true, || {
+            let r = std::panic::catch_unwind(|| with_draft(false, || panic!("request failed")));
+            assert!(r.is_err());
+            assert!(draft());
+        });
+        let r = std::panic::catch_unwind(|| with_draft(true, || panic!("request failed")));
+        assert!(r.is_err());
+        assert!(!draft());
+        with_catch_up(Some(Tick(5)), || {
+            let r = std::panic::catch_unwind(|| with_catch_up(None, || panic!("request failed")));
+            assert!(r.is_err());
+            assert_eq!(catch_up(), Some(Tick(5)));
+        });
+        let r = std::panic::catch_unwind(|| with_catch_up(Some(Tick::ZERO), || panic!("request failed")));
+        assert!(r.is_err());
+        assert_eq!(catch_up(), None);
+    }
+
+    /// On a worker thread, a captured context runs live and a panic inside it, or inside the
+    /// worker's own scope, leaves nothing of it behind.
+    #[test]
+    fn a_worker_thread_keeps_no_hint_of_a_failed_job() {
+        let request = Arc::new(AtomicBool::new(false));
+        let ctx = with_cancel(&request, || with_catch_up(Some(Tick(7)), Context::current));
+        request.store(true, Ordering::Relaxed);
+        std::thread::spawn(move || {
+            let worker = Arc::new(AtomicBool::new(false));
+            with_cancel(&worker, || {
+                assert!(ctx.clone().run(cancelled), "cancelled after capture: still seen");
+                assert!(!cancelled());
+                let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| ctx.clone().run(|| panic!("delegate failed"))));
+                assert!(r.is_err());
+                assert_eq!((cancelled(), catch_up()), (false, None));
+                worker.store(true, Ordering::Relaxed);
+                assert!(cancelled());
+            });
+            let r = std::panic::catch_unwind(|| with_cancel(&Arc::new(AtomicBool::new(true)), || with_catch_up(Some(Tick(1)), || panic!("job"))));
+            assert!(r.is_err());
+            assert_eq!((cancelled(), catch_up(), draft()), (false, None, false));
+        })
+        .join()
+        .unwrap();
     }
 
     #[test]
