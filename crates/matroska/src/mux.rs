@@ -7,7 +7,7 @@ use std::io::{Seek, SeekFrom, Write};
 use crate::ebml::{write_id, write_size, write_unknown_size};
 use crate::error::{Error, Result};
 use crate::ids::*;
-use crate::track::TrackKind;
+use crate::track::{Colour, TrackKind};
 
 /// Lacing used for audio tracks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -30,6 +30,10 @@ pub struct TrackSpec {
     pub name: Option<String>,
     /// Pixel width/height for video tracks.
     pub video_size: Option<(u32, u32)>,
+    /// The video track's `Colour` element (RFC 9559): the fields that are set are written. VP9's
+    /// own colour syntax carries only the matrix and range, so without it a Rec. 2020, P3, PQ or
+    /// HLG stream reads as BT.709. Ignored without a `video_size`.
+    pub colour: Option<Colour>,
     /// (sampling frequency, channels, bit depth) for audio tracks.
     pub audio: Option<(f64, u64, Option<u64>)>,
     pub codec_delay_ns: u64,
@@ -46,6 +50,7 @@ impl TrackSpec {
             language: None,
             name: None,
             video_size: None,
+            colour: None,
             audio: None,
             codec_delay_ns: 0,
             seek_pre_roll_ns: 0,
@@ -96,6 +101,50 @@ pub(crate) fn el_uint(out: &mut Vec<u8>, id: u32, v: u64) {
 
 pub(crate) fn el_float(out: &mut Vec<u8>, id: u32, v: f64) {
     el(out, id, &v.to_be_bytes());
+}
+
+/// The body of a `Colour` element: every field of `c` that is set.
+fn colour(c: &Colour) -> Vec<u8> {
+    let mut out = Vec::new();
+    for (id, v) in [
+        (MATRIX_COEFFICIENTS, c.matrix_coefficients),
+        (BITS_PER_CHANNEL, c.bits_per_channel),
+        (CHROMA_SUBSAMPLING_HORZ, c.chroma_subsampling_horz),
+        (CHROMA_SUBSAMPLING_VERT, c.chroma_subsampling_vert),
+        (CB_SUBSAMPLING_HORZ, c.cb_subsampling_horz),
+        (CB_SUBSAMPLING_VERT, c.cb_subsampling_vert),
+        (CHROMA_SITING_HORZ, c.chroma_siting_horz),
+        (CHROMA_SITING_VERT, c.chroma_siting_vert),
+        (RANGE, c.range),
+        (TRANSFER_CHARACTERISTICS, c.transfer_characteristics),
+        (PRIMARIES, c.primaries),
+        (MAX_CLL, c.max_cll),
+        (MAX_FALL, c.max_fall),
+    ] {
+        if let Some(v) = v {
+            el_uint(&mut out, id, v);
+        }
+    }
+    if let Some(m) = &c.mastering {
+        let [r, g, b] = m.primaries;
+        let mut md = Vec::new();
+        for (id, v) in [
+            (PRIMARY_R_X, r.0),
+            (PRIMARY_R_Y, r.1),
+            (PRIMARY_G_X, g.0),
+            (PRIMARY_G_Y, g.1),
+            (PRIMARY_B_X, b.0),
+            (PRIMARY_B_Y, b.1),
+            (WHITE_POINT_X, m.white_point.0),
+            (WHITE_POINT_Y, m.white_point.1),
+            (LUMINANCE_MAX, m.luminance_max),
+            (LUMINANCE_MIN, m.luminance_min),
+        ] {
+            el_float(&mut md, id, v);
+        }
+        el(&mut out, MASTERING_METADATA, &md);
+    }
+    out
 }
 
 pub(crate) fn el_str(out: &mut Vec<u8>, id: u32, s: &str) {
@@ -220,6 +269,9 @@ impl<W: Write + Seek> MkvWriter<W> {
                 let mut v = Vec::new();
                 el_uint(&mut v, PIXEL_WIDTH, pw as u64);
                 el_uint(&mut v, PIXEL_HEIGHT, ph as u64);
+                if let Some(c) = &t.colour {
+                    el(&mut v, COLOUR, &colour(c));
+                }
                 el(&mut e, VIDEO, &v);
             }
             if let Some((rate, ch, bits)) = t.audio {
@@ -518,6 +570,51 @@ mod tests {
         assert_eq!(sp.pts, 1230);
         let p = d.next_packet().unwrap().unwrap();
         assert_eq!((p.track, p.pts), (1, 1230));
+    }
+
+    /// A video track's `Colour` element reads back as it was given, and is absent when not set.
+    #[test]
+    fn colour_element_roundtrip() {
+        use crate::track::MasteringMetadata;
+        let write = |colour: Option<Colour>| {
+            let mut v = TrackSpec::new(TrackKind::Video, "V_VP9");
+            v.video_size = Some((16, 16));
+            v.colour = colour;
+            let mut m = MkvWriter::new(Cursor::new(Vec::new()), vec![v], MuxOptions::default()).unwrap();
+            m.write_frame(0, 0, true, &[0; 4], None).unwrap();
+            let bytes = m.finish().unwrap().into_inner();
+            crate::open(&bytes[..]).unwrap().tracks[0].video.clone().unwrap().colour
+        };
+        assert_eq!(write(None), None);
+        // Rec. 2020 PQ, broadcast range: the four fields a render knows
+        let pq = Colour { matrix_coefficients: Some(9), range: Some(1), transfer_characteristics: Some(16), primaries: Some(9), ..Default::default() };
+        assert_eq!(write(Some(pq.clone())), Some(pq.clone()));
+        let full = Colour {
+            bits_per_channel: Some(10),
+            chroma_subsampling_horz: Some(1),
+            chroma_subsampling_vert: Some(1),
+            cb_subsampling_horz: Some(0),
+            cb_subsampling_vert: Some(0),
+            chroma_siting_horz: Some(1),
+            chroma_siting_vert: Some(2),
+            max_cll: Some(1000),
+            max_fall: Some(400),
+            mastering: Some(MasteringMetadata {
+                primaries: [(0.708, 0.292), (0.17, 0.797), (0.131, 0.046)],
+                white_point: (0.3127, 0.329),
+                luminance_max: 1000.0,
+                luminance_min: 0.0001,
+            }),
+            ..pq
+        };
+        assert_eq!(write(Some(full.clone())), Some(full));
+        // an audio track has no Video element to hold it
+        let mut a = TrackSpec::new(TrackKind::Audio, "A_OPUS");
+        a.colour = Some(Colour { primaries: Some(9), ..Default::default() });
+        let mut m = MkvWriter::new(Cursor::new(Vec::new()), vec![a], MuxOptions::default()).unwrap();
+        m.write_frame(0, 0, true, &[0; 4], None).unwrap();
+        let bytes = m.finish().unwrap().into_inner();
+        assert!(crate::open(&bytes[..]).unwrap().tracks[0].video.is_none());
     }
 
     #[test]

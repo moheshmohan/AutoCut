@@ -71,7 +71,11 @@ Boxes with 64-bit sizes and with size 0 (runs to the end of the file) are suppor
 | anything else | `Unknown { fourcc, raw }` |
 
 Video entries also parse `colr` (`nclx`/`nclc`/ICC), `pasp`, `clap`, `fiel`, `gama` and `btrt` into
-`VideoParams`. The MP4 source in `filmcraft-codecs` crops every frame to `clap`'s clean aperture
+`VideoParams`, and QuickTime's `logs` box into `VideoParams::log_transfer_function`: the CoreMedia log
+transfer-function identifier (`com.apple.rec2020.apple-log` for Apple Log), kept as text whatever curve
+it names. It is non-empty UTF-8 without NUL of at most 255 bytes; anything else, or a second `logs`
+box, reads as unknown, and the writer refuses an identifier the reader would not accept (at
+`add_track`, before any sample is written). Nothing maps it to a colour space yet. The MP4 source in `filmcraft-codecs` crops every frame to `clap`'s clean aperture
 before the track's display rotation, and reports that size. Audio entries parse QuickTime sound description v0/v1/v2 into `AudioParams`.
 
 ### Robustness
@@ -104,7 +108,7 @@ let bytes = w.finish_faststart()?.into_inner(); // or finish() for moov-at-end
 - Tables written: `stts`, `ctts` (v1 when an offset is negative), `stss` (omitted when every sample is
   sync), `stsc`, `stsz` (constant or table), `stco`/`co64`. Consecutive samples of one track share a chunk.
 - Sample entries come from `SampleEntry` (`avc`, `hevc`, `prores`, `jpeg`, `aac`, `pcm`, or any demuxed
-  entry). Remuxing copies codec config, `colr`, `pasp`, `clap`, `fiel`, `gama` and `btrt`.
+  entry). Remuxing copies codec config, `colr`, `logs`, `pasp`, `clap`, `fiel`, `gama` and `btrt`.
   PCM is written as `sowt`/`twos` (16-bit) or `raw ` (8-bit) or sound description v2 `lpcm` in MOV, and as
   `ipcm`/`fpcm` + `pcmC` in MP4. A PCM `write_sample` call can hold any whole number of frames, and the
   track timescale must equal the sample rate.

@@ -569,6 +569,10 @@ fn validate_track(cfg: &TrackConfig) -> Result<Option<u32>> {
     if cfg.timescale == 0 {
         return Err(Error::Mux("timescale must be non-zero".into()));
     }
+    // refused before any sample is written, not only when the `moov` is
+    if cfg.entry.video.as_ref().and_then(|v| v.log_transfer_function.as_deref()).is_some_and(|s| !crate::codec::valid_log_identifier(s)) {
+        return Err(Error::Mux("invalid log transfer-function identifier".into()));
+    }
     if let CodecConfig::Pcm(p) = &cfg.entry.codec {
         if p.bits == 0 || p.channels == 0 {
             return Err(Error::Mux("PCM needs bits and channels".into()));
@@ -1395,5 +1399,23 @@ mod tests {
             m[at] ^= 1 << (seed >> 61);
             check(&m);
         }
+    }
+
+    /// An Apple Log ProRes track keeps its `logs` identifier through a MOV, and a track whose
+    /// identifier the reader would not accept is refused when it is added, before any sample.
+    #[test]
+    fn a_log_transfer_function_survives_the_muxer() {
+        let mut entry = SampleEntry::prores(crate::FourCc(*b"apch"), 64, 64);
+        entry.video.as_mut().unwrap().log_transfer_function = Some("com.apple.rec2020.apple-log".into());
+        let mut w = Mp4Writer::new(Cursor::new(Vec::new()), WriterOptions::new(Brand::Mov)).unwrap();
+        let v = w.add_track(TrackConfig::new(entry.clone(), 25)).unwrap();
+        w.write_sample(v, WriteSample { data: &[1; 16], duration: 1, composition_offset: 0, is_sync: true }).unwrap();
+        let out = w.finish().unwrap().into_inner();
+        let f = crate::open(out.as_slice()).unwrap();
+        assert_eq!(f.tracks[0].video().unwrap().log_transfer_function.as_deref(), Some("com.apple.rec2020.apple-log"));
+        let mut bad = entry;
+        bad.video.as_mut().unwrap().log_transfer_function = Some(String::new());
+        let mut w = Mp4Writer::new(Cursor::new(Vec::new()), WriterOptions::new(Brand::Mov)).unwrap();
+        assert!(matches!(w.add_track(TrackConfig::new(bad, 25)), Err(Error::Mux(_))));
     }
 }

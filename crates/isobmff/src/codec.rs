@@ -35,6 +35,10 @@ pub struct VideoParams {
     pub temporal_quality: u32,
     pub spatial_quality: u32,
     pub color: Option<ColorInfo>,
+    /// QuickTime `logs`: the CoreMedia log transfer-function identifier (for example
+    /// `com.apple.rec2020.apple-log`), kept as text whatever curve it names. Non-empty UTF-8
+    /// without NUL, at most 255 bytes; anything else, or a second `logs` box, reads as `None`.
+    pub log_transfer_function: Option<String>,
     /// `pasp`: (hSpacing, vSpacing).
     pub pixel_aspect: Option<(u32, u32)>,
     pub clean_aperture: Option<CleanAperture>,
@@ -947,6 +951,7 @@ pub(crate) fn parse_sample_entry(format: FourCc, payload: &[u8], handler: FourCc
         let _ctab = c.i16()?;
         let mut codec = None;
         let mut bitrate = None;
+        let mut log_seen = false;
         for b in boxes(c.rest()).map_while(|b| b.ok()) {
             let p = b.payload;
             match &b.kind.0 {
@@ -956,6 +961,11 @@ pub(crate) fn parse_sample_entry(format: FourCc, payload: &[u8], handler: FourCc
                 b"vpcC" if f == b"vp09" => codec = Some(CodecConfig::Vp9(VpcConfig::parse(p)?)),
                 b"apvC" if f == b"apv1" => codec = Some(CodecConfig::Apv(ApvConfig::parse(p)?)),
                 b"colr" => v.color = parse_colr(p).ok(),
+                b"logs" => {
+                    // two identifiers are ambiguous: neither is believed
+                    v.log_transfer_function = if log_seen { None } else { std::str::from_utf8(p).ok().filter(|s| valid_log_identifier(s)).map(str::to_owned) };
+                    log_seen = true;
+                }
                 b"mdcv" => v.mastering_display = MasteringDisplay::parse(p),
                 b"clli" if p.len() >= 4 => v.content_light = Some((u16::from_be_bytes([p[0], p[1]]), u16::from_be_bytes([p[2], p[3]]))),
                 b"pasp" => {
@@ -1346,6 +1356,10 @@ impl SampleEntry {
 
     /// Serialize as a complete sample entry box. For PCM the format is chosen from the brand.
     pub(crate) fn write(&self, b: &mut BoxBuf, qt: bool) -> Result<()> {
+        // an identifier the reader would not accept is refused, not cut
+        if self.video.as_ref().and_then(|v| v.log_transfer_function.as_deref()).is_some_and(|s| !valid_log_identifier(s)) {
+            return Err(Error::Invalid("invalid log transfer-function identifier".into()));
+        }
         if let CodecConfig::Unknown { fourcc, raw } = &self.codec {
             let m = b.start(&fourcc.0);
             b.bytes(raw);
@@ -1431,6 +1445,9 @@ impl SampleEntry {
                     }
                 }
                 b.end(m);
+            }
+            if let Some(log) = &v.log_transfer_function {
+                b.leaf(b"logs", log.as_bytes());
             }
             if let Some(md) = &v.mastering_display {
                 b.leaf(b"mdcv", &md.to_bytes());
@@ -1586,6 +1603,11 @@ fn write_btrt(b: &mut BoxBuf, br: BitRate) {
     b.u32(br.max_bitrate);
     b.u32(br.avg_bitrate);
     b.end(m);
+}
+
+/// What a `logs` box may hold: a non-empty identifier of at most 255 bytes with no NUL.
+pub(crate) fn valid_log_identifier(s: &str) -> bool {
+    !s.is_empty() && s.len() <= 255 && !s.as_bytes().contains(&0)
 }
 
 #[cfg(test)]
@@ -1782,5 +1804,73 @@ mod tests {
         assert!(matches!(entry(2, 0x0001_0000), Err(Error::Invalid(_))));
         let ok = entry(2, 24).unwrap();
         assert!(matches!(ok.codec, CodecConfig::Pcm(p) if p.bits == 24));
+    }
+
+    /// A QuickTime `logs` box keeps its identifier whatever curve it names; the reader does not
+    /// guess what an unknown one means.
+    #[test]
+    fn log_transfer_function_roundtrip() {
+        for id in ["com.apple.rec2020.apple-log", "com.apple.rec2020.apple-log2", "another.vendor.unknown-curve"] {
+            let mut e = SampleEntry::prores(FourCc(*b"apch"), 64, 64);
+            e.video.as_mut().unwrap().log_transfer_function = Some(id.into());
+            let back = roundtrip(&e, true, b"vide");
+            assert_eq!(back.video.as_ref().unwrap().log_transfer_function.as_deref(), Some(id));
+            assert_eq!(back, e);
+        }
+        // Apple Log is a 35-byte box: the 27 identifier bytes with no terminator.
+        let mut e = SampleEntry::prores(FourCc(*b"apch"), 64, 64);
+        e.video.as_mut().unwrap().log_transfer_function = Some("com.apple.rec2020.apple-log".into());
+        let mut b = BoxBuf::new();
+        e.write(&mut b, true).unwrap();
+        let logs = [&35u32.to_be_bytes()[..], b"logscom.apple.rec2020.apple-log"].concat();
+        assert!(b.buf.windows(logs.len()).any(|w| w == logs));
+        // without one, no box is written
+        let mut b = BoxBuf::new();
+        SampleEntry::prores(FourCc(*b"apch"), 64, 64).write(&mut b, true).unwrap();
+        assert!(!b.buf.windows(4).any(|w| w == b"logs"));
+    }
+
+    /// The writer refuses an identifier the reader would not accept; it is never truncated.
+    #[test]
+    fn invalid_log_transfer_functions_are_not_written() {
+        for id in [String::new(), "a".repeat(256), "com.apple.rec2020.apple-log\0".into()] {
+            let mut e = SampleEntry::prores(FourCc(*b"apch"), 64, 64);
+            e.video.as_mut().unwrap().log_transfer_function = Some(id);
+            assert!(e.write(&mut BoxBuf::new(), true).is_err());
+        }
+        let mut e = SampleEntry::prores(FourCc(*b"apch"), 64, 64);
+        e.video.as_mut().unwrap().log_transfer_function = Some("a".repeat(255));
+        assert!(e.write(&mut BoxBuf::new(), true).is_ok());
+    }
+
+    /// An empty, oversized, non-UTF-8 or NUL-holding `logs` box, or two of them, reads as unknown.
+    #[test]
+    fn malformed_or_duplicate_logs_boxes_read_as_unknown() {
+        let read = |children: &[&[u8]]| {
+            let mut b = BoxBuf::new();
+            SampleEntry::prores(FourCc(*b"apch"), 64, 64).write(&mut b, true).unwrap();
+            for payload in children {
+                b.leaf(b"logs", payload);
+            }
+            let len = (b.buf.len() as u32).to_be_bytes();
+            b.buf[..4].copy_from_slice(&len);
+            let bx = crate::bytes::boxes(&b.buf).next().unwrap().unwrap();
+            parse_sample_entry(bx.kind, bx.payload, FourCc(*b"vide"), true).unwrap().video.unwrap().log_transfer_function
+        };
+        assert_eq!(read(&[b"vendor.curve"]).as_deref(), Some("vendor.curve"));
+        assert_eq!(read(&[b""]), None);
+        assert_eq!(read(&[&[b'a'; 256]]), None);
+        assert_eq!(read(&[b"bad\xFFutf8"]), None);
+        assert_eq!(read(&[b"nul\0inside"]), None);
+        assert_eq!(read(&[b"vendor.curve", b"vendor.curve"]), None);
+        assert_eq!(read(&[b"vendor.curve", b""]), None);
+        // a cut box ends the child list: what came before still reads
+        let mut b = BoxBuf::new();
+        SampleEntry::prores(FourCc(*b"apch"), 64, 64).write(&mut b, true).unwrap();
+        b.buf.extend_from_slice(&[0, 0, 0, 40, b'l', b'o', b'g', b's', b'x']);
+        let len = (b.buf.len() as u32).to_be_bytes();
+        b.buf[..4].copy_from_slice(&len);
+        let bx = crate::bytes::boxes(&b.buf).next().unwrap().unwrap();
+        assert!(parse_sample_entry(bx.kind, bx.payload, FourCc(*b"vide"), true).is_ok());
     }
 }

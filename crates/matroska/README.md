@@ -97,8 +97,11 @@ while let Some(p) = d.next_packet()? {        // file order, all tracks
 keyframe, data, duration_ns)` → `finish()`. Writes the EBML header, Segment, SeekHead, Info (with
 Duration), Tracks, Clusters of SimpleBlocks (new cluster at a video keyframe after
 `cluster_duration_ns`), BlockGroups for explicit durations, optional audio lacing (Xiph, EBML,
-fixed-size), and Cues (video keyframes, or the first frame of each track per cluster). No
-CRC-32, Chapters, Tags, Attachments, or content encodings.
+fixed-size), and Cues (video keyframes, or the first frame of each track per cluster).
+`TrackSpec::colour` writes a video track's `Colour` element (matrix, range, transfer, primaries,
+chroma layout, light levels and mastering metadata: the fields that are set), which is where a WebM
+file says it is Rec. 2020, P3, PQ or HLG. No CRC-32, Chapters, Tags, Attachments, or content
+encodings.
 
 ## Tests
 
@@ -112,7 +115,8 @@ CRC-32, Chapters, Tags, Attachments, or content encodings.
   is compared with `ffprobe -show_packets` (stream, size, keyframe flag, pts, duration), plus codec
   names, time bases, dimensions, audio params and duration; the sample index must equal the packet
   stream. Seeks (indexed, Cues-only, and index-on-demand) must land on the latest keyframe ≤ target.
-  Our muxer's laced output (Xiph/EBML/fixed) is read back by ffprobe and compared the same way.
+  Our muxer's laced output (Xiph/EBML/fixed) is read back by ffprobe and compared the same way,
+  and ffprobe reports the colour our muxer's `Colour` element gives a VP9 WebM.
   A damaged file must resync and deliver the packets after the damage; truncated files must not fail.
   An index built in steps (`index_limit`, `extend_index`) must equal one full open.
 - Progressive index (`src/index_limit_tests.rs`): limits before, inside and past clusters, extending in

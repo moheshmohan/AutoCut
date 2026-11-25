@@ -395,3 +395,39 @@ fn progressive_index_equals_a_full_open() {
         assert_eq!(f.tags, full.tags, "{name}");
     }
 }
+
+/// The muxer's `Colour` element is what ffprobe reports for the stream: ffmpeg's VP9 WebM remuxed
+/// with Rec. 2020 PQ colour reads as BT.2020 / SMPTE ST 2084 (VP9's own colour syntax carries
+/// neither), and our reader sees the same element.
+#[test]
+fn colour_element_is_read_by_ffprobe() {
+    let Some((ffmpeg, ffprobe)) = tools() else { return };
+    let Some(path) = fixture(&ffmpeg, "vp9_opus.webm") else { return };
+    let bytes = std::fs::read(&path).unwrap();
+    let d = Demuxer::from_slice(&bytes).unwrap();
+    let file = d.file().clone();
+    let v = file.track_of_kind(TrackKind::Video).unwrap();
+    let packets: Vec<Packet> = d.collect::<Result<_>>().unwrap();
+    let t = &file.tracks[v];
+    let pq = Colour { matrix_coefficients: Some(9), range: Some(1), transfer_characteristics: Some(16), primaries: Some(9), ..Default::default() };
+    let mut s = TrackSpec::new(t.kind, t.codec_id.clone());
+    s.codec_private = t.codec_private.clone();
+    s.default_duration_ns = t.default_duration_ns;
+    s.video_size = t.video.as_ref().map(|v| (v.pixel_width, v.pixel_height));
+    s.colour = Some(pq.clone());
+    let opts = MuxOptions { doc_type: "webm".into(), ..Default::default() };
+    let mut w = MkvWriter::new(std::io::Cursor::new(Vec::new()), vec![s], opts).unwrap();
+    for p in packets.iter().filter(|p| p.track == v) {
+        w.write_frame(0, p.pts_ns, p.keyframe, &p.data, None).unwrap();
+    }
+    let out = w.finish().unwrap().into_inner();
+    assert_eq!(open(&out[..]).unwrap().tracks[0].video.as_ref().unwrap().colour, Some(pq));
+    let outp = fixture_dir().join("colour_pq.webm");
+    std::fs::write(&outp, &out).unwrap();
+    let o = std::process::Command::new(&ffprobe).args(["-v", "error", "-of", "json", "-show_streams"]).arg(&outp).output().unwrap();
+    let j: Value = serde_json::from_slice(&o.stdout).unwrap();
+    let st = &j["streams"][0];
+    assert_eq!(st["color_primaries"], "bt2020", "{st}");
+    assert_eq!(st["color_transfer"], "smpte2084", "{st}");
+    std::fs::remove_file(&outp).unwrap();
+}
