@@ -54,7 +54,7 @@ only). "Tested" names the evidence.
 |---|---|---|---|---|
 | PNG, JPEG, TIFF, BMP, GIF | read + write | yes | PNG / TIFF / BMP / JPEG sequences, GIF | 90% |
 | WebP | — | yes | no | ahead |
-| **HEIF / HEIC** (phone photos) | read | yes: the primary picture — one HEVC image or a grid of tiles (iPhone, Android) — with its `clap` / `irot` / `imir` transforms and `colr nclx` colour, 8 and 10-bit; EXIF date and position; no alpha or depth images, no AVIF | no | 85% |
+| **HEIF / HEIC** (phone photos) | read | yes: the primary picture — one HEVC image or a grid of tiles (iPhone, Android) — with its `clap` / `irot` / `imir` transforms, `colr nclx` colour and alpha image, 8 and 10-bit; AVIF stills the same way (AV1: 8 and 10-bit 4:2:0 compared with libdav1d; 4:0:0 to 4:4:4 and identity GBR read); EXIF date and position; no depth images | no | 90% |
 | **PSD** (layers as sequence) | read (layered) | no | — | 0% |
 | **OpenEXR** | read + write | stills and sequences: scan-line and tiled (full-resolution level of mip-maps), single- and multi-part, none / RLE / ZIPS / ZIP / PXR24, half / float / uint, RGB(A) or Y(A), kept as linear float (#828); the main picture as compositing apps show it, else the richest named colour layer (renderer multilayer files), a lone channel as grey; no PIZ, B44, DWA or deep parts | sequences from the float compositor (half or 32-bit float, linear RGB / premultiplied RGBA in the working space, its chromaticities; uncompressed, RLE, ZIPS, ZIP or PXR24; #806, #874) | 80% |
 | **DPX** | read + write | yes: luma / RGB / RGBA, 8–16-bit, filled 10/12-bit, either byte order (#821); packed 10/12-bit, Y'CbCr 4:2:2 / 4:4:4 with or without alpha (#841); no RLE | sequences (10-bit RGB, BT.709; #779) | 90% |

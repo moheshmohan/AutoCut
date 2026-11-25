@@ -190,6 +190,10 @@ in total, so 16384 x 2176 or 8192 x 4352 at most) are refused with `Error::Inval
 header can code up to 65536 x 65536, which would ask for gigabytes of buffers from a few bytes of hostile input;
 no real stream comes close to level 6.3, the highest defined level.
 
+One `decode` call shows at most 256 pictures and 1 GiB of them; `Decoder::set_shown_budget` lowers
+the byte budget (never raises it), as the AVIF still reader does to the one picture an item
+declares, so a payload of many or larger pictures is refused before they are built.
+
 ## API
 
 ```rust

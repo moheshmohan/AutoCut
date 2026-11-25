@@ -274,3 +274,229 @@ fn a_heic_from_sips_decodes_to_its_picture() {
     assert_eq!(s.info().video.as_ref().map(|v| (v.width, v.height)), Some((w, h)));
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// One item of a test AVIF: its id, its AV1 data, its `ispe` size, and whether it is the alpha
+/// image of item 1 (`auxC` alpha, `auxl`).
+struct AvifItem<'a> {
+    id: u16,
+    data: &'a [u8],
+    size: (u32, u32),
+    alpha: bool,
+}
+
+/// An AVIF file of `items` (item 1 primary), every item turned by `irot` when `turned` (the alpha
+/// too when `alpha_turned`), and a `prem` reference from item 1 to the alpha when `prem`.
+fn avif(items: &[AvifItem], turned: bool, alpha_turned: bool, prem: bool) -> Vec<u8> {
+    let build = |mdat_at: u32| {
+        let ftyp = bx(b"ftyp", &[b"avif".as_slice(), &0u32.to_be_bytes(), b"avif", b"mif1", b"miaf"].concat());
+        let mut hdlr = vec![0u8; 4];
+        hdlr.extend(b"pict");
+        hdlr.extend([0u8; 13]);
+        let mut iinf_body = (items.len() as u16).to_be_bytes().to_vec();
+        for it in items {
+            iinf_body.extend(infe(it.id, b"av01"));
+        }
+        let mut refs = Vec::new();
+        for it in items.iter().filter(|it| it.alpha) {
+            let mut auxl = it.id.to_be_bytes().to_vec();
+            auxl.extend(1u16.to_be_bytes());
+            auxl.extend(1u16.to_be_bytes());
+            refs.push(bx(b"auxl", &auxl));
+            if prem {
+                let mut p = 1u16.to_be_bytes().to_vec();
+                p.extend(1u16.to_be_bytes());
+                p.extend(it.id.to_be_bytes());
+                refs.push(bx(b"prem", &p));
+            }
+        }
+        // properties: 1 av1C, 2 irot, 3 auxC, then one ispe an item
+        let mut props = vec![bx(b"av1C", &[0x81, 0x00, 0x0C, 0x00]), bx(b"irot", &[1])];
+        let mut urn = vec![0u8; 4];
+        urn.extend(b"urn:mpeg:mpegB:cicp:systems:auxiliary:alpha\0");
+        props.push(bx(b"auxC", &urn));
+        for it in items {
+            props.push(full(b"ispe", 0, 0, &[it.size.0.to_be_bytes(), it.size.1.to_be_bytes()].concat()));
+        }
+        let mut ipma = (items.len() as u32).to_be_bytes().to_vec();
+        for (k, it) in items.iter().enumerate() {
+            let mut list = vec![0x81, 4 + k as u8];
+            if (turned && !it.alpha) || (alpha_turned && it.alpha) {
+                list.push(0x82);
+            }
+            if it.alpha {
+                list.push(0x03);
+            }
+            ipma.extend(it.id.to_be_bytes());
+            ipma.push(list.len() as u8);
+            ipma.extend(list);
+        }
+        let iprp = bx(b"iprp", &[bx(b"ipco", &props.concat()), full(b"ipma", 0, 0, &ipma)].concat());
+        let mut iloc = vec![0x44, 0x00];
+        iloc.extend((items.len() as u16).to_be_bytes());
+        let mut at = mdat_at + 8;
+        for it in items {
+            iloc.extend(it.id.to_be_bytes());
+            iloc.extend(0u16.to_be_bytes());
+            iloc.extend(1u16.to_be_bytes());
+            iloc.extend(at.to_be_bytes());
+            iloc.extend((it.data.len() as u32).to_be_bytes());
+            at += it.data.len() as u32;
+        }
+        let mut meta_body = vec![full(b"hdlr", 0, 0, &hdlr), full(b"pitm", 0, 0, &1u16.to_be_bytes()), full(b"iinf", 0, 0, &iinf_body)];
+        if !refs.is_empty() {
+            meta_body.push(full(b"iref", 0, 0, &refs.concat()));
+        }
+        meta_body.extend([iprp, full(b"iloc", 0, 0, &iloc)]);
+        let mut file = ftyp;
+        file.extend(full(b"meta", 0, 0, &meta_body.concat()));
+        let mdat_body: Vec<u8> = items.iter().flat_map(|it| it.data.iter().copied()).collect();
+        (file.len() as u32, [file, bx(b"mdat", &mdat_body)].concat())
+    };
+    let (mdat_at, _) = build(0);
+    build(mdat_at).1
+}
+
+/// An AVIF that ffmpeg (libsvtav1, an external fixture generator) wrote, and the AV1 temporal
+/// unit of its primary item. `None` (the tests skip) without ffmpeg or its AV1 encoder.
+fn ffmpeg_avif(name: &str, pix_fmt: &str) -> Option<(Vec<u8>, Vec<u8>)> {
+    let ff = filmcraft_testkit::oracle::ffmpeg_or_skip("AVIF stills")?;
+    let path = filmcraft_testkit::fixtures::fixtures_dir("codecs/avif").join(name);
+    let made = filmcraft_testkit::fixtures::generate(&path, |tmp| {
+        std::process::Command::new(&ff)
+            .args(["-y", "-v", "error", "-f", "lavfi", "-i", "testsrc2=size=96x64", "-frames:v", "1", "-c:v", "libsvtav1", "-pix_fmt", pix_fmt, "-f", "avif"])
+            .arg(tmp)
+            .status()
+            .is_ok_and(|s| s.success())
+    });
+    let Some(path) = made else {
+        eprintln!("SKIPPED: ffmpeg cannot write an AVIF with libsvtav1");
+        return None;
+    };
+    let bytes = std::fs::read(path).ok()?;
+    let h = Heif::parse(name, &bytes).ok()?;
+    let data = h.data(h.primary).ok()?;
+    Some((bytes, data))
+}
+
+/// AVIF stills were refused ("AVIF (AV1) images"). ffmpeg's files decode: the AV1 planes exactly
+/// as libdav1d gives them, the picture within a few levels of ffmpeg's RGB, also as a media
+/// source.
+#[test]
+fn avif_from_ffmpeg_decodes_like_dav1d() {
+    for (name, pix_fmt, plane_fmt) in [("t420.avif", "yuv420p", "yuv420p"), ("t420p10.avif", "yuv420p10le", "yuv420p10le")] {
+        let Some((bytes, data)) = ffmpeg_avif(name, pix_fmt) else { return };
+        assert!(sniff(&bytes), "{name}");
+        let path = filmcraft_testkit::fixtures::fixtures_dir("codecs/avif").join(name);
+        let ff = filmcraft_testkit::oracle::ffmpeg_or_skip("AVIF stills").unwrap();
+        let run =
+            |fmt: &str| std::process::Command::new(&ff).args(["-v", "error", "-i"]).arg(&path).args(["-f", "rawvideo", "-pix_fmt", fmt, "-"]).output().unwrap();
+        // the planes: our AV1 decoder on the item's data against libdav1d
+        let mut dec = filmcraft_av1::Decoder::with_threads(1);
+        let mut pics = dec.decode(&data).unwrap();
+        pics.extend(dec.flush());
+        let p = pics.into_iter().next().unwrap();
+        let ours: Vec<u8> = if p.bit_depth == 8 {
+            p.planes.iter().flat_map(|pl| pl.iter().map(|&v| v as u8)).collect()
+        } else {
+            p.planes.iter().flat_map(|pl| pl.iter().flat_map(|v| v.to_le_bytes())).collect()
+        };
+        let theirs = run(plane_fmt);
+        if !theirs.status.success() {
+            eprintln!("SKIPPED: ffmpeg cannot decode {name}");
+            return;
+        }
+        assert!(ours == theirs.stdout, "{name}: AV1 planes differ from libdav1d's");
+        // the picture
+        let (w, h, rgba, alpha) = decode_with_alpha(name, &bytes).unwrap();
+        assert_eq!((w, h, alpha), (96, 64, false), "{name}");
+        let rgb = run("rgb24").stdout;
+        assert_eq!(rgb.len(), 96 * 64 * 3);
+        let diff: u64 =
+            rgba.as_chunks::<4>().0.iter().zip(rgb.as_chunks::<3>().0).map(|(a, b)| (0..3).map(|c| u64::from(a[c].abs_diff(b[c]))).sum::<u64>()).sum();
+        let mean = diff as f64 / (96.0 * 64.0 * 3.0);
+        assert!(mean < 4.0, "{name}: mean difference {mean:.2} levels");
+        let s = crate::open_bytes(name, bytes.clone().into()).unwrap();
+        assert_eq!(s.info().kind, filmcraft_media::MediaKind::Still);
+        assert_eq!(s.info().video.as_ref().map(|v| (v.width, v.height, v.has_alpha)), Some((96, 64, false)));
+    }
+}
+
+/// An alpha auxiliary image (`auxC` alpha, `auxl`) gives the alpha, its luma the value; with
+/// `prem` the colour is divided by it; an alpha image turned unlike its colour image is left out.
+/// The alpha item here carries the colour item's own AV1 data, so its luma is known.
+#[test]
+fn avif_alpha_images_give_the_alpha() {
+    let Some((_, data)) = ffmpeg_avif("t420.avif", "yuv420p") else { return };
+    let colour = AvifItem { id: 1, data: &data, size: (96, 64), alpha: false };
+    let opaque = decode_with_alpha("o.avif", &avif(&[AvifItem { id: 1, data: &data, size: (96, 64), alpha: false }], false, false, false)).unwrap();
+    assert!(!opaque.3);
+    // the alpha item decodes to the same picture, so its "luma" through RGB is the red channel
+    let (w, h, rgba, alpha) =
+        decode_with_alpha("a.avif", &avif(&[AvifItem { id: 1, ..colour }, AvifItem { id: 2, data: &data, size: (96, 64), alpha: true }], false, false, false))
+            .unwrap();
+    assert!(alpha);
+    assert_eq!((w, h), (96, 64));
+    for (k, (p, o)) in rgba.as_chunks::<4>().0.iter().zip(opaque.2.as_chunks::<4>().0).enumerate() {
+        assert_eq!((p[0], p[1], p[2], p[3]), (o[0], o[1], o[2], o[0]), "pixel {k}");
+    }
+    // premultiplied: the colour divided by the alpha
+    let (_, _, prem, _) =
+        decode_with_alpha("p.avif", &avif(&[AvifItem { id: 1, ..colour }, AvifItem { id: 2, data: &data, size: (96, 64), alpha: true }], false, false, true))
+            .unwrap();
+    for (p, o) in prem.as_chunks::<4>().0.iter().zip(opaque.2.as_chunks::<4>().0) {
+        let a = o[0];
+        let un = |c: u8| if a == 0 { 0 } else { (u16::from(c) * 255 / u16::from(a)).min(255) as u8 };
+        assert_eq!(p, &[un(o[0]), un(o[1]), un(o[2]), a]);
+    }
+    // both turned: the alpha turns with the colour; only the colour turned: an alpha without its
+    // own turn takes the colour's; the alpha turned alone: left out
+    let both =
+        decode_with_alpha("b.avif", &avif(&[AvifItem { id: 1, ..colour }, AvifItem { id: 2, data: &data, size: (96, 64), alpha: true }], true, true, false))
+            .unwrap();
+    let colour_only =
+        decode_with_alpha("c.avif", &avif(&[AvifItem { id: 1, ..colour }, AvifItem { id: 2, data: &data, size: (96, 64), alpha: true }], true, false, false))
+            .unwrap();
+    assert_eq!((both.0, both.1), (64, 96));
+    assert_eq!(both.2, colour_only.2);
+    assert!(both.2.as_chunks::<4>().0.iter().all(|p| p[3] == p[0]));
+    let alpha_only =
+        decode_with_alpha("x.avif", &avif(&[AvifItem { id: 1, ..colour }, AvifItem { id: 2, data: &data, size: (96, 64), alpha: true }], false, true, false))
+            .unwrap();
+    assert!(!alpha_only.3, "an alpha turned unlike its colour is left out");
+}
+
+/// The decoder may show only the picture the item declares: data of a 96 × 64 picture in an item
+/// whose `ispe` says 8 × 8 is refused before the picture is built.
+#[test]
+fn avif_pictures_larger_than_declared_are_refused() {
+    let Some((_, data)) = ffmpeg_avif("t420.avif", "yuv420p") else { return };
+    let e = decode("small.avif", &avif(&[AvifItem { id: 1, data: &data, size: (8, 8), alpha: false }], false, false, false)).unwrap_err().to_string();
+    assert!(e.contains("too large"), "{e}");
+    assert!(decode("ok.avif", &avif(&[AvifItem { id: 1, data: &data, size: (96, 64), alpha: false }], false, false, false)).is_ok());
+}
+
+#[test]
+fn damaged_avif_files_are_errors() {
+    // junk AV1 data, and no av1C
+    let junk = vec![0x12u8, 0x00, 0x0A, 0x0B, 0, 0, 0, 0x2A, 0xFF, 0x13];
+    let f = avif(&[AvifItem { id: 1, data: &junk, size: (16, 16), alpha: false }], false, false, false);
+    assert!(sniff(&f));
+    assert!(decode("junk.avif", &f).is_err());
+    let at = f.windows(4).position(|w| w == b"av1C").unwrap();
+    let mut no_config = f.clone();
+    no_config[at..at + 4].copy_from_slice(b"xxxx");
+    assert!(decode("noconf.avif", &no_config).unwrap_err().to_string().contains("av1C"));
+    // truncations and bit flips of a real file never panic
+    let Some((bytes, _)) = ffmpeg_avif("t420.avif", "yuv420p") else { return };
+    for n in (0..bytes.len()).step_by(3) {
+        let r = std::panic::catch_unwind(|| decode("cut.avif", &bytes[..n]).map(|p| p.0));
+        assert!(r.is_ok(), "panic at {n} bytes");
+    }
+    for i in 0..bytes.len() {
+        for bit in [0x01u8, 0x10, 0x80] {
+            let mut b = bytes.clone();
+            b[i] ^= bit;
+            assert!(std::panic::catch_unwind(|| decode("flip.avif", &b).map(|p| p.0)).is_ok(), "panic flipping byte {i}");
+        }
+    }
+}

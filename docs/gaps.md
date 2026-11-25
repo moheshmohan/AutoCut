@@ -209,8 +209,8 @@ platforms** G4, G9, G17; **performance** G16; **ecosystem** G11; **measurement**
   demuxer), WMV / ASF, DV / DVCPRO / DV100, MPEG-4 Part 2, FLAC in MP4 (#603), camera RAW (R3D
   incl. R3D NE, ARRIRAW, Sony RAW / X-OCN, Canon RAW, BRAW, ProRes RAW; #345, #383), JPEG 2000 /
   JPEG XS MXF, the rest of CinemaDNG (lossy / JPEG XL DNG, MXF-wrapped, opcode lists, Raw
-  settings; DNG frames and folders import since #1065); stills: PSD, EXR beyond scan-line RLE / ZIP / PXR24 (PIZ, B44, DWA,
-  tiled, multi-part, deep), AVIF and HEIF alpha / depth images (HEIC photos import: primary picture, grids, transforms),
+  settings; DNG frames and folders import since #1065); stills: PSD, EXR PIZ / B44 / DWA compression and deep parts,
+  HEIF depth images (HEIC and AVIF photos import: primary picture, grids, transforms, alpha),
   AI / EPS, and the rarer DPX layout, run-length encoding (Targa and DPX stills and sequences import
   since #821, packed 10/12-bit and Y'CbCr DPX since #841, deeper than 8 bits kept at 8); transparent
   video (#402); Sony start timecode in `rtmd` (#460); stereo 3D flag (#500); MKV multi-audio (#601).

@@ -782,32 +782,39 @@ impl Av1Decoder {
     }
 
     fn convert(p: filmcraft_av1::Picture, pts: i64) -> DecodedFrame {
-        use std::sync::Arc;
         let draft = p.draft;
-        let w = p.width as usize;
-        let h = p.height as usize;
-        // (shared with the hardware decoders: `hw_frame::av1_color`)
-        let color = crate::hw_frame::av1_color(p.width, p.height, p.matrix_coefficients, p.transfer_characteristics, p.color_primaries, p.full_range);
-        let chroma = match (p.subsampling_x, p.subsampling_y) {
-            (1, 1) => filmcraft_frame::Chroma::C420,
-            (1, 0) => filmcraft_frame::Chroma::C422,
-            _ => filmcraft_frame::Chroma::C444,
-        };
-        let cw = (w + p.subsampling_x as usize) >> p.subsampling_x;
-        let ch = (h + p.subsampling_y as usize) >> p.subsampling_y;
-        let [y, mut u, mut v] = p.planes;
-        if p.mono_chrome {
-            u = vec![1u16 << (p.bit_depth - 1); cw * ch];
-            v = u.clone();
-        }
-        let data = if p.bit_depth == 8 {
-            let to8 = |p: Vec<u16>| Arc::new(p.into_iter().map(|v| v as u8).collect::<Vec<u8>>());
-            filmcraft_frame::PixelData::Yuv8 { planes: [to8(y), to8(u), to8(v)], chroma, alpha: None }
-        } else {
-            filmcraft_frame::PixelData::Yuv16 { planes: [Arc::new(y), Arc::new(u), Arc::new(v)], chroma, bits: p.bit_depth as u32, alpha: None }
-        };
-        DecodedFrame { pts, frame: VideoFrame { width: p.width, height: p.height, data, color, par: (1, 1), pts: filmcraft_time::Tick::ZERO }, draft }
+        DecodedFrame { pts, frame: av1_frame(p, None), draft }
     }
+}
+
+/// An AV1 picture as a frame, its colour from `colour` (primaries, transfer, matrix, full range:
+/// a container's) or else the sequence header's.
+pub(crate) fn av1_frame(p: filmcraft_av1::Picture, colour: Option<(u8, u8, u8, bool)>) -> VideoFrame {
+    use std::sync::Arc;
+    let w = p.width as usize;
+    let h = p.height as usize;
+    let (primaries, transfer, matrix, full) = colour.unwrap_or((p.color_primaries, p.transfer_characteristics, p.matrix_coefficients, p.full_range));
+    // (shared with the hardware decoders: `hw_frame::av1_color`)
+    let color = crate::hw_frame::av1_color(p.width, p.height, matrix, transfer, primaries, full);
+    let chroma = match (p.subsampling_x, p.subsampling_y) {
+        (1, 1) => filmcraft_frame::Chroma::C420,
+        (1, 0) => filmcraft_frame::Chroma::C422,
+        _ => filmcraft_frame::Chroma::C444,
+    };
+    let cw = (w + p.subsampling_x as usize) >> p.subsampling_x;
+    let ch = (h + p.subsampling_y as usize) >> p.subsampling_y;
+    let [y, mut u, mut v] = p.planes;
+    if p.mono_chrome {
+        u = vec![1u16 << (p.bit_depth - 1); cw * ch];
+        v = u.clone();
+    }
+    let data = if p.bit_depth == 8 {
+        let to8 = |p: Vec<u16>| Arc::new(p.into_iter().map(|v| v as u8).collect::<Vec<u8>>());
+        filmcraft_frame::PixelData::Yuv8 { planes: [to8(y), to8(u), to8(v)], chroma, alpha: None }
+    } else {
+        filmcraft_frame::PixelData::Yuv16 { planes: [Arc::new(y), Arc::new(u), Arc::new(v)], chroma, bits: p.bit_depth as u32, alpha: None }
+    };
+    VideoFrame { width: p.width, height: p.height, data, color, par: (1, 1), pts: filmcraft_time::Tick::ZERO }
 }
 
 impl VideoDecoder for Av1Decoder {

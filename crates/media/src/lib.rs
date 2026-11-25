@@ -281,10 +281,10 @@ pub type SharedSource = Arc<dyn MediaSource>;
 
 /// File extensions we recognise at import (the media browser filters on these).
 pub const STILL_EXTENSIONS: &[&str] =
-    &["png", "jpg", "jpeg", "gif", "webp", "tif", "tiff", "bmp", "tga", "dpx", "exr", "hdr", "dng", "heic", "heif", "hif", "insp"];
-/// Still formats decoded by `filmcraft-codecs` (HEIF: HEVC pictures in an ISO BMFF file), not by
+    &["png", "jpg", "jpeg", "gif", "webp", "tif", "tiff", "bmp", "tga", "dpx", "exr", "hdr", "dng", "heic", "heif", "hif", "avif", "insp"];
+/// Still formats decoded by `filmcraft-codecs` (HEIF and AVIF: HEVC or AV1 pictures in an ISO BMFF file), not by
 /// this crate's still decoders: they are imported as stills but never as image sequences.
-pub const HEIF_EXTENSIONS: &[&str] = &["heic", "heif", "hif"];
+pub const HEIF_EXTENSIONS: &[&str] = &["heic", "heif", "hif", "avif"];
 /// Insta360 360° photos (a JPEG and the camera's trailer, `filmcraft-codecs`): stills, never an
 /// image sequence.
 pub const INSP_EXTENSIONS: &[&str] = &["insp"];

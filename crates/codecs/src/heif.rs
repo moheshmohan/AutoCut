@@ -1,19 +1,25 @@
-//! HEIF / HEIC stills: the photos iPhones (and many Android phones) take, as media sources.
+//! HEIF / HEIC stills: the photos iPhones (and many Android phones) take, and AVIF stills, as
+//! media sources.
 //!
 //! Clean-room from ISO/IEC 23008-12 (HEIF: the `meta` box's items, their locations, properties
-//! and references, the image grid) and ISO/IEC 14496-12 (the box structure), decoding each HEVC
-//! picture with our own decoder (`filmcraft-hevc`). The primary item is shown:
+//! and references, the image grid), ISO/IEC 14496-12 (the box structure) and the AV1 Image File
+//! Format (AVIF) 1.1, decoding each HEVC picture with our own decoder (`filmcraft-hevc`) and each
+//! AV1 picture with ours (`filmcraft-av1`). The primary item is shown:
 //!
 //! - an `hvc1` item: one HEVC picture (its `hvcC` property configures the decoder);
-//! - a `grid` item: `rows × columns` HEVC tiles (its `dimg` references, in raster order) laid
+//! - an `av01` item: one AV1 temporal unit (its `av1C` configuration OBUs first, when it has any),
+//!   8, 10 or 12-bit, 4:0:0 to 4:4:4, the identity matrix (GBR) included;
+//! - a `grid` item: `rows × columns` tiles (its `dimg` references, in raster order) laid
 //!   edge to edge and cut to the grid's output size — an iPhone photo is 48 tiles of 512 × 512;
 //! - an `iden` item: its one input, with its own transformations;
 //!
-//! then its transformative properties in the order they are associated: `clap` (clean aperture,
-//! a crop), `irot` (anticlockwise quarter turns) and `imir` (a mirror about a vertical or
-//! horizontal axis). Colour comes from the item's `colr nclx` (the HEVC stream's own VUI
-//! otherwise). The picture is scaled down to [`filmcraft_media::still::MAX_STILL_SIDE`] like any
-//! still. Auxiliary images (alpha, depth), thumbnails and AVIF (`av01`) items are not decoded.
+//! then its alpha auxiliary image (`auxC` of the alpha type referring to it by `auxl`; `prem`:
+//! premultiplied colour), and its transformative properties in the order they are associated:
+//! `clap` (clean aperture, a crop), `irot` (anticlockwise quarter turns) and `imir` (a mirror
+//! about a vertical or horizontal axis). Colour comes from the item's `colr nclx` (the stream's own
+//! VUI or sequence header otherwise). The picture is scaled down to
+//! [`filmcraft_media::still::MAX_STILL_SIDE`] like any still. Depth images and thumbnails are not
+//! decoded; an alpha image that cannot be decoded or laid in place is left out.
 //!
 //! Every number in the file is hostile: boxes are walked with bounds checks and depth and count
 //! limits, the file is read whole only up to [`MAX_FILE`], a picture larger than [`MAX_PIXELS`] is
@@ -71,7 +77,7 @@ pub fn sniff(head: &[u8]) -> bool {
         return false;
     }
     let end = size.clamp(16, head.len());
-    head.get(16..end).is_some_and(|c| c.as_chunks::<4>().0.iter().any(|b| is(&[b"heic", b"heix", b"mif1"], b)))
+    head.get(16..end).is_some_and(|c| c.as_chunks::<4>().0.iter().any(|b| is(&[b"heic", b"heix", b"mif1", b"avif"], b)))
 }
 
 /// The byte opener (`filmcraft_media::open_bytes`).
@@ -99,20 +105,27 @@ pub fn reader_opener(name: &str, head: &[u8], reader: &filmcraft_media::SharedRe
 }
 
 fn still(name: &str, bytes: &[u8]) -> std::result::Result<SharedSource, MediaError> {
-    let (w, h, rgba) = decode(name, bytes)?;
-    Ok(Arc::new(filmcraft_media::still::StillSource::from_rgba(name, w, h, rgba, false, bytes.len() as u64)))
+    let (w, h, rgba, has_alpha) = decode_with_alpha(name, bytes)?;
+    Ok(Arc::new(filmcraft_media::still::StillSource::from_rgba(name, w, h, rgba, has_alpha, bytes.len() as u64)))
 }
 
 /// The primary picture of a HEIF file as straight RGBA8 `(width, height, pixels)`, upright and
 /// within the still cap.
 pub fn decode(name: &str, bytes: &[u8]) -> Result<(u32, u32, Vec<u8>)> {
+    decode_with_alpha(name, bytes).map(|(w, h, rgba, _)| (w, h, rgba))
+}
+
+/// [`decode`], and whether any pixel is not fully opaque (an alpha auxiliary image).
+pub fn decode_with_alpha(name: &str, bytes: &[u8]) -> Result<(u32, u32, Vec<u8>, bool)> {
     let file = Heif::parse(name, bytes)?;
-    let pic = file.picture(file.primary, None, 0)?;
+    let mut pic = file.untransformed(file.primary, None, 0)?;
+    let has_alpha = file.alpha(file.primary, &mut pic)?;
+    let pic = file.transform(file.primary, pic);
     let (w, h, rgba) = filmcraft_media::still::cap_rgba(pic.w, pic.h, pic.rgba);
     if rgba.is_empty() {
         return Err(bad(name, "the picture could not be scaled"));
     }
-    Ok((w, h, rgba))
+    Ok((w, h, rgba, has_alpha))
 }
 
 /// The EXIF of a HEIF file's `Exif` item (the one describing the primary item, else the first).
@@ -235,6 +248,10 @@ struct Ref {
 #[derive(Clone, Debug, PartialEq)]
 enum Prop<'a> {
     Hvcc(&'a [u8]),
+    /// `av1C`: the AV1 codec configuration; its configuration OBUs follow the first four bytes.
+    Av1c(&'a [u8]),
+    /// `auxC`: an auxiliary image's type URN.
+    AuxC(&'a [u8]),
     Ispe(u32, u32),
     /// Anticlockwise quarter turns.
     Irot(u8),
@@ -367,6 +384,11 @@ impl<'a> Heif<'a> {
 
     /// Item `id` decoded, its own transformations applied.
     fn picture(&self, id: u32, colour: Option<(u8, u8, u8, bool)>, depth: usize) -> Result<Pic> {
+        Ok(self.transform(id, self.untransformed(id, colour, depth)?))
+    }
+
+    /// Item `id` decoded, before its own transformations.
+    fn untransformed(&self, id: u32, colour: Option<(u8, u8, u8, bool)>, depth: usize) -> Result<Pic> {
         let name = &self.name;
         if depth > MAX_DEPTH {
             return Err(bad(name, "derived images nest too deep"));
@@ -392,10 +414,64 @@ impl<'a> Heif<'a> {
                 let input = *self.inputs(id).first().ok_or_else(|| bad(name, "an identity item without its input"))?;
                 self.picture(input, colour, depth + 1)?
             }
-            b"av01" => return Err(unsupported(name, "AVIF (AV1) images")),
+            b"av01" => {
+                let size = self.size(id);
+                if let Some((w, h)) = size {
+                    check_pixels(name, w, h)?;
+                }
+                let av1c = self
+                    .props_of(id)
+                    .find_map(|p| match p {
+                        Prop::Av1c(b) => Some(*b),
+                        _ => None,
+                    })
+                    .ok_or_else(|| bad(name, format!("item {id} has no av1C")))?;
+                av1_picture(name, av1c, &self.data(id)?, colour, size)?
+            }
             other => return Err(unsupported(name, format!("`{}` images", String::from_utf8_lossy(other)))),
         };
-        Ok(self.transform(id, pic))
+        Ok(pic)
+    }
+
+    /// The transformative properties of item `id` (`clap`, `irot`, `imir`), in order.
+    fn transforms(&self, id: u32) -> Vec<&Prop<'a>> {
+        self.props_of(id).filter(|p| matches!(p, Prop::Clap(_) | Prop::Irot(_) | Prop::Imir(_))).collect()
+    }
+
+    /// Apply the alpha auxiliary image of item `id`, if it has one, to `pic` (both before their
+    /// transformations): an item with an `auxC` of the alpha type that refers to `id` (`auxl`).
+    /// Its luma is the alpha; a `prem` reference from `id` to it means the colour is
+    /// premultiplied, and is divided out. Returns whether any pixel is not opaque. An alpha
+    /// image that does not decode, whose own transformations differ from the colour's (none is
+    /// fine: it then takes the colour's), or whose size differs is left out rather than laid in
+    /// the wrong place: the picture shows opaque, as it did before alpha was read.
+    fn alpha(&self, id: u32, pic: &mut Pic) -> Result<bool> {
+        const ALPHA: [&[u8]; 2] = [b"urn:mpeg:mpegB:cicp:systems:auxiliary:alpha", b"urn:mpeg:hevc:2015:auxid:1"];
+        let is_alpha = |a: u32| self.props_of(a).any(|p| matches!(p, Prop::AuxC(urn) if ALPHA.contains(urn)));
+        let Some(a) = self.refs.iter().filter(|r| &r.kind == b"auxl" && r.to.contains(&id)).map(|r| r.from).find(|&a| a != id && is_alpha(a)) else {
+            return Ok(false);
+        };
+        let own = self.transforms(a);
+        if !own.is_empty() && own != self.transforms(id) {
+            return Ok(false);
+        }
+        let Ok(plane) = self.untransformed(a, None, 1) else { return Ok(false) };
+        if (plane.w, plane.h) != (pic.w, pic.h) || plane.rgba.len() != pic.rgba.len() {
+            return Ok(false);
+        }
+        let premultiplied = self.refs.iter().any(|r| &r.kind == b"prem" && r.from == id && r.to.contains(&a));
+        let mut translucent = false;
+        for (px, al) in pic.rgba.as_chunks_mut::<4>().0.iter_mut().zip(plane.rgba.as_chunks::<4>().0) {
+            let alpha = al[0];
+            px[3] = alpha;
+            translucent |= alpha < 255;
+            if premultiplied && alpha < 255 {
+                for c in &mut px[..3] {
+                    *c = if alpha == 0 { 0 } else { (u16::from(*c) * 255 / u16::from(alpha)).min(255) as u8 };
+                }
+            }
+        }
+        Ok(translucent)
     }
 
     /// An item's `ispe` size.
@@ -572,6 +648,9 @@ fn property<'a>(kind: &[u8; 4], b: &'a [u8]) -> Prop<'a> {
     let mut r = R::new(b);
     let p = match kind {
         b"hvcC" => Some(Prop::Hvcc(b)),
+        b"av1C" => Some(Prop::Av1c(b)),
+        // a full box: version and flags, then the NUL-terminated URN
+        b"auxC" => b.get(4..).map(|urn| Prop::AuxC(urn.split(|&c| c == 0).next().unwrap_or_default())),
         b"ispe" => r.full().and_then(|_| Some(Prop::Ispe(r.u32()?, r.u32()?))),
         b"irot" => r.u8().map(|a| Prop::Irot(a & 3)),
         b"imir" => r.u8().map(|a| Prop::Imir(a & 1)),
@@ -651,6 +730,62 @@ fn hevc_picture(name: &str, hvcc: &[u8], data: &[u8], colour: Option<(u8, u8, u8
     let data = crate::video::hevc_pixel_data([p.y, p.u, p.v], (p.bit_depth, p.bit_depth_chroma), p.chroma, [w, h, cw, ch, ys, uvs]);
     let frame = filmcraft_frame::VideoFrame { width: p.width, height: p.height, data, color, par: (1, 1), pts: filmcraft_time::Tick::ZERO };
     Ok(Pic { w: p.width, h: p.height, rgba: frame.to_rgba8() })
+}
+
+/// One AV1 picture as RGBA (AVIF, the AV1 Image File Format: an `av01` item is one temporal
+/// unit, its `av1C` property's configuration OBUs the sequence header when the data lacks one).
+/// A single-threaded decoder (grid tiles are decoded in parallel instead) whose shown-picture
+/// budget is the picture the item's `ispe` declares (or the largest still), so a payload of many
+/// or larger pictures is refused before they are built; a decoder panic is an error. Colour comes
+/// from the item's `colr nclx`, else the sequence header; matrix 0 (identity, 4:4:4 GBR) is
+/// read as G, B, R planes, and matrix 10 (BT.2020 constant luminance) is refused.
+fn av1_picture(name: &str, av1c: &[u8], data: &[u8], colour: Option<(u8, u8, u8, bool)>, size: Option<(u32, u32)>) -> Result<Pic> {
+    let err = |e: filmcraft_av1::Error| match e {
+        filmcraft_av1::Error::Unsupported(what) => unsupported(name, format!("AV1: {what}")),
+        e => bad(name, format!("AV1: {e}")),
+    };
+    // 4:4:4 at two bytes a sample, as the decoder holds a picture
+    let pixels = size.map_or(MAX_PIXELS, |(w, h)| u64::from(w).saturating_mul(u64::from(h)));
+    let budget = usize::try_from(pixels.saturating_mul(6)).unwrap_or(usize::MAX);
+    let decoded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> std::result::Result<Vec<filmcraft_av1::Picture>, filmcraft_av1::Error> {
+        let mut dec = filmcraft_av1::Decoder::with_threads(1);
+        dec.set_shown_budget(budget);
+        let mut pics = Vec::new();
+        if let Some(obus) = av1c.get(4..).filter(|o| !o.is_empty()) {
+            pics.extend(dec.decode(obus)?);
+        }
+        pics.extend(dec.decode(data)?);
+        pics.extend(dec.flush_result()?);
+        Ok(pics)
+    }))
+    .map_err(|_| bad(name, "the AV1 decoder failed"))?
+    .map_err(err)?;
+    let p = decoded.into_iter().next().ok_or_else(|| bad(name, "an AV1 item decoded to no picture"))?;
+    check_pixels(name, p.width, p.height)?;
+    let (primaries, transfer, matrix, full) = colour.unwrap_or((p.color_primaries, p.transfer_characteristics, p.matrix_coefficients, p.full_range));
+    if matrix == 10 {
+        return Err(unsupported(name, "AV1 pictures with BT.2020 constant-luminance colour"));
+    }
+    let (w, h) = (p.width, p.height);
+    if matrix == 0 && !p.mono_chrome && (p.subsampling_x, p.subsampling_y) == (0, 0) {
+        return Ok(Pic { w, h, rgba: gbr_rgba(&p, full)? });
+    }
+    let frame = crate::video::av1_frame(p, Some((primaries, transfer, matrix, full)));
+    Ok(Pic { w, h, rgba: frame.to_rgba8() })
+}
+
+/// The RGBA of a 4:4:4 AV1 picture coded with the identity matrix: its planes are G, B and R.
+fn gbr_rgba(p: &filmcraft_av1::Picture, full: bool) -> Result<Vec<u8>> {
+    let n = (p.width as usize).saturating_mul(p.height as usize);
+    let [g, b, r] = &p.planes;
+    if g.len() < n || b.len() < n || r.len() < n {
+        return Err(MediaError::Decode("AV1 picture planes are smaller than the picture".into()));
+    }
+    let max = (1u32 << p.bit_depth.clamp(8, 16)) - 1;
+    // limited range: 16–235 at 8 bits, scaled to the depth
+    let (lo, hi) = if full { (0, max) } else { (16 << (p.bit_depth.clamp(8, 16) - 8), 235 << (p.bit_depth.clamp(8, 16) - 8)) };
+    let to8 = |v: u16| ((u32::from(v).clamp(lo, hi) - lo) * 255 + (hi - lo) / 2).checked_div(hi - lo).unwrap_or(0).min(255) as u8;
+    Ok(g.iter().zip(b).zip(r).take(n).flat_map(|((&g, &b), &r)| [to8(r), to8(g), to8(b), 255]).collect())
 }
 
 /// The clean aperture `[width, height, horizontal offset, vertical offset]` of `pic` (ISO/IEC

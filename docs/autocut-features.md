@@ -942,3 +942,6 @@ Still-image improvements from upstream craft-libs, ported into AutoCut's own cra
   depth in the export panel, `exrDepth: "half" | "float"` on `file.exportMedia`), with PXR24 as a
   new compression. An HDR sequence exports its linear BT.2020 working space, named in the file's
   chromaticities (`sdr: true` gives the SDR picture in BT.709).
+- **AV121**: AVIF stills import (they were refused), decoded by AutoCut's own AV1 decoder: 8 and
+  10-bit, grids, rotations, mirrors and crops, and their alpha; HEIC photos with an alpha image
+  keep it too.
