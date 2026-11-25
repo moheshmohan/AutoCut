@@ -245,6 +245,7 @@ class FC:
 | a lower third, end card or chapter card from an `.ectemplate` | `exec effectcraft.renderTemplate {template, values, place, wait: true}` | `effectcraft.templateInfo` lists its controls first; ProRes 4444 with alpha, placed above the picture (§6.8) |
 | pictures, cut-outs, clips and sounds for a RAEA scene | `exec generate.assets {manifest}` | an `assets.json` beside the composition ([generation.md](generation.md) §5); `dryRun` first |
 | "add a boat / a character / snow to this shot" | `exec generate.augment {instruction, atSeconds, references?, animate?}` | a new picture laid over the clip; it does not track a moving shot |
+| "cut it like this reel I liked" | `direct` or `quick` with `--reference liked.mp4` (or an item id, or a kept fingerprint) | its shot lengths, cut rate and bursts become the targets; the report's `reference.distance` says how close it came (§5) |
 | a specific vision: mixed stills and clips, hand-timed beats, titles, its own look | **build it by hand** (§6) | full control, rebuildable from a script |
 
 If a pipeline gets you most of the way, use it, then fix the rest with commands on its sequence.
@@ -379,6 +380,44 @@ Read those files before showing anything.
 
 Showcases and direct edits keep caches by file content: analysis, scenes, redaction, spoken lines.
 A rebuild after review notes redoes only what changed, so iterate freely.
+
+### Cutting like a reference
+
+When the user points at a video and says "like that one" (a reel they liked, last month's
+approved edit, a sequence in the project), give it to Direct or Quick Short as `reference`, so
+"like that" becomes numbers rather than adjectives.
+
+- **What it takes.** A video file, a media item or sequence id of the project, or a fingerprint
+  kept from an earlier measure (`{"fingerprint": …}`, what `media.measureStyle {summary: true}`
+  answers; FrameAtlas will keep these for approved videos).
+- **What it changes.** Direct cuts every shot as long as the reference's shots are at that point
+  of the video (its pace, its bursts of quick cuts), and takes its length and a tempo whose beats
+  fit its quicker shots. When it cuts faster than there are moments, the rules use other parts
+  of the same clips. Quick Short picks the template whose shots are nearest the reference's and
+  takes its length. `seconds`, `bpm` and `template` given by you or the user always win (the
+  report lists them under `kept`).
+- **What it does not change.** The footage stays the user's, in filming order, and their taste
+  still wins: a travel reel shows the places, Shorts stay silent, no whooshes. The energy from
+  movement and the loudness are compared, not imposed (the mix stays at the platform's level).
+  A reference is for one video, like the style: never make one a default.
+- **Read the report.** `reference.measured` is the reference's fingerprint, `targets` what the
+  edit aimed at, `applied` and `kept` what was taken, `achieved` the edit measured the same way
+  (a dry run from its plan) and `distance` how far apart, per part (shot length, cut rate, pace,
+  spread, bursts, energy, loudness) from 0 (the same) to 1 (twice or half as fast, or a curve far
+  off). Over about 0.3 overall, say so and show what differs before calling it done.
+
+```bash
+# measure the reel the user liked (fast; at most 3600 frames, long videos sampled in windows)
+filmcraft-cli exec media.measureStyle '{"path":"/path/to/liked.mp4","summary":true}'
+# cut the trip like it, dry run first
+filmcraft-cli direct ~/Movies/trip --brief "a reel of our trip" --reference /path/to/liked.mp4 --dry-run
+filmcraft-cli direct ~/Movies/trip --brief "a reel of our trip" --reference /path/to/liked.mp4 --export trip.mp4 --save-as trip.fcproj
+# or a Quick Short like an earlier sequence of the project (item 12)
+filmcraft-cli --project p.fcproj --save quick ~/Movies/expo --reference 12
+```
+
+Over MCP: `autocut_direct {brief, reference: "/path/to/liked.mp4"}` or `quick_short {paths,
+reference: {"fingerprint": {...}}}`; `command_run media.measureStyle` for the measure alone.
 
 ## 6. Building an edit by hand
 
@@ -828,6 +867,8 @@ Never show the user something you haven't looked at.
 | Text in the platform's interface areas | `exec sequence.checkSafeZones platform=reels` |
 | Motion: pops, stills, a flat opening, cuts a minute (warnings) | `exec qa.motionEnergy '{"path":"out.mp4","sheet":"motion.png"}'` (or `sequence`; declare intentional `holds`) |
 | Text and timeline craft: reading time, size, contrast over the footage, dead stretches, silence (warnings) | `exec sequence.checkCraft` |
+| An edit's style in numbers: cuts and jump cuts, shot lengths and their spread, bursts, stillness, an energy map, how moves settle, motion blur, the loudness curve, the palette; a small `fingerprint` to keep | `exec media.measureStyle '{"path":"out.mp4"}'` (or `item`, `sequence`; `from`, `to`; `summary: true` for the fingerprint alone) |
+| Continuity across cuts: the subject jumping across the frame, the colours jumping (warnings; a cut under a transition is scored, not flagged) | `exec sequence.checkCarry` (`maxCuts`); each cut's `carry` from 1 (the eye is carried) to 0. Read it for cuts meant to flow (a scene, a match cut); a montage of places cuts on contrast on purpose, so it is not a delivery leg |
 | Motion design on the timeline, no render: bouncy eases, entrance and exit lengths, exits longer than entrances, long staggers, every title entering alike, text looping the whole clip, jumps at clip edges (warnings) | `exec sequence.checkMotion` (`style: "playful"`, or `autocut.taste` `motion: "playful"`, allows overshoot; `bands` overrides the frame ranges). Also `delivery.preflight`'s `motionCraft` check (Reflex, waivable) |
 | Motion filmstrips: seven frames per animated title, transition and alpha overlay, with jump, mid-move step, dissolve dip, fade past its shot and replayed-entrance detectors (warnings) | `filmcraft-cli frames --motion --project P.fcproj --out strips/` (`--items 12,12:out,t5`, `--scale 0.25`); MCP: `sequence.motionStrips {out, items?, wait: true}`, a long job. The folder must be new or empty |
 | Copy: stock phrases, filler, shot-describing narration, device budgets, figures not in the fact ledger (warnings) | `exec copy.lint '{"sequence":12,"publish":{"title":"…","description":"…"}}'`; your phrases in `autocut.taste` `phrases` or `allow` are never flagged; figures are checked against `facts` or `build/facts.json` |

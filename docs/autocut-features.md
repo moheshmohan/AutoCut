@@ -750,3 +750,54 @@ craft-libs fixes (AV62–AV90, recorded in `plan/upstream-sync-2026-11-24.md`):
   bit-identical; a failing frame gives waiting frames an error, never a hang; the pool is capped
   at 64 threads.
 
+
+## Update 2026-11-25 (PX6, edit like a reference)
+
+The idea of measuring a reference film's rhythm and checking continuity across cuts comes from
+onetake (feitangyuan/onetake, PolyForm Noncommercial): the idea only, from its README; every
+measure, threshold, word and line of code here is written fresh (`ATTRIBUTION.md`, "Ideas only").
+
+- **PX6.1**: `media.measureStyle {path | item | sequence, from?, to?, fps?}` measures how a video is
+  edited, sampled at 10 frames a second (2–30, never above its own rate): cuts (qa.motionEnergy's
+  meter and the Scene Edit Detection measure, pops taken out) and jump cuts (the same framing and
+  colours across a cut, and lasting jumps the cut measure lets by), shot lengths (median, 10th,
+  25th, 75th and 90th percentiles, mean, spread), bursts (three or more shots in a row each at
+  most 1 s and 0.6 of the median), the stillness ratio (still stretches of 1 s or more), an
+  energy map (motion and cuts a second per stretch, 0 still to 1 frantic), how fast moves settle
+  and how often a shot cuts on the move, a motion-blur estimate (sharpness the most moving third
+  of a shot loses against its calmest third), the loudness curve (BS.1770: integrated, range, true
+  peak, momentary per stretch) and a palette (the commonest colours, and the colour pass's
+  brightness, contrast, saturation and warmth on up to 12 frames). An item that is a sequence is
+  rendered (the GPU frame renderer where there is one) and mixed; files decode through the media
+  pool's decoders (hardware first). Bounded: at most 3600 frames, a longer stretch sampled as
+  evenly spread 30 s windows, at most 12 hours, sound read for the analysed windows only. Tested
+  on sequences of the procedural demo scenes with known cuts, stills with a jump cut, a GIF
+  written in code and hostile files and parameters.
+- **PX6.4**: its `fingerprint` (alone with `summary: true`), under a kilobyte and the same for
+  the same video: the length, cut rate, shot-length distribution, jump-cut share, bursts (how
+  often, how much, where), `pace` (the local median shot length at 16 points), the energy and
+  loudness curves at 16 points, stillness, settle, cuts on the move, blur and five palette
+  colours, keyed (`key`, FNV-1a of its canonical JSON). FrameAtlas is to keep the fingerprints of
+  approved videos; nothing there changed.
+- **PX6.2**: `reference` on `autocut.direct` and `autocut.quick` (MCP `autocut_direct` and
+  `quick_short`; `--reference FILE|ITEM` on the CLI's `direct` and `quick`): a video file, a
+  media item or sequence id, or a kept fingerprint. **Direct** cuts every shot as long as the
+  reference's are at that point of the video (`rhythm_like` for the model's slots; the rules too,
+  one-beat shots allowed, a camera move that needs far longer giving way to a push in, and the
+  clips' moments used again, other parts of them, when the reference cuts faster than there are
+  moments), and takes its length and a tempo whose beats fit its quicker shots. **Quick Short**
+  picks the template whose shots are nearest the reference's and takes its length. Options the
+  video names (`seconds`, `bpm`, `template`) win. The energy from movement and the loudness are
+  compared, not imposed. The report adds `reference {given, measured, targets, applied, kept,
+  achieved, distance}`: the built edit measured as the reference was (a dry run from its plan) and
+  the distance, 0 to 1, per part and overall. On the demo footage a reference of 0.5 s shots
+  makes 21 shots in 12 s where one of 4 s shots makes 3. Without a reference nothing changes.
+- **PX6.3**: `sequence.checkCarry {sequence?, maxCuts?}` scores every cut (pictures butting on an
+  enabled video track; titles left out) from its two rendered sides: the salient subject's move
+  (frequency-tuned saliency) and the palette distance (4×4×4 histograms), a `carry` from 1 to 0,
+  and warnings `subjectJump` (the subject moves 30 % of the frame or more) and `paletteJump`
+  (colours 60 % apart) at plain cuts; a cut under a transition is scored, not flagged. At most
+  400 cuts, two renders each. Not a leg of `delivery.preflight`: a montage of places cuts on
+  contrast on purpose, and a Reflex leg would make most travel reels waive it. 956 commands.
+- **PX6.5**: the agent guide (§5 "Cutting like a reference", the checks in §7), this entry, the
+  MCP server's instructions and the credit in `ATTRIBUTION.md`.

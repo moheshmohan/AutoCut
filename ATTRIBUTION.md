@@ -259,6 +259,16 @@ numbers are credited here.
 | `docs/finish-reviewer.md` and the review commands (`review.*`) | The finish-gate, reviewer-verdict and round rules of impeccable ([pbakaus/impeccable](https://github.com/pbakaus/impeccable)), hallmark ([Nutlope/hallmark](https://github.com/Nutlope/hallmark)) and taste-skill ([Leonxlnx/taste-skill](https://github.com/Leonxlnx/taste-skill)); frame-pinned comments from huashu-motion ([alchaincyf/huashu-motion](https://github.com/alchaincyf/huashu-motion)) | Apache-2.0 (impeccable); MIT (hallmark, taste-skill, huashu-motion) |
 | `docs/raea-workflow.md` "Authoring a composition" | HyperFrames' composition rules, © HeyGen ([heygen-com/hyperframes](https://github.com/heygen-com/hyperframes)) | Apache-2.0 |
 
+## Ideas only
+
+Ideas from projects under non-commercial licences, which keep their code and text out of
+FilmCraft. Only the idea is used, read from the project's README: no code, text, data, thresholds
+or assets of theirs are in FilmCraft.
+
+| Feature | Idea from | Their licence |
+|---|---|---|
+| `media.measureStyle`, `reference` on `autocut.direct` and `autocut.quick`, `sequence.checkCarry` (PX6) | Measuring a reference film's rhythm to cut like it, and checking continuity across cuts: onetake ([feitangyuan/onetake](https://github.com/feitangyuan/onetake)) | PolyForm Noncommercial (nothing of it is used) |
+
 ## Downloaded at runtime
 
 These files are never in the repository or the app bundle. FilmCraft downloads them into the
