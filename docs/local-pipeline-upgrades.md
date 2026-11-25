@@ -411,6 +411,35 @@ exclamation marks become one, in the title too. Nothing is reworded; a sentence 
 else in it stays. `delivery.preflight` runs it on the active sequence as two checks: `figures`
 (figures not in the ledger, Floor) and `copy` (the rest), see [Severity tiers](#severity-tiers).
 
+### Explainer rules and the sourced fact ledger (PX7)
+
+`explainer: true` on `sequence.checkCraft`, `sequence.checkMotion` and `delivery.preflight` (which
+hands it to both) adds three warnings for a narrated explainer:
+
+| Code | Check | Warns when | Starting value |
+|---|---|---|---|
+| `longStill` | checkCraft (in place of `staticTimeline`) | the picture, the video tracks alone, stands still for more than 3 s outside the declared holds; captions changing over a still card do not count as change | 3 s |
+| `smallHero` | checkCraft | at the middle of each stretch between the picture tracks' edit points, the tallest element that is not a backdrop (a plain colour, a shape covering nine tenths of the frame) is under a quarter of the frame's height; a picture filling half the frame is the hero itself; nested sequences and pictures with alpha are not looked into | 25 % |
+| `noSettle` | checkMotion | a title or overlay is still moving (its entrance, a keyframed change of position, scale, rotation or opacity) less than about a second before its shot leaves (its exit or a transition out starts, or it ends); looping titles are left to `loopingText` | 0.8 s |
+
+The fact ledger (`facts`, else `build/facts.json`) takes entries with their sources:
+
+```json
+{"facts": [
+  {"text": "Lord Rayleigh explained the blue sky in 1871", "source": "https://example.org/rayleigh"},
+  {"text": "The first powered flight lasted 12 seconds", "sources": ["a museum catalogue, page 12"]},
+  "274"
+]}
+```
+
+`script.factLedger {sequence?, text?, facts?, claims?}` reads what is on screen (the titles and
+caption cues, or a script in `script.timeline`'s markup before it is built) and warns
+`unledgeredFigure`, `unsourcedFigure` (in the ledger, no source), `unledgeredClaim` (a line with a
+claim word, such as "first", "only", "record", a superlative or "million", that no entry makes: an
+entry makes it when it has the claim word and shares two fifths of the line's other words) and
+`unsourcedClaim`. `copy.lint` reads the same ledger as before. The gate's `factSources` check is
+its sources and claims at the Floor tier.
+
 ## Standard checked delivery
 
 Use `recipe.run` with `builtin:delivery-quality-gate`, or call:
@@ -489,12 +518,13 @@ Every check of `delivery.preflight` has a `tier`:
 | `screenProtection` | Floor | yes, as before |
 | `textContrast` (new) | Floor | with `floorBlocks`: text under 3:1 against the picture behind it, from `sequence.checkCraft` |
 | `figures` (new) | Floor | with `floorBlocks`: figures in titles and captions not in the fact ledger, from `copy.lint`; skipped without a ledger |
+| `factSources` (PX7.3) | Floor | with `floorBlocks`: figures in the ledger without a source, and claims on screen (firsts, records, superlatives…) the ledger does not make or does not source, from `script.factLedger`; on once the ledger names a source (`factSources: true` always, `false` never), skipped otherwise |
 | `waivers` (new) | Floor | with `floorBlocks`: a refused waiver, an unreadable decisions file, or more than five waivers |
 | `motion` | Reflex | never |
 | `colour` | Reflex | never |
 | `blackFrames` | Reflex | never |
 | `motionCraft` (new) | Reflex (every `sequence.checkMotion` finding) | never |
-| `craft` (new) | Reflex (`readingTime`, `smallText`, `lowContrast` from 3:1 up to the WCAG ratio, `emptyFirstFrame`); Finish (`staticTimeline`, `silence`) | never |
+| `craft` (new) | Reflex (`readingTime`, `smallText`, `lowContrast` from 3:1 up to the WCAG ratio, `emptyFirstFrame`; with `explainer: true` also `longStill` and `smallHero`); Finish (`staticTimeline`, `silence`) | never |
 | `copy` (new) | Reflex (`stockPhrase`, `describesShot`, `overBudget` at its fail level); Finish (`filler`, `overBudget` over the budget) | never |
 | `motionEnergy` | Finish | never |
 | `subtitleAlignment` | Finish | never |

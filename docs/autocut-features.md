@@ -801,3 +801,60 @@ measure, threshold, word and line of code here is written fresh (`ATTRIBUTION.md
   contrast on purpose, and a Reflex leg would make most travel reels waive it. 956 commands.
 - **PX6.5**: the agent guide (§5 "Cutting like a reference", the checks in §7), this entry, the
   MCP server's instructions and the credit in `ATTRIBUTION.md`.
+
+## Update 2026-11-25 (PX7, topic to explainer)
+
+The idea of turning a topic's script into a narrated explainer (a shot timeline driven by the
+narration, a chapter bar, numbers checked against the research) comes from anything2explainer
+(Vincentwei1021/anything2explainer, PolyForm Noncommercial): the idea only, from its README; the
+markup, layout, checks, words and code here are written fresh, and its renderer is not driven
+(`ATTRIBUTION.md`, "Ideas only").
+
+- **PX7.1**: `script.timeline {text | path, voice?, language?, delivery?, …, estimate?, gaps?,
+  maxShotSeconds?, captionChars?, fps?, out?, place?}` reads a script in a small markup (`#
+  Chapter` headings shown, never spoken; blank-line paragraphs, one a shot; `[shot: …]` hints for
+  the picture; the narration's `[pause 1s]` and, in Malayalam, its delivery tags), speaks every
+  sentence through the narration path (tts.create's voices, caches and strict check; `estimate:
+  true` times it from the words instead) and lays it out: shots that tile the timeline on the
+  frame grid (each its speech plus the shot gap, the chapter gap before a new chapter, the tail at
+  the end; a paragraph over 12 s split into sentence groups), subtitle blocks of two lines with
+  word times, held to their reading time when there is room, chapter starts, a chapter marker at
+  each chapter and a shot marker spanning each shot (its comment the hint), and with `out` one
+  `shot-NN.json` a shot (times relative to the shot in seconds and frames) and `timeline.json` for
+  the compositions. `place` puts it in a new (or the active) sequence in one undo step: one
+  narration clip a shot (editable with tts.edit), the subtitles on a caption track of their own,
+  the markers. Bad markup (a heading without a title, a chapter without a paragraph, an orphan or
+  unclosed hint, any other bracket) is refused with its line. Bounded: 64 KB, 64 chapters, 300
+  shots, 600 sentences, 3 hours.
+- **PX7.2**: `graphics.chapterBar {chapters?, end?, position?, height?, labels?, progress?, colors?,
+  track?, dryRun?}` draws the chapters (the sequence's chapter markers, or those given) as a bar:
+  one graphic clip a chapter on a new top track, a rounded segment a chapter as wide as it is
+  long, the chapters before filled, its own in the accent colour, its title beside the bar;
+  bottom of a landscape frame, top of a portrait one; `progress` fills the playing segment.
+- **PX7.3**: the fact ledger takes sources (`{"text", "source"}` or `sources: [...]`), and
+  `script.factLedger {sequence? | text?, facts?, claims?}` checks what is on screen (titles and
+  captions, or a script before it is built): `unledgeredFigure`, `unsourcedFigure`,
+  `unledgeredClaim` (a line with a claim word, firsts, onlys, records, superlatives, "million"…,
+  that no entry makes) and `unsourcedClaim`. Warnings (D7); `delivery.preflight` runs the sources
+  and claims as the Floor check `factSources` once the ledger names a source, a warning until
+  `floorBlocks: true`.
+- **PX7.5**: `explainer: true` on `sequence.checkCraft`, `sequence.checkMotion` and
+  `delivery.preflight`: `longStill` (the picture still for over 3 s, captions or not),
+  `smallHero` (the tallest element under a quarter of the frame's height, unless a picture fills
+  half of it) and `noSettle` (a title or overlay still moving less than about a second, 0.8 s,
+  before its shot leaves). Reflex in the gate; nothing changes without the switch.
+- **PX7.4**: the recipe `builtin:topic-explainer` {script, title?, voice?, language?, delivery?,
+  width?, height?, fps?, source?, renders?, facts?, chapterBar?, review?}: the script read (markup
+  and limits), its facts checked, the voice and timeline in a new sequence, one picture a shot
+  (`script.shots`), the chapter bar, the explainer checks, the facts on screen, the review packet
+  and the delivery pre-flight; research and writing stay the agent's. `script.shots {via?,
+  source?, output?, exact?, track?, style?, dryRun?, wait?}` makes the pictures from the shot
+  markers: one RAEA composition a shot (`shot-01`…) rendered by `motion.render` in turn as a job
+  and placed at its shot, or cards (a backdrop, the chapter's title, the hint as a hero fitted to
+  at least a quarter of the height, entering by line and pushing in slowly until a second before
+  the cut, so the explainer rules pass). A recipe's text parameter now holds up to 64 KB (a
+  script), and `script.*` and `review.packet` may run in recipes. 960 commands.
+- **PX7.6**: the agent guide (§3, §5 "Topic to explainer", the chapter bar in §6.8, the checks in
+  §7), `docs/local-pipeline-upgrades.md` (the explainer rules, the sourced ledger, the
+  `factSources` tier), this entry, the MCP server's instructions and the credit in
+  `ATTRIBUTION.md`.

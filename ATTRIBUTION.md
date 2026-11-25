@@ -268,6 +268,7 @@ or assets of theirs are in FilmCraft.
 | Feature | Idea from | Their licence |
 |---|---|---|
 | `media.measureStyle`, `reference` on `autocut.direct` and `autocut.quick`, `sequence.checkCarry` (PX6) | Measuring a reference film's rhythm to cut like it, and checking continuity across cuts: onetake ([feitangyuan/onetake](https://github.com/feitangyuan/onetake)) | PolyForm Noncommercial (nothing of it is used) |
+| `script.timeline`, `graphics.chapterBar`, `script.factLedger`, `script.shots`, the `builtin:topic-explainer` recipe and the explainer rules of `sequence.checkCraft` and `checkMotion` (PX7) | Turning a topic's script into a narrated explainer: a shot timeline driven by the narration, a chapter bar, and checking the film's numbers against its research: anything2explainer ([Vincentwei1021/anything2explainer](https://github.com/Vincentwei1021/anything2explainer)) | PolyForm Noncommercial (nothing of it is used; its renderer is not driven either) |
 
 ## Downloaded at runtime
 

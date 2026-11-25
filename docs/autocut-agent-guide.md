@@ -246,6 +246,7 @@ class FC:
 | pictures, cut-outs, clips and sounds for a RAEA scene | `exec generate.assets {manifest}` | an `assets.json` beside the composition ([generation.md](generation.md) §5); `dryRun` first |
 | "add a boat / a character / snow to this shot" | `exec generate.augment {instruction, atSeconds, references?, animate?}` | a new picture laid over the clip; it does not track a moving shot |
 | "cut it like this reel I liked" | `direct` or `quick` with `--reference liked.mp4` (or an item id, or a kept fingerprint) | its shot lengths, cut rate and bursts become the targets; the report's `reference.distance` says how close it came (§5) |
+| "an explainer about X" (a narrated topic with chapters, no footage needed) | research and write the script yourself, then `recipe_run` `builtin:topic-explainer` | the script's markup, the fact ledger with sources and the steps are in §5 "Topic to explainer" |
 | a specific vision: mixed stills and clips, hand-timed beats, titles, its own look | **build it by hand** (§6) | full control, rebuildable from a script |
 
 If a pipeline gets you most of the way, use it, then fix the rest with commands on its sequence.
@@ -418,6 +419,78 @@ filmcraft-cli --project p.fcproj --save quick ~/Movies/expo --reference 12
 
 Over MCP: `autocut_direct {brief, reference: "/path/to/liked.mp4"}` or `quick_short {paths,
 reference: {"fingerprint": {...}}}`; `command_run media.measureStyle` for the measure alone.
+
+### Topic to explainer
+
+When the user asks for an explainer ("explain why the sky is blue", "a two-minute video on how
+a battery works"), the research and the script are your job; AutoCut takes it from the script.
+
+1. **Research, then write the script** in this markup (one paragraph is one shot):
+
+   ```text
+   # Why the sky is blue
+   [shot: sunlight and a prism]
+   Sunlight looks white. It holds every colour of the rainbow.
+
+   [shot: 1871]
+   Air scatters the short blue waves the most, so blue reaches us from every side.
+
+   # Sunsets
+   At sunset the light crosses far more air. [pause 1s] The blue is scattered away, and red is left.
+   ```
+
+   - `#` starts a chapter; its title is shown (chapter marker, chapter bar), never spoken.
+   - A blank line ends a paragraph: one shot (a long one is split into sentence groups of at most
+     12 s, `maxShotSeconds`).
+   - `[shot: …]` says what the picture shows: names, numbers, a diagram. It is never spoken. Keep
+     names and figures there, not in the voice (§10, §14): a card shows the hint as its hero.
+   - `[pause 1s]` is the voice's pause; Malayalam scripts also take the delivery tags (§10). Any
+     other bracket is refused, since it would be read aloud.
+   - Write narration that tells the story, not what is on screen ("here we see" is flagged).
+2. **Keep a fact ledger with sources** for every figure and claim the film shows, in
+   `build/facts.json` beside the project or as the recipe's `facts`:
+   `[{"text": "Lord Rayleigh explained the blue sky in 1871", "source": "https://…"}]`.
+   Write each claim in the words the screen uses. Check the script before building:
+   `exec script.factLedger '{"text": "<script>", "facts": [...]}'` warns about figures not in the
+   ledger, figures without a source and claims ("first", "only", "record", superlatives) nobody
+   sourced.
+3. **Save the project, then run the recipe** (dry run first). The review packet goes in
+   `build/review` beside the saved project, so a new project is saved before the run (here an
+   empty one, by a command that changes nothing; over MCP, `file.saveAs`):
+
+   ```bash
+   filmcraft-cli --save-as explainer.fcproj exec recipe.list
+   filmcraft-cli --project explainer.fcproj --save exec recipe.run '{"name": "builtin:topic-explainer", "dryRun": true, "params": {"script": "…"}}'
+   filmcraft-cli --project explainer.fcproj --save exec recipe.run '{"name": "builtin:topic-explainer", "wait": true,
+     "params": {"script": "…", "voice": "clone:<name>", "facts": [...], "title": "Why the sky is blue", "width": 1920, "height": 1080}}'
+   ```
+
+   Over MCP: `recipe_run {recipe: "builtin:topic-explainer", params: {...}, dry_run: true}`, then
+   without `dry_run`. The steps: the script read (markup and limits, no voice), its facts checked,
+   `script.timeline` (the voice, shots, subtitles, chapter and shot markers in a new sequence),
+   `script.shots` (one picture a shot), `graphics.chapterBar`, `sequence.checkCraft` and
+   `checkMotion` with the explainer rules, the facts on screen, `review.packet` (`review: false`
+   on an unsaved project) and `delivery.preflight` with `explainer: true`. No export, no upload.
+4. **The pictures.** Without compositions every shot is a card: a backdrop, the chapter's title
+   small, the hint large (at least a quarter of the frame's height), entering by line and pushing
+   in slowly until a second before the cut. For motion graphics, lay the script out first with
+   `script.timeline {text, out: "<build>/shots"}`: it writes one `shot-NN.json` a shot (text,
+   hints, chapter, length in seconds and frames, sentence and subtitle times relative to the
+   shot). Write one RAEA composition a shot in one file, named `shot-01`, `shot-02`…, each exactly
+   its shot's frames long ([raea-workflow.md](raea-workflow.md)), and pass `source` (the file) and
+   `renders` (a new folder) to the recipe: `script.shots` renders them one after another and places
+   each at its shot.
+5. **Read the checks** (§7). The explainer rules: no still picture over 3 s (captions changing do
+   not count), about a second of settle before each cut, the hero at least a quarter of the
+   frame's height. Then the review packet and the 1080p review as always (§0, §9).
+
+The commands alone, for a hand-built explainer: `script.timeline {text, voice?, language?,
+delivery?, estimate?, gaps?, maxShotSeconds?, captionChars?, out?, place?: {sequence: "new" |
+"active", name?, width?, height?, fps?, seconds?, track?, narration?, captions?, markers?}}`
+(`estimate: true` times the script from its words, with no voice, for planning); `script.shots
+{via?: "auto" | "motion" | "cards", source?, output?, exact?, track?, style?: {background?, text?,
+accent?, font?}, dryRun?}`; `graphics.chapterBar {chapters?, position?, labels?, progress?,
+colors?}`; `script.factLedger {sequence? | text?, facts?, claims?}`.
 
 ## 6. Building an edit by hand
 
@@ -678,6 +751,12 @@ f.run('graphics.animateText', {'clip': tc, 'layer': 0,
 - **Platform safe zones.** `exec sequence.checkSafeZones platform=reels` lists the text that
   reaches into Reels', Shorts' or TikTok's interface.
 
+**A chapter bar.** `exec graphics.chapterBar` draws a bar of the sequence's chapter markers
+(as `script.timeline` places them, or `chapters: [{seconds, title}]`) on a new top track: one
+clip a chapter, the chapters before it filled, its own in the accent colour, its title beside the
+bar; bottom of a landscape frame, top of a portrait one. `progress: true` fills the playing
+segment as it plays (it counts as movement for the still checks, so it is off by default).
+
 Ready-made animated text and stickers: `exec elements.list kind=text`, then
 `elements.insert {id, seconds, track}`.
 
@@ -868,6 +947,8 @@ Never show the user something you haven't looked at.
 | Motion: pops, stills, a flat opening, cuts a minute (warnings) | `exec qa.motionEnergy '{"path":"out.mp4","sheet":"motion.png"}'` (or `sequence`; declare intentional `holds`) |
 | Text and timeline craft: reading time, size, contrast over the footage, dead stretches, silence (warnings) | `exec sequence.checkCraft` |
 | An edit's style in numbers: cuts and jump cuts, shot lengths and their spread, bursts, stillness, an energy map, how moves settle, motion blur, the loudness curve, the palette; a small `fingerprint` to keep | `exec media.measureStyle '{"path":"out.mp4"}'` (or `item`, `sequence`; `from`, `to`; `summary: true` for the fingerprint alone) |
+| An explainer's rules: a still picture over 3 s even under changing captions, the hero under a quarter of the frame's height, a title or overlay still moving less than about a second before its cut (warnings) | `exec sequence.checkCraft '{"explainer":true}'` and `exec sequence.checkMotion '{"explainer":true}'`; `delivery.preflight {explainer: true}` hands it to both |
+| Figures and claims on screen against the ledger's sources (warnings) | `exec script.factLedger '{"facts":[{"text":"…","source":"https://…"}]}'` (or `text` for a script before it is built; default `build/facts.json`); `delivery.preflight`'s Floor check `factSources` once the ledger names a source |
 | Continuity across cuts: the subject jumping across the frame, the colours jumping (warnings; a cut under a transition is scored, not flagged) | `exec sequence.checkCarry` (`maxCuts`); each cut's `carry` from 1 (the eye is carried) to 0. Read it for cuts meant to flow (a scene, a match cut); a montage of places cuts on contrast on purpose, so it is not a delivery leg |
 | Motion design on the timeline, no render: bouncy eases, entrance and exit lengths, exits longer than entrances, long staggers, every title entering alike, text looping the whole clip, jumps at clip edges (warnings) | `exec sequence.checkMotion` (`style: "playful"`, or `autocut.taste` `motion: "playful"`, allows overshoot; `bands` overrides the frame ranges). Also `delivery.preflight`'s `motionCraft` check (Reflex, waivable) |
 | Motion filmstrips: seven frames per animated title, transition and alpha overlay, with jump, mid-move step, dissolve dip, fade past its shot and replayed-entrance detectors (warnings) | `filmcraft-cli frames --motion --project P.fcproj --out strips/` (`--items 12,12:out,t5`, `--scale 0.25`); MCP: `sequence.motionStrips {out, items?, wait: true}`, a long job. The folder must be new or empty |
