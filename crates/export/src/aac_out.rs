@@ -134,6 +134,9 @@ pub(crate) fn export(
     } else {
         let mut opts = WriterOptions::new(Brand::Mp4);
         opts.metadata = settings.metadata.udta();
+        if let Some(q) = project.sequence(seq) {
+            opts.chapters = crate::chapters_out::chapters(&q.markers, range.start, range.end());
+        }
         let mut mux = Mp4Writer::new(Out::create(settings)?, opts).map_err(|e| ExportError::Io(e.to_string()))?;
         let track = coded_audio_track(entry, a.sr, enc.priming());
         let track = mux.add_track(track).map_err(|e| ExportError::Io(e.to_string()))?;

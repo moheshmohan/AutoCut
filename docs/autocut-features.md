@@ -905,3 +905,12 @@ items: the tests use stand-ins.
   examples, starting ComfyUI offline on loopback, the runbook for Blender over MCP: telemetry
   off, safe mode on, port 9878, CC0 or CC BY assets only), the agent guide (§1, §3, §6.9, §13),
   this entry and the MCP server's instructions. 962 commands.
+
+## Update 2026-11-25 (AV160–AV165, container ports from craft-libs)
+
+- **AV160**: chapter markers become chapters. An MP4, MOV or M4A export carries the exported
+  sequence's chapter markers as a chapter list, in both forms players read: a QuickTime chapter
+  track (QuickTime Player, Apple devices) and a Nero `chpl` list (VLC, ffprobe). An In/Out range
+  counts them from its start, the chapter running there first; at most 255 chapters with titles of
+  at most 255 bytes. The MP4 reader reads both forms (`Mp4File::read_chapters`); imported chapters
+  do not become markers yet.

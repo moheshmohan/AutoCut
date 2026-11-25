@@ -356,3 +356,13 @@ needs at most 1.3 GB), VP9 12 GiB (the most it can hold within its size limits i
 at most about 6.5 GB, 8K UHD 4:4:4 12-bit about 5.9 GB). On 32-bit targets both are 1 GiB, which
 refuses VP9 8-bit 4:2:0 above about 29 million luma samples (8K UHD) and MPEG-2 4:4:4 above about
 27.5 million on wasm32. HEVC, AV1, APV and DNx keep their fixed caps and do not read the setting.
+
+### Container improvements (AV160–AV165)
+
+The `list` items for the MP4 and Matroska containers and the shared request cancellation were
+ported in one lane (own worktree and target, lane gate), behaviour only, into the fork's
+`filmcraft-isobmff`, `filmcraft-matroska` and `filmcraft-media` crates.
+
+| Commit | Port | craft-libs |
+|---|---|---|
+| AV160 | MP4/MOV chapter lists: `WriterOptions::chapters` writes a QuickTime chapter track and a Nero `chpl` list, `Mp4File::chpl_chapters` / `read_chapters` read them; exports write the sequence's chapter markers (MP4, MOV, M4A; an In/Out range counted from its start). `Mp4Writer` now holds its options boxed, so it does not grow with them | `7480fc2ac4` |

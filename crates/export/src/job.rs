@@ -619,6 +619,10 @@ impl Exporter {
         let file = Out::create(&self.settings)?;
         let mut opts = WriterOptions::new(self.brand);
         opts.metadata = self.settings.metadata.udta();
+        // the movie starts at the first exported frame
+        if let Some(q) = self.project.sequence(self.seq) {
+            opts.chapters = crate::chapters_out::chapters(&q.markers, self.pipe.rate.tick_of(self.f0), self.pipe.rate.tick_of(self.f1));
+        }
         let mut mux = Mp4Writer::new(file, opts).map_err(|e| ExportError::Io(e.to_string()))?;
         let mut entry = self.venc.sample_entry();
         let mut uuid_boxes = Vec::new();

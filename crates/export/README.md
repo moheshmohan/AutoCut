@@ -25,3 +25,11 @@ Regression coverage includes MP4 box order, decoded video/audio for disk,
 reserved-file and memory outputs, I/O errors, encoder fallback and preset
 settings. See [the integration record](../../plan/upstream-sync-2026-11-08.md)
 for validation results and deliberately deferred changes.
+
+## Chapters, AV160
+
+The exported sequence's chapter markers become the chapters of an MP4, MOV or M4A file
+(`chapters_out`): a QuickTime chapter track and a Nero `chpl` list, which QuickTime Player, Apple
+devices, VLC and ffprobe list. Marker names are the titles; an In/Out range counts the chapters
+from its start, and the chapter still running there begins the list. A sequence without chapter
+markers is exported as before. MXF and ADTS `.aac` files carry no chapters.

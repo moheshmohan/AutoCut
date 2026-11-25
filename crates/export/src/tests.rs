@@ -954,3 +954,82 @@ mod apv_chroma {
         }
     }
 }
+
+/// [`project`] with chapter markers at 0 s and 0.5 s and a comment marker at 0.25 s.
+fn chaptered_project() -> (Arc<Project>, ItemId, SourceMap) {
+    let (p, seq, m) = project();
+    let mut p = Arc::unwrap_or_clone(p);
+    let marker = |at: i64, kind: filmcraft_project::MarkerKind, name: &str| filmcraft_project::Marker {
+        id: filmcraft_project::MarkerId(at as u64 + 1),
+        start: Tick(at * TICKS_PER_SECOND / 1000),
+        duration: Tick::ZERO,
+        name: name.into(),
+        comment: String::new(),
+        kind,
+        color: Label::Violet,
+    };
+    p.sequence_mut(seq).unwrap().markers = vec![
+        marker(500, filmcraft_project::MarkerKind::Chapter, "Second half"),
+        marker(0, filmcraft_project::MarkerKind::Chapter, "Opening"),
+        marker(250, filmcraft_project::MarkerKind::Comment, "not a chapter"),
+    ];
+    (Arc::new(p), seq, m)
+}
+
+/// The chapter markers of the exported sequence become the file's chapters (a QuickTime chapter
+/// track and a `chpl` list); an In/Out range counts them from its start, with the chapter running
+/// there first; a sequence without chapter markers gets no chapter track.
+#[test]
+fn chapter_markers_become_the_files_chapters() {
+    let (p, seq, m) = chaptered_project();
+    let chapters = |path: &str| {
+        let bytes = std::fs::read(path).unwrap();
+        let f = filmcraft_isobmff::open(bytes.as_slice()).unwrap();
+        let read: Vec<(u64, String)> = f.read_chapters(bytes.as_slice()).unwrap().into_iter().map(|c| (c.start, c.title)).collect();
+        let chpl: Vec<(u64, String)> = f.chpl_chapters.iter().map(|c| (c.start, c.title.clone())).collect();
+        assert_eq!(read, chpl, "{path}: both forms agree");
+        (f, read)
+    };
+    let path = tmp("chapters.mov");
+    export(&p, seq, &ExportSettings { format: Format::Mjpeg, path: path.clone(), ..Default::default() }, &m, &Progress::default()).unwrap();
+    let (f, got) = chapters(&path);
+    assert_eq!(got, [(0, "Opening".to_string()), (500, "Second half".to_string())]);
+    let text = f.tracks.iter().find(|t| t.handler == b"text").expect("a chapter track");
+    assert!(!text.enabled, "the chapter track is never shown");
+    // the picture and the sound are still there
+    let src = filmcraft_codecs::open_bytes("chapters.mov", std::fs::read(&path).unwrap().into()).unwrap();
+    assert!(src.info().has_video() && src.info().has_audio());
+    if let Some(ffprobe) = filmcraft_testkit::ffprobe_or_skip("export chapters") {
+        let out = std::process::Command::new(ffprobe).args(["-v", "error", "-of", "json", "-show_chapters"]).arg(&path).output().unwrap();
+        let j: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        let titles: Vec<&str> = j["chapters"].as_array().unwrap().iter().filter_map(|c| c["tags"]["title"].as_str()).collect();
+        assert_eq!(titles, ["Opening", "Second half"]);
+    }
+    // an export from 0.25 s: "Opening" is running at its start, "Second half" begins 0.25 s in
+    let part = tmp("chapters_part.mov");
+    let range = Some(TimeRange::new(Tick(TICKS_PER_SECOND / 4), Tick(TICKS_PER_SECOND / 2)));
+    export(&p, seq, &ExportSettings { format: Format::Mjpeg, path: part.clone(), range, ..Default::default() }, &m, &Progress::default()).unwrap();
+    assert_eq!(chapters(&part).1, [(0, "Opening".to_string()), (250, "Second half".to_string())]);
+    // no chapter markers: the file is as before, without a chapter track or list
+    let (plain_p, plain_seq, plain_m) = project();
+    let plain = tmp("no_chapters.mov");
+    export(&plain_p, plain_seq, &ExportSettings { format: Format::Mjpeg, path: plain.clone(), ..Default::default() }, &plain_m, &Progress::default()).unwrap();
+    let (f, got) = chapters(&plain);
+    assert!(got.is_empty());
+    assert!(f.tracks.iter().all(|t| t.handler != b"text"));
+}
+
+/// An audio-only M4A export carries the chapters too (a podcast's chapter list).
+#[test]
+fn an_m4a_export_carries_the_chapters() {
+    let (p, seq, m) = chaptered_project();
+    let path = tmp("chapters.m4a");
+    export(&p, seq, &ExportSettings { format: Format::Aac, path: path.clone(), ..Default::default() }, &m, &Progress::default()).unwrap();
+    let bytes = std::fs::read(&path).unwrap();
+    let f = filmcraft_isobmff::open(bytes.as_slice()).unwrap();
+    let got: Vec<(u64, String)> = f.read_chapters(bytes.as_slice()).unwrap().into_iter().map(|c| (c.start, c.title)).collect();
+    assert_eq!(got, [(0, "Opening".to_string()), (500, "Second half".to_string())]);
+    assert_eq!(f.chpl_chapters.len(), 2);
+    // the chapter track hangs off the audio track
+    assert!(f.tracks[0].references.iter().any(|(k, _)| k == b"chap"));
+}

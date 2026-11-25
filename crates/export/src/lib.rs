@@ -20,6 +20,7 @@ pub use aac_out::encode_m4a;
 mod ahead;
 mod audio_out;
 mod captions_out;
+mod chapters_out;
 mod deflate;
 mod job;
 mod mp3_out;

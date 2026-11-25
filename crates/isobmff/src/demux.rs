@@ -240,6 +240,9 @@ pub struct Mp4File {
     pub moov_offset: u64,
     /// Number of `moof` boxes found.
     pub fragment_count: usize,
+    /// Nero chapter list (`udta/chpl`), starts in the movie timescale. QuickTime chapter tracks
+    /// live in media data: read them with [`Mp4File::read_chapters`].
+    pub chpl_chapters: Vec<crate::chapters::Chapter>,
 }
 
 impl Mp4File {
@@ -259,7 +262,48 @@ impl Mp4File {
     pub fn track_of_kind(&self, kind: TrackKind) -> Option<usize> {
         self.tracks.iter().position(|t| t.kind == kind)
     }
+    /// The chapter list: the QuickTime chapter track (the text track an enabled track's `tref/chap`
+    /// points at; titles read from `src`, starts in the movie timescale, edit-adjusted) when there is
+    /// one, else the Nero `chpl` list. Empty when the file has neither.
+    ///
+    /// Chapters outside the track's first non-empty edit are left out, and one spanning that edit's
+    /// start begins where the edit does; later edits are ignored. At most
+    /// [`MAX_CHAPTERS`](crate::MAX_CHAPTERS) chapter samples are read, each only as far as its title
+    /// needs, and titles are cut to [`MAX_CHAPTER_TITLE_BYTES`](crate::MAX_CHAPTER_TITLE_BYTES).
+    pub fn read_chapters<S: ByteSource + ?Sized>(&self, src: &S) -> Result<Vec<crate::chapters::Chapter>> {
+        use crate::chapters::{Chapter, MAX_CHAPTER_TITLE_BYTES, MAX_CHAPTERS, parse_text_sample, parse_text_sample_prefix, truncate_utf8};
+        let chap_id =
+            self.tracks.iter().filter(|t| t.enabled).flat_map(|t| &t.references).find(|(k, _)| k == b"chap").and_then(|(_, ids)| ids.first().copied());
+        let Some(t) = chap_id.and_then(|id| self.tracks.iter().find(|t| t.id == id)) else { return Ok(self.chpl_chapters.clone()) };
+        let edit = t.edits.iter().find(|e| e.media_time != -1);
+        let media_start = edit.map_or(i64::MIN, |e| e.media_time);
+        let media_end = edit
+            .filter(|e| e.segment_duration > 0)
+            .map_or(i64::MAX, |e| media_start.saturating_add(rescale(i128::from(e.segment_duration), self.timescale, t.timescale)));
+        let mut out = Vec::new();
+        for s in &t.samples {
+            if out.len() >= MAX_CHAPTERS {
+                break;
+            }
+            if s.pts >= media_end || (s.pts.saturating_add(i64::from(s.duration)) <= media_start && s.pts < media_start) {
+                continue;
+            }
+            let data = read_range(src, s.offset, u64::from(s.size).min(MAX_CHAPTER_SAMPLE_BYTES))?;
+            let title = if u64::from(s.size) > MAX_CHAPTER_SAMPLE_BYTES { parse_text_sample_prefix(&data) } else { parse_text_sample(&data) };
+            let title = title.unwrap_or_default();
+            let title = truncate_utf8(&title, MAX_CHAPTER_TITLE_BYTES).to_string();
+            let pts = u64::try_from(s.pts.max(media_start).saturating_add(t.edit_offset).max(0)).unwrap_or(0);
+            let start =
+                if t.timescale == 0 { 0 } else { u64::try_from(u128::from(pts) * u128::from(self.timescale) / u128::from(t.timescale)).unwrap_or(u64::MAX) };
+            out.push(Chapter { start, title });
+        }
+        Ok(out)
+    }
 }
+
+/// Most of a chapter sample read for its title: its 16-bit length and far more title than is kept.
+/// A longer title is decoded from what this holds of it.
+const MAX_CHAPTER_SAMPLE_BYTES: u64 = 4098;
 
 fn read_range<S: ByteSource + ?Sized>(src: &S, offset: u64, size: u64) -> Result<Vec<u8>> {
     let end = offset.checked_add(size).ok_or(Error::Truncated("sample"))?;
@@ -317,6 +361,7 @@ pub fn open<S: ByteSource>(src: S) -> Result<Mp4File> {
         fragmented: false,
         moov_offset,
         fragment_count: moofs.len(),
+        chpl_chapters: Vec::new(),
     };
     if let Some(f) = &ftyp {
         let mut c = Cur::new(f, "ftyp");
@@ -329,6 +374,8 @@ pub fn open<S: ByteSource>(src: S) -> Result<Mp4File> {
     }
     let mut trex: HashMap<u32, Trex> = HashMap::new();
     let mut trak_payloads = Vec::new();
+    // read after the loop: its starts are in the movie timescale, which `mvhd` may give later
+    let mut chpl = None;
     for b in boxes(&moov) {
         let b = b?;
         match &b.kind.0 {
@@ -363,10 +410,16 @@ pub fn open<S: ByteSource>(src: S) -> Result<Mp4File> {
                     }
                 }
             }
-            b"udta" => parse_udta(b.payload, &mut file.metadata),
+            b"udta" => {
+                parse_udta(b.payload, &mut file.metadata);
+                chpl = chpl.or_else(|| find(b.payload, b"chpl"));
+            }
             b"meta" => parse_meta(b.payload, &mut file.metadata),
             _ => {}
         }
+    }
+    if let Some(p) = chpl {
+        file.chpl_chapters = crate::chapters::parse_chpl(p, file.timescale);
     }
     let mut budget = SampleBudget::new(len);
     for p in trak_payloads {
