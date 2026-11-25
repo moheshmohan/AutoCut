@@ -934,3 +934,6 @@ Still-image improvements from upstream craft-libs, ported into AutoCut's own cra
   R, G, B and A); a renderer's multilayer file of named layers only (`ViewLayer.Combined.R`) now
   opens on its richest colour layer instead of being refused, and a one-channel file (a depth or
   mask pass) opens grey. The media info names the layer shown.
+- **AV119**: tiled and multi-part OpenEXR stills and sequences open (they were refused): the part
+  with the main picture is shown (the media info names it), and a tiled or mip-mapped file shows
+  its full-resolution level. Deep parts are skipped; PIZ, B44 and DWA compression stay refused.

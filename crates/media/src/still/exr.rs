@@ -1,25 +1,34 @@
 //! OpenEXR stills (and the frames of EXR image sequences), read from the public OpenEXR file layout:
-//! single-part scan-line files with no, RLE, ZIPS (one line per chunk), ZIP or PXR24 (16 lines)
-//! compression,
-//! half, float or uint channels. The picture shown is the file's main picture, as compositing
-//! applications show it: the unprefixed R, G, B (and A), else the unprefixed Y (and A), shown
-//! grey. A file of named layers only (`ViewLayer.Combined.R`) shows its richest colour layer, and
-//! a file of one channel (a depth map) shows it grey ([`channels`]). Missing alpha is opaque. EXR
-//! values are scene-linear with premultiplied alpha, which is exactly the compositor's working
-//! format, so the frame keeps them as 32-bit floats (values above 1.0 survive into effects and
-//! colour work).
+//! single-part and multi-part files of scan lines or tiles, with no, RLE, ZIPS (one line per
+//! chunk), ZIP or PXR24 (16 lines) compression, half, float or uint channels.
+//!
+//! The picture shown is the file's main picture, as compositing applications show it: the
+//! unprefixed R, G, B (and A) of the first part that has them, else the unprefixed Y (and A),
+//! shown grey. A file of named layers only (`ViewLayer.Combined.R`) shows its richest colour
+//! layer, and a part of one channel (a depth map) shows it grey ([`channels`]). Missing alpha is
+//! opaque. EXR values are scene-linear with premultiplied alpha, which is exactly the compositor's
+//! working format, so the frame keeps them as 32-bit floats (values above 1.0 survive into effects
+//! and colour work).
+//!
+//! Only the chosen part is read: the headers of every part are listed (at most [`MAX_PARTS`], each
+//! with at most [`MAX_ATTRIBUTES`] attributes), the offset tables of the parts before it are
+//! skipped by their `chunkCount`, and other parts' chunks (deep ones too) are never touched. A
+//! tiled part is read at its full resolution (level 0 of a mip-map or rip-map), each of its tiles
+//! exactly once. Every chunk's position, size and coordinates are checked before the picture is
+//! allocated, so a small file cannot claim a large picture.
 //!
 //! The display window is the frame; pixels of the data window outside it are cut, and the parts of
-//! it the data window does not cover are transparent. Tiled, deep and multi-part files, chroma
-//! subsampled channels and the PIZ, B44 and DWA compressions are refused with a clear error.
+//! it the data window does not cover are transparent. Deep parts, chroma subsampled channels and
+//! the PIZ, B44 and DWA compressions (whose bitstreams the public file layout does not specify)
+//! are refused with a clear error.
 
 mod channels;
 mod inflate;
 
-use channels::ColorLayout;
-
+use std::borrow::Cow;
 use std::sync::Arc;
 
+use channels::ColorLayout;
 use filmcraft_color::{ColorInfo, Transfer};
 use filmcraft_frame::VideoFrame;
 use filmcraft_time::FrameRate;
@@ -37,18 +46,24 @@ const MAX_PIXELS: u64 = 1 << 26;
 /// the display window. Both buffers coexist during placement.
 /// 2 GiB: an 8K RGBA f32 plate is 566 MB and the data and display windows may both be held.
 const MAX_DECODED_BYTES: usize = 2 << 30;
-/// Most attributes / channels we read from a header.
+/// Most attributes / channels we read from a header, and parts from a file.
 const MAX_ATTRIBUTES: usize = 4096;
 const MAX_CHANNELS: usize = 1024;
-/// Largest uncompressed chunk (scan lines × every channel) accepted. A real chunk is a few MB
-/// (16 lines of a 16K-wide, 8-channel float image is 8 MB); a hostile header naming a thousand
-/// channels on a 64M-pixel-wide line would otherwise ask for hundreds of GB.
+const MAX_PARTS: usize = 1024;
+/// Largest uncompressed chunk (scan lines or a tile × every channel) accepted. A real chunk is a
+/// few MB (16 lines of a 16K-wide, 8-channel float image is 8 MB); a hostile header naming a
+/// thousand channels on a 64M-pixel-wide line would otherwise ask for hundreds of GB.
 const MAX_CHUNK_BYTES: usize = 256 << 20;
 /// Most bytes one byte of RLE data expands to: a two-byte run is at most 128 bytes.
 const MAX_RLE_EXPANSION: usize = 64;
 /// Most bytes one byte of a zlib stream inflates to: deflate's longest match (258 bytes) takes at
 /// least two bits.
 const MAX_ZLIB_EXPANSION: usize = 1032;
+
+/// Version field flags: a single-part tiled file, one with long names, deep data, many parts.
+const FLAG_TILED: u32 = 0x200;
+const FLAG_DEEP: u32 = 0x800;
+const FLAG_MULTIPART: u32 = 0x1000;
 
 /// Whether `b` starts like an OpenEXR file.
 pub fn sniff(b: &[u8]) -> bool {
@@ -123,6 +138,8 @@ enum Target {
 struct Channel {
     name: String,
     ty: PixelType,
+    /// Horizontal and vertical sampling: (1, 1) for a channel at full resolution.
+    sampling: (u32, u32),
 }
 
 /// An inclusive pixel rectangle (`box2i`).
@@ -155,6 +172,19 @@ enum Compression {
 }
 
 impl Compression {
+    /// What compression `code` is, or the name of one this reader does not decode.
+    fn of(code: u8) -> std::result::Result<Compression, &'static str> {
+        match code {
+            0 => Ok(Compression::None),
+            1 => Ok(Compression::Rle),
+            2 | 3 => Ok(Compression::Zip),
+            5 => Ok(Compression::Pxr24),
+            _ => {
+                Err(["PIZ", "PXR24", "B44", "B44A", "DWAA", "DWAB", "HTJ2K256", "HTJ2K32"].get(usize::from(code).wrapping_sub(4)).copied().unwrap_or("unknown"))
+            }
+        }
+    }
+
     fn lines_per_chunk(self, code: u8) -> usize {
         match self {
             Compression::Zip if code == 3 => 16,
@@ -164,9 +194,47 @@ impl Compression {
     }
 }
 
+/// How a part stores its pixels.
+#[derive(Clone, PartialEq, Eq)]
+enum Storage {
+    ScanLines,
+    /// Tiles of this size; only the full-resolution level is read.
+    Tiles {
+        width: usize,
+        height: usize,
+    },
+    /// Deep data, or a part type this reader does not know: never shown.
+    Unreadable(String),
+}
+
+/// One part's header.
+struct Part {
+    /// The `name` attribute (multi-part files).
+    name: Option<String>,
+    storage: Storage,
+    channels: Vec<Channel>,
+    code: u8,
+    data: Window,
+    display: Window,
+    /// The `chunkCount` attribute (required in multi-part files).
+    chunk_count: Option<usize>,
+}
+
+/// The headers of a file.
+struct Headers {
+    parts: Vec<Part>,
+    multipart: bool,
+    /// Where the offset tables start: just after the headers.
+    tables: usize,
+}
+
 fn le32(b: &[u8], at: usize) -> Option<u32> {
     let s = b.get(at..at.checked_add(4)?)?;
     Some(u32::from_le_bytes([s[0], s[1], s[2], s[3]]))
+}
+
+fn le64(b: &[u8], at: usize) -> Option<u64> {
+    Some(u64::from(le32(b, at)?) | u64::from(le32(b, at.checked_add(4)?)?) << 32)
 }
 
 /// A NUL-terminated string of at most 255 bytes at `*pos`; advances past the NUL.
@@ -200,27 +268,16 @@ fn channels(v: &[u8]) -> Result<Vec<Channel>> {
             2 => PixelType::Float,
             _ => return Err(MediaError::Decode(format!("EXR channel {name}: pixel type {ty}"))),
         };
-        if (xs, ys) != (1, 1) {
-            return Err(MediaError::Unsupported(format!("EXR channel {name} is subsampled ({xs}×{ys})")));
-        }
         if out.len() >= MAX_CHANNELS {
             return Err(MediaError::Decode("EXR has too many channels".into()));
         }
-        out.push(Channel { name: name.to_string(), ty });
+        out.push(Channel { name: name.to_string(), ty, sampling: (xs, ys) });
     }
 }
 
-struct Header {
-    channels: Vec<Channel>,
-    compression: Compression,
-    code: u8,
-    data: Window,
-    display: Window,
-    /// Offset of the line offset table.
-    end: usize,
-}
-
-fn header(name: &str, b: &[u8]) -> Result<Header> {
+/// The headers of every part: one for a single-part file, a list ending in an empty header for
+/// a multi-part one.
+fn headers(name: &str, b: &[u8]) -> Result<Headers> {
     let bad = |what: &str| MediaError::Decode(format!("{name}: EXR {what}"));
     if !sniff(b) {
         return Err(bad("magic number"));
@@ -229,47 +286,85 @@ fn header(name: &str, b: &[u8]) -> Result<Header> {
     if version & 0xFF != 2 {
         return Err(MediaError::Unsupported(format!("{name}: OpenEXR version {}", version & 0xFF)));
     }
-    for (bit, what) in [(0x200, "tiled"), (0x800, "deep"), (0x1000, "multi-part")] {
-        if version & bit != 0 {
-            return Err(MediaError::Unsupported(format!("{name}: {what} OpenEXR files are not supported yet")));
+    let multipart = version & FLAG_MULTIPART != 0;
+    let mut pos = 8;
+    let mut parts = Vec::new();
+    loop {
+        if multipart && b.get(pos) == Some(&0) {
+            pos += 1;
+            break;
+        }
+        if parts.len() >= MAX_PARTS {
+            return Err(MediaError::Unsupported(format!("{name}: EXR has more than {MAX_PARTS} parts")));
+        }
+        let index = parts.len();
+        parts.push(part(b, &mut pos, if multipart { None } else { Some(version) }).map_err(|what| bad(&format!("part {index}: {what}")))?);
+        if !multipart {
+            break;
         }
     }
-    let (mut chans, mut code, mut data, mut display) = (None, None, None, None);
-    let mut pos = 8;
+    if parts.is_empty() {
+        return Err(bad("file has no parts"));
+    }
+    Ok(Headers { parts, multipart, tables: pos })
+}
+
+/// One header at `*pos`; `single` holds the version field of a single-part file (its flags say
+/// whether the part is tiled or deep), `None` in a multi-part file (the `type` attribute says).
+fn part(b: &[u8], pos: &mut usize, single: Option<u32>) -> std::result::Result<Part, String> {
+    let (mut chans, mut code, mut data, mut display, mut tiles, mut kind, mut name, mut chunk_count) = (None, None, None, None, None, None, None, None);
     for _ in 0..MAX_ATTRIBUTES {
-        let attr = cstr(b, &mut pos).ok_or_else(|| bad("header"))?;
+        let attr = cstr(b, pos).ok_or("header")?;
         if attr.is_empty() {
             let (Some(channels), Some(code), Some(data)) = (chans, code, data) else {
-                return Err(bad("header lacks channels, compression or dataWindow"));
+                return Err("header lacks channels, compression or dataWindow".into());
             };
-            let compression = match code {
-                0 => Compression::None,
-                1 => Compression::Rle,
-                2 | 3 => Compression::Zip,
-                5 => Compression::Pxr24,
-                _ => {
-                    let what = ["PIZ", "PXR24", "B44", "B44A", "DWAA", "DWAB"].get(usize::from(code).wrapping_sub(4)).copied().unwrap_or("unknown");
-                    return Err(MediaError::Unsupported(format!("{name}: {what} compressed OpenEXR is not supported yet")));
-                }
+            let tiled = || -> std::result::Result<Storage, String> {
+                let (width, height) = tiles.ok_or("a tiled part without its tile description")?;
+                Ok(Storage::Tiles { width, height })
             };
-            return Ok(Header { channels, compression, code, data, display: display.unwrap_or(data), end: pos });
+            let deep = matches!(kind.as_deref(), Some("deepscanline" | "deeptile"));
+            let storage = match (single, kind.as_deref()) {
+                (Some(version), _) if version & FLAG_DEEP != 0 || deep => Storage::Unreadable("deep".into()),
+                (Some(version), _) if version & FLAG_TILED != 0 => tiled()?,
+                (Some(_), _) | (None, Some("scanlineimage")) => Storage::ScanLines,
+                (None, Some("tiledimage")) => tiled()?,
+                (None, _) if deep => Storage::Unreadable("deep".into()),
+                (None, Some(other)) => Storage::Unreadable(format!("`{other}`")),
+                (None, None) if tiles.is_some() => tiled()?,
+                (None, None) => Storage::ScanLines,
+            };
+            return Ok(Part { name, storage, channels, code, data, display: display.unwrap_or(data), chunk_count });
         }
-        let ty = cstr(b, &mut pos).ok_or_else(|| bad("header"))?;
-        let size = le32(b, pos).ok_or_else(|| bad("header"))? as usize;
-        pos += 4;
-        let value = b.get(pos..pos.saturating_add(size)).ok_or_else(|| bad("header"))?;
-        pos += size;
+        let ty = cstr(b, pos).ok_or("header")?;
+        let size = le32(b, *pos).ok_or("header")? as usize;
+        *pos += 4;
+        let value = b.get(*pos..pos.saturating_add(size)).ok_or("header")?;
+        *pos += size;
+        let text = || std::str::from_utf8(value).ok().map(str::to_string);
         match (attr, ty) {
-            ("channels", "chlist") => chans = Some(channels(value).map_err(|e| bad(&e.to_string()))?),
+            ("channels", "chlist") => chans = Some(channels(value).map_err(|e| e.to_string())?),
             ("compression", "compression") => code = value.first().copied(),
-            ("dataWindow", "box2i") => data = Some(window(value).ok_or_else(|| bad("dataWindow"))?),
-            ("displayWindow", "box2i") => display = Some(window(value).ok_or_else(|| bad("displayWindow"))?),
+            ("dataWindow", "box2i") => data = Some(window(value).ok_or("dataWindow")?),
+            ("displayWindow", "box2i") => display = Some(window(value).ok_or("displayWindow")?),
+            ("tiles", "tiledesc") => {
+                // x size, y size, then the level and rounding modes; every level shares the size
+                let (Some(w), Some(h), Some(&mode)) = (le32(value, 0), le32(value, 4), value.get(8)) else {
+                    return Err("tile description".into());
+                };
+                if w == 0 || h == 0 || mode & 0x0F > 2 {
+                    return Err(format!("tile description {w} × {h}, mode {mode}"));
+                }
+                tiles = Some((w as usize, h as usize));
+            }
+            ("type", "string") => kind = text(),
+            ("name", "string") => name = text(),
+            ("chunkCount", "int") => chunk_count = le32(value, 0).and_then(|n| usize::try_from(n as i32).ok()),
             _ => {}
         }
     }
-    Err(bad("header has too many attributes"))
+    Err("header has too many attributes".into())
 }
-
 /// IEEE half → f32.
 fn half(h: u16) -> f32 {
     let sign = u32::from(h >> 15) << 31;
@@ -388,168 +483,287 @@ fn unpxr24(planes: &[u8], channels: &[Channel], width: usize, lines: usize) -> O
     (at == planes.len()).then_some(out)
 }
 
+/// A part's channels laid out in a block `width` samples wide: each channel's byte offset within a
+/// line, the line's size and its PXR24 byte planes.
+struct Lines {
+    offsets: Vec<usize>,
+    line: usize,
+    pxr24_line: usize,
+}
+
+impl Lines {
+    fn of(channels: &[Channel], width: usize) -> Option<Lines> {
+        let (mut line, mut pxr24_line) = (0usize, 0usize);
+        let mut offsets = Vec::with_capacity(channels.len());
+        for c in channels {
+            offsets.push(line);
+            line = line.checked_add(c.ty.size().checked_mul(width)?)?;
+            pxr24_line = pxr24_line.checked_add(plane_count(c.ty).checked_mul(width)?)?;
+        }
+        Some(Lines { offsets, line, pxr24_line })
+    }
+}
+
+/// Where one block's (a scan-line chunk's or a tile's) data is, and its shape.
+#[derive(Clone, Copy)]
+struct Block<'a> {
+    data: &'a [u8],
+    /// Its samples a line, and its lines.
+    width: usize,
+    lines: usize,
+}
+
+/// Whether a block of `size` bytes can hold `lines` lines of `l`: stored raw its size is the
+/// geometry's; compressed, it must be long enough to expand to them, or a file of a few hundred
+/// bytes could have the whole picture allocated (and, without alpha, written) before its first
+/// chunk fails to decode.
+fn plausible(compression: Compression, size: usize, l: &Lines, lines: usize) -> std::result::Result<(), &'static str> {
+    let expected = l.line.checked_mul(lines).ok_or("size")?;
+    let (need, most) = match compression {
+        _ if size == expected => return Ok(()),
+        Compression::None => return Err("has the wrong size"),
+        Compression::Rle => (expected, size.saturating_mul(MAX_RLE_EXPANSION)),
+        Compression::Zip => (expected, size.saturating_mul(MAX_ZLIB_EXPANSION)),
+        Compression::Pxr24 => (l.pxr24_line.checked_mul(lines).ok_or("size")?, size.saturating_mul(MAX_ZLIB_EXPANSION)),
+    };
+    if need > most { Err("is too short for its lines") } else { Ok(()) }
+}
+
+/// A block's lines in the plain layout (every channel's samples of a line, line after line).
+fn unpack<'a>(compression: Compression, block: Block<'a>, channels: &[Channel], l: &Lines) -> std::result::Result<Cow<'a, [u8]>, String> {
+    let expected = l.line.checked_mul(block.lines).ok_or("size")?;
+    if block.data.len() == expected {
+        // stored raw when compression would not shrink it
+        return Ok(block.data.into());
+    }
+    Ok(match compression {
+        Compression::None => return Err("has the wrong size".into()),
+        Compression::Rle => unpredict(unrle(block.data, expected).ok_or("bad RLE data")?).into(),
+        Compression::Zip => unpredict(inflate::zlib(block.data, expected)?).into(),
+        Compression::Pxr24 => {
+            let planes = l.pxr24_line.checked_mul(block.lines).ok_or("size")?;
+            let inflated = inflate::zlib(block.data, planes)?;
+            unpxr24(&inflated, channels, block.width, block.lines).ok_or("bad PXR24 data")?.into()
+        }
+    })
+}
+
+/// Write a block's decoded lines (`raw`) into `rows` (`row` floats each), from pixel `x0` of each.
+fn place(raw: &[u8], block: Block, l: &Lines, channels: &[Channel], targets: &[Target], alpha: bool, rows: &mut [f32], row: usize, x0: usize) {
+    for (k, out) in rows.chunks_exact_mut(row).take(block.lines).enumerate() {
+        let Some(out) = out.get_mut(x0 * 4..(x0 + block.width) * 4) else { continue };
+        // no alpha channel: opaque, filled once the block's data is in hand
+        if !alpha {
+            out.as_chunks_mut::<4>().0.iter_mut().for_each(|p| p[3] = 1.0);
+        }
+        let src = raw.get(k * l.line..(k + 1) * l.line).unwrap_or_default();
+        for ((c, &t), &o) in channels.iter().zip(targets).zip(&l.offsets) {
+            if matches!(t, Target::Skip) {
+                continue;
+            }
+            let sz = c.ty.size();
+            let samples = src.get(o..o + sz * block.width).unwrap_or_default();
+            for (p, s) in out.as_chunks_mut::<4>().0.iter_mut().zip(samples.chunks_exact(sz)) {
+                let v = sample(c.ty, s);
+                match t {
+                    Target::Slot(3) => p[3] = v.clamp(0.0, 1.0),
+                    Target::Slot(k) => {
+                        if let Some(q) = p.get_mut(k) {
+                            *q = v;
+                        }
+                    }
+                    Target::Grey => {
+                        p[0] = v;
+                        p[1] = v;
+                        p[2] = v;
+                    }
+                    Target::Skip => {}
+                }
+            }
+        }
+    }
+}
+
 /// Decode an EXR file into premultiplied linear RGBA floats.
 pub fn decode(name: &str, b: &[u8]) -> Result<Decoded> {
-    let h = header(name, b)?;
+    let file = headers(name, b)?;
     let bad = |what: String| MediaError::Decode(format!("{name}: EXR {what}"));
-    let (dw, dh) = h.data.size().ok_or_else(|| bad("data window size".into()))?;
-    let (fw, fh) = h.display.size().ok_or_else(|| bad("display window size".into()))?;
-    let (Ok(fw32), Ok(fh32)) = (u32::try_from(fw), u32::try_from(fh)) else {
-        return Err(bad("display window size".into()));
+    // channel → frame component: the main picture, else the richest colour layer, of the parts
+    // that can be read
+    let names: Vec<Vec<&str>> = file
+        .parts
+        .iter()
+        .map(|p| if matches!(p.storage, Storage::Unreadable(_)) { Vec::new() } else { p.channels.iter().map(|c| c.name.as_str()).collect() })
+        .collect();
+    let Some((index, picture)) = channels::shown_picture(names.iter().map(|n| n.iter().copied())) else {
+        if let Some(Storage::Unreadable(what)) = file.parts.iter().map(|p| &p.storage).find(|s| matches!(s, Storage::Unreadable(_))) {
+            return Err(MediaError::Unsupported(format!("{name}: {what} OpenEXR parts are not supported yet, and no other part has a picture")));
+        }
+        return Err(MediaError::Unsupported(format!("{name}: EXR has no R, G, B or Y channel")));
     };
-    // channel → frame component: the main picture, else the richest colour layer
-    let names: Vec<&str> = h.channels.iter().map(|c| c.name.as_str()).collect();
-    let (_, picture) =
-        channels::shown_picture([names.iter().copied()]).ok_or_else(|| MediaError::Unsupported(format!("{name}: EXR has no R, G, B or Y channel")))?;
+    let (part, names) = file.parts.get(index).zip(names.get(index)).ok_or_else(|| bad(format!("part {index}")))?;
+    let compression = Compression::of(part.code).map_err(|what| MediaError::Unsupported(format!("{name}: {what} compressed OpenEXR is not supported yet")))?;
+    if let Some(c) = part.channels.iter().find(|c| c.sampling != (1, 1)) {
+        let (xs, ys) = c.sampling;
+        return Err(MediaError::Unsupported(format!("{name}: EXR channel {} is subsampled ({xs}×{ys})", c.name)));
+    }
     let luminance = matches!(picture.layout, ColorLayout::Y | ColorLayout::YA);
     let prefix = if picture.layer.is_empty() { String::new() } else { format!("{}.", picture.layer) };
     if luminance && names.iter().any(|n| n.strip_prefix(prefix.as_str()).is_some_and(|c| c == "RY" || c == "BY")) {
         return Err(MediaError::Unsupported(format!("{name}: luminance / chroma OpenEXR is not supported yet")));
     }
-    let mut targets = vec![Target::Skip; h.channels.len()];
+    let mut targets = vec![Target::Skip; part.channels.len()];
     let slots: &[Target] = match picture.layout {
         ColorLayout::Rgba | ColorLayout::Rgb => &[Target::Slot(0), Target::Slot(1), Target::Slot(2), Target::Slot(3)],
         ColorLayout::Y | ColorLayout::YA => &[Target::Grey, Target::Slot(3)],
     };
-    for (&index, &slot) in picture.channels.iter().zip(slots) {
-        if let Some(t) = targets.get_mut(index) {
+    for (&i, &slot) in picture.channels.iter().zip(slots) {
+        if let Some(t) = targets.get_mut(i) {
             *t = slot;
         }
     }
-    let used: Vec<PixelType> = h.channels.iter().zip(&targets).filter(|(_, t)| !matches!(t, Target::Skip)).map(|(c, _)| c.ty).collect();
+    let used: Vec<PixelType> = part.channels.iter().zip(&targets).filter(|(_, t)| !matches!(t, Target::Skip)).map(|(c, _)| c.ty).collect();
     let alpha = picture.layout.has_alpha();
-    // byte offset of each channel within a scan line, and the line size
-    let mut line = 0usize;
-    let mut offs = Vec::with_capacity(h.channels.len());
-    for c in &h.channels {
-        offs.push(line);
-        line = c.ty.size().checked_mul(dw).and_then(|n| line.checked_add(n)).ok_or_else(|| bad("line size".into()))?;
-    }
-    let lpc = h.compression.lines_per_chunk(h.code);
-    if line.checked_mul(lpc).is_none_or(|n| n > MAX_CHUNK_BYTES) {
-        return Err(MediaError::Unsupported(format!("{name}: EXR scan lines too large ({} channels, {dw} wide)", h.channels.len())));
-    }
-    let table = h.end;
+
+    let (dw, dh) = part.data.size().ok_or_else(|| bad("data window size".into()))?;
+    let (fw, fh) = part.display.size().ok_or_else(|| bad("display window size".into()))?;
+    let (Ok(fw32), Ok(fh32)) = (u32::try_from(fw), u32::try_from(fh)) else {
+        return Err(bad("display window size".into()));
+    };
     let px_len = dw.checked_mul(dh).and_then(|n| n.checked_mul(4)).ok_or_else(|| bad("size".into()))?;
     let frame_len = fw.checked_mul(fh).and_then(|n| n.checked_mul(4)).ok_or_else(|| bad("display window size".into()))?;
     let decoded_bytes = px_len
         .checked_mul(std::mem::size_of::<f32>())
-        .and_then(|n| if h.data == h.display { Some(n) } else { frame_len.checked_mul(std::mem::size_of::<f32>()).and_then(|m| n.checked_add(m)) })
+        .and_then(|n| if part.data == part.display { Some(n) } else { frame_len.checked_mul(std::mem::size_of::<f32>()).and_then(|m| n.checked_add(m)) })
         .ok_or_else(|| bad("decoded size".into()))?;
     if decoded_bytes > MAX_DECODED_BYTES {
         return Err(MediaError::Unsupported(format!("{name}: EXR decoded buffers exceed the {MAX_DECODED_BYTES}-byte limit")));
     }
-    // PXR24 byte planes of one scan line
-    let pxr24_line = h.channels.iter().try_fold(0usize, |t, c| t.checked_add(plane_count(c.ty).checked_mul(dw)?));
-    let chunks = dh.div_ceil(lpc);
-    let table_end = table.checked_add(chunks.checked_mul(8).ok_or_else(|| bad("offset table size".into()))?).ok_or_else(|| bad("offset table size".into()))?;
-    if table_end > b.len() {
-        return Err(bad("offset table is truncated".into()));
+
+    // the part's offset table follows those of the parts before it
+    let mut table = file.tables;
+    if file.multipart {
+        for (i, p) in file.parts.iter().enumerate().take(index) {
+            let n = p.chunk_count.ok_or_else(|| bad(format!("part {i} has no chunkCount")))?;
+            table = n.checked_mul(8).and_then(|n| table.checked_add(n)).filter(|t| *t <= b.len()).ok_or_else(|| bad("offset tables are truncated".into()))?;
+        }
     }
-    for i in 0..chunks {
-        let at = table + i * 8;
-        let off = le32(b, at).zip(le32(b, at + 4)).map(|(lo, hi)| u64::from(lo) | u64::from(hi) << 32);
-        let off = off.and_then(|o| usize::try_from(o).ok()).ok_or_else(|| bad(format!("offset of chunk {i}")))?;
-        let size = le32(b, off.checked_add(4).ok_or_else(|| bad(format!("chunk {i}")))?).ok_or_else(|| bad(format!("chunk {i}")))? as usize;
-        let end = off.checked_add(8).and_then(|n| n.checked_add(size)).ok_or_else(|| bad(format!("chunk {i}")))?;
+    // a chunk's fields before its data: the part number (multi-part files), then the first line
+    // of a scan-line chunk or the tile and level coordinates of a tile, then the data size
+    let part_field = if file.multipart { 4 } else { 0 };
+    let entry = |i: usize| le64(b, table + i * 8).and_then(|o| usize::try_from(o).ok());
+    // the chunk at table entry `i`: its fields (as i32) and its data
+    let chunk = |i: usize, fields: usize| -> Result<(Vec<i32>, &[u8])> {
+        let off = entry(i).ok_or_else(|| bad(format!("offset of chunk {i}")))?;
+        if off < table {
+            return Err(bad(format!("chunk {i} lies inside the headers")));
+        }
+        let field = |k: usize| le32(b, off.checked_add(k * 4)?).map(|v| v as i32);
+        if file.multipart && field(0) != i32::try_from(index).ok() {
+            return Err(bad(format!("chunk {i} is not part {index}'s")));
+        }
+        let values = (0..fields).map(|k| field(part_field / 4 + k)).collect::<Option<Vec<i32>>>().ok_or_else(|| bad(format!("chunk {i} is truncated")))?;
+        let size_at = off + part_field + fields * 4;
+        let size = le32(b, size_at).ok_or_else(|| bad(format!("chunk {i} is truncated")))? as usize;
+        let data = b
+            .get(size_at + 4..(size_at + 4).checked_add(size).ok_or_else(|| bad(format!("chunk {i}")))?)
+            .ok_or_else(|| bad(format!("chunk {i} is truncated")))?;
+        Ok((values, data))
+    };
+    let needed = |n: usize| -> Result<()> {
+        let end = n.checked_mul(8).and_then(|t| table.checked_add(t)).ok_or_else(|| bad("offset table size".into()))?;
         if end > b.len() {
-            return Err(bad(format!("chunk {i} is truncated")));
+            return Err(bad("offset table is truncated".into()));
         }
-        let y = le32(b, off).map(|y| y as i32);
-        let want = i64::from(h.data.y0) + (i * lpc) as i64;
-        if y.map(i64::from) != Some(want) {
-            return Err(bad(format!("chunk {i} is not at line {want}")));
-        }
-        // stored raw: its length follows from the geometry, so check it before the output exists;
-        // compressed, it must be long enough to expand to its lines, or a file of a few hundred
-        // bytes could have the whole picture allocated (and, without alpha, written) before its
-        // first chunk fails to decode
-        let n = lpc.min(dh - i * lpc);
-        let expected = line.checked_mul(n).ok_or_else(|| bad("chunk size".into()))?;
-        let packed = match h.compression {
-            _ if size == expected => None,
-            Compression::None => return Err(bad(format!("chunk {i} has the wrong size"))),
-            Compression::Rle => Some((expected, size.saturating_mul(MAX_RLE_EXPANSION))),
-            Compression::Zip => Some((expected, size.saturating_mul(MAX_ZLIB_EXPANSION))),
-            Compression::Pxr24 => {
-                let planes = pxr24_line.and_then(|l| l.checked_mul(n)).ok_or_else(|| bad("chunk size".into()))?;
-                Some((planes, size.saturating_mul(MAX_ZLIB_EXPANSION)))
-            }
-        };
-        if packed.is_some_and(|(need, most)| need > most) {
-            return Err(bad(format!("chunk {i} is too short for its {n} lines")));
-        }
-    }
-    // zeroed pages are committed only as chunks write them
-    let mut px = vec![0f32; px_len];
-    let row = dw * 4;
-    px.par_chunks_mut(row * lpc).enumerate().try_for_each(|(i, rows)| -> Result<()> {
-        let n = rows.len() / row;
-        let expected = line.checked_mul(n).ok_or_else(|| bad("chunk size".into()))?;
-        let off = le32(b, table + i * 8).zip(le32(b, table + i * 8 + 4)).map(|(lo, hi)| u64::from(lo) | u64::from(hi) << 32);
-        let off = off.and_then(|o| usize::try_from(o).ok()).ok_or_else(|| bad(format!("offset of chunk {i}")))?;
-        let y = le32(b, off).map(|y| y as i32);
-        let want = i64::from(h.data.y0) + (i * lpc) as i64;
-        if y.map(i64::from) != Some(want) {
-            return Err(bad(format!("chunk {i} is not at line {want}")));
-        }
-        let size = le32(b, off + 4).ok_or_else(|| bad(format!("chunk {i}")))? as usize;
-        let data = b.get(off + 8..(off + 8).saturating_add(size)).ok_or_else(|| bad(format!("chunk {i} is truncated")))?;
-        let raw: std::borrow::Cow<[u8]> = if data.len() == expected {
-            // stored raw when compression would not shrink it
-            data.into()
-        } else {
-            match h.compression {
-                Compression::None => return Err(bad(format!("chunk {i} has the wrong size"))),
-                Compression::Rle => unpredict(unrle(data, expected).ok_or_else(|| bad(format!("chunk {i}: bad RLE data")))?).into(),
-                Compression::Zip => unpredict(inflate::zlib(data, expected).map_err(|e| bad(format!("chunk {i}: {e}")))?).into(),
-                Compression::Pxr24 => {
-                    let planes = pxr24_line.and_then(|l| l.checked_mul(n)).ok_or_else(|| bad("chunk size".into()))?;
-                    let inflated = inflate::zlib(data, planes).map_err(|e| bad(format!("chunk {i}: {e}")))?;
-                    unpxr24(&inflated, &h.channels, dw, n).ok_or_else(|| bad(format!("chunk {i}: bad PXR24 data")))?.into()
-                }
-            }
-        };
-        // no alpha channel: opaque, filled once the chunk's data is in hand
-        if !alpha {
-            rows.as_chunks_mut::<4>().0.iter_mut().for_each(|p| p[3] = 1.0);
-        }
-        for (l, out) in rows.chunks_exact_mut(row).enumerate() {
-            let src = raw.get(l * line..(l + 1) * line).unwrap_or_default();
-            for ((c, &t), &o) in h.channels.iter().zip(&targets).zip(&offs) {
-                if matches!(t, Target::Skip) {
-                    continue;
-                }
-                let sz = c.ty.size();
-                let samples = src.get(o..o + sz * dw).unwrap_or_default();
-                for (p, s) in out.as_chunks_mut::<4>().0.iter_mut().zip(samples.chunks_exact(sz)) {
-                    let v = sample(c.ty, s);
-                    match t {
-                        Target::Slot(3) => p[3] = v.clamp(0.0, 1.0),
-                        Target::Slot(k) => {
-                            if let Some(q) = p.get_mut(k) {
-                                *q = v;
-                            }
-                        }
-                        Target::Grey => {
-                            p[0] = v;
-                            p[1] = v;
-                            p[2] = v;
-                        }
-                        Target::Skip => {}
-                    }
-                }
-            }
+        if file.multipart && part.chunk_count.is_none_or(|c| c < n) {
+            return Err(bad(format!("part {index}'s chunkCount does not cover its {n} chunks")));
         }
         Ok(())
-    })?;
+    };
+
+    // zeroed pages are committed only as blocks write them
+    let mut px = vec![0f32; px_len];
+    let row = dw * 4;
+    match part.storage {
+        Storage::Unreadable(ref what) => return Err(MediaError::Unsupported(format!("{name}: {what} OpenEXR parts are not supported yet"))),
+        Storage::ScanLines => {
+            let l = Lines::of(&part.channels, dw).ok_or_else(|| bad("line size".into()))?;
+            let lpc = compression.lines_per_chunk(part.code);
+            if l.line.checked_mul(lpc).is_none_or(|n| n > MAX_CHUNK_BYTES) {
+                return Err(MediaError::Unsupported(format!("{name}: EXR scan lines too large ({} channels, {dw} wide)", part.channels.len())));
+            }
+            let chunks = dh.div_ceil(lpc);
+            needed(chunks)?;
+            // every chunk checked before the picture is written
+            let mut blocks = Vec::with_capacity(chunks);
+            for i in 0..chunks {
+                let (fields, data) = chunk(i, 1)?;
+                let want = i64::from(part.data.y0) + (i * lpc) as i64;
+                if fields.first().map(|&y| i64::from(y)) != Some(want) {
+                    return Err(bad(format!("chunk {i} is not at line {want}")));
+                }
+                let lines = lpc.min(dh - i * lpc);
+                plausible(compression, data.len(), &l, lines).map_err(|e| bad(format!("chunk {i} {e}")))?;
+                blocks.push(Block { data, width: dw, lines });
+            }
+            px.par_chunks_mut(row * lpc).zip(blocks).enumerate().try_for_each(|(i, (rows, block))| -> Result<()> {
+                let raw = unpack(compression, block, &part.channels, &l).map_err(|e| bad(format!("chunk {i}: {e}")))?;
+                place(&raw, block, &l, &part.channels, &targets, alpha, rows, row, 0);
+                Ok(())
+            })?;
+        }
+        Storage::Tiles { width: tw, height: th } => {
+            let (ntx, nty) = (dw.div_ceil(tw), dh.div_ceil(th));
+            let tiles = ntx.checked_mul(nty).ok_or_else(|| bad("tile count".into()))?;
+            let l = Lines::of(&part.channels, tw.min(dw)).ok_or_else(|| bad("tile size".into()))?;
+            if l.line.checked_mul(th.min(dh)).is_none_or(|n| n > MAX_CHUNK_BYTES) {
+                return Err(MediaError::Unsupported(format!("{name}: EXR tiles too large ({} channels, {tw} × {th})", part.channels.len())));
+            }
+            // the full-resolution level's tiles come first in the table (any further levels
+            // follow), each tile once
+            needed(tiles)?;
+            let mut blocks: Vec<Option<Block>> = vec![None; tiles];
+            for i in 0..tiles {
+                let (fields, data) = chunk(i, 4)?;
+                let &[tx, ty, lx, ly] = fields.as_slice() else { return Err(bad(format!("chunk {i} is truncated"))) };
+                if (lx, ly) != (0, 0) {
+                    return Err(bad(format!("chunk {i} is a tile of level ({lx}, {ly}), not of the full-resolution level")));
+                }
+                let (Ok(tx), Ok(ty)) = (usize::try_from(tx), usize::try_from(ty)) else {
+                    return Err(bad(format!("chunk {i} names tile ({tx}, {ty})")));
+                };
+                if tx >= ntx || ty >= nty {
+                    return Err(bad(format!("chunk {i} names tile ({tx}, {ty}) of {ntx} × {nty}")));
+                }
+                let (width, lines) = (tw.min(dw - tx * tw), th.min(dh - ty * th));
+                let lt = Lines::of(&part.channels, width).ok_or_else(|| bad("tile size".into()))?;
+                plausible(compression, data.len(), &lt, lines).map_err(|e| bad(format!("tile ({tx}, {ty}) {e}")))?;
+                let slot = blocks.get_mut(ty * ntx + tx).ok_or_else(|| bad(format!("tile ({tx}, {ty})")))?;
+                if slot.is_some() {
+                    return Err(bad(format!("tile ({tx}, {ty}) is stored twice")));
+                }
+                *slot = Some(Block { data, width, lines });
+            }
+            // a band of tiles a task, each tile decoded straight into place
+            px.par_chunks_mut(row * th.min(dh)).enumerate().try_for_each(|(ty, rows)| -> Result<()> {
+                for tx in 0..ntx {
+                    let block = blocks.get(ty * ntx + tx).copied().flatten().ok_or_else(|| bad(format!("tile ({tx}, {ty}) is missing")))?;
+                    let lt = Lines::of(&part.channels, block.width).ok_or_else(|| bad("tile size".into()))?;
+                    let raw = unpack(compression, block, &part.channels, &lt).map_err(|e| bad(format!("tile ({tx}, {ty}): {e}")))?;
+                    place(&raw, block, &lt, &part.channels, &targets, alpha, rows, row, tx * tw);
+                }
+                Ok(())
+            })?;
+        }
+    }
+
     // place the data window into the display window
-    let px = if h.data == h.display {
+    let px = if part.data == part.display {
         px
     } else {
         let mut f = vec![0f32; fw * fh * 4];
-        let dx = i64::from(h.data.x0) - i64::from(h.display.x0);
-        let dy = i64::from(h.data.y0) - i64::from(h.display.y0);
+        let dx = i64::from(part.data.x0) - i64::from(part.display.x0);
+        let dy = i64::from(part.data.y0) - i64::from(part.display.y0);
         let (x0, x1) = (dx.max(0), (dx + dw as i64).min(fw as i64));
         if x0 < x1 {
             for (y, out) in f.chunks_exact_mut(fw * 4).enumerate() {
@@ -578,7 +792,15 @@ pub fn decode(name: &str, b: &[u8]) -> Result<Decoded> {
         ColorLayout::YA => "YA",
         ColorLayout::Y => "Y",
     };
-    let pixel_format = if picture.layer.is_empty() { format!("{layout} {depth}") } else { format!("{layout} {depth}, layer {}", picture.layer) };
+    let mut pixel_format = format!("{layout} {depth}");
+    if file.multipart
+        && let Some(p) = part.name.as_deref().filter(|p| !p.is_empty())
+    {
+        pixel_format.push_str(&format!(", part {p}"));
+    }
+    if !picture.layer.is_empty() {
+        pixel_format.push_str(&format!(", layer {}", picture.layer));
+    }
     let mut frame = VideoFrame::rgba_f32(fw32, fh32, px);
     frame.color = LINEAR_709;
     Ok(Decoded { frame, has_alpha, pixel_format })

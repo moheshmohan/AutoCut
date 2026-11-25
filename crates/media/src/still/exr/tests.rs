@@ -88,7 +88,13 @@ fn zlib_stored(t: &[u8]) -> Vec<u8> {
         out.extend_from_slice(&(!(b.len() as u16)).to_le_bytes());
         out.extend_from_slice(b);
     }
-    out.extend_from_slice(&[0; 4]); // Adler-32 (not checked)
+    // Adler-32 (not checked by our reader; other readers do)
+    let (mut a, mut b) = (1u32, 0u32);
+    for &x in t {
+        a = (a + u32::from(x)) % 65521;
+        b = (b + a) % 65521;
+    }
+    out.extend_from_slice(&(b << 16 | a).to_be_bytes());
     out
 }
 
@@ -163,6 +169,159 @@ fn exr_file(chans: &[Chan], data: [i32; 4], display: [i32; 4], comp: u8, value: 
         f.extend_from_slice(&packed);
     }
     f
+}
+
+/// The plain bytes of a block: lines `y0..y0 + lines`, columns `x0..x0 + width`, every channel.
+fn block_raw(chans: &[Chan], x0: i32, width: usize, y0: i32, lines: usize, value: &dyn Fn(usize, i32, i32) -> f32) -> Vec<u8> {
+    let mut raw = Vec::new();
+    for y in y0..y0 + lines as i32 {
+        for (c, (_, t)) in chans.iter().enumerate() {
+            for x in x0..x0 + width as i32 {
+                put(&mut raw, *t, value(c, x, y));
+            }
+        }
+    }
+    raw
+}
+
+/// A block's bytes as compression `comp` stores them. An RLE block that does not shrink is stored
+/// raw, as the format says; ZIP and PXR24 blocks are stored deflate blocks, larger than the data,
+/// kept so that our reader's inflation is exercised (other readers take them to be raw).
+fn pack(comp: u8, raw: Vec<u8>, chans: &[Chan], width: usize, lines: usize) -> Vec<u8> {
+    match comp {
+        0 => raw,
+        1 => Some(rle(&predict(&raw))).filter(|p| p.len() < raw.len()).unwrap_or(raw),
+        5 => zlib_stored(&pxr24(&raw, chans, width, lines)),
+        _ => zlib_stored(&predict(&raw)),
+    }
+}
+
+/// One part of a test file.
+struct TestPart<'a> {
+    name: &'a str,
+    /// `scanlineimage`, `tiledimage` or a deep type (whose single chunk is junk).
+    kind: &'a str,
+    chans: &'a [Chan],
+    data: [i32; 4],
+    comp: u8,
+    /// Tile size and level mode of a tiled part.
+    tile: (usize, usize, u8),
+    value: &'a dyn Fn(usize, i32, i32) -> f32,
+}
+
+/// The header attributes of a part (without the terminating NUL).
+fn part_header(p: &TestPart, multipart: bool, chunks: usize) -> Vec<u8> {
+    let mut h = Vec::new();
+    let mut cl = Vec::new();
+    for (n, t) in p.chans {
+        cl.extend_from_slice(n.as_bytes());
+        cl.push(0);
+        cl.extend_from_slice(&t.to_le_bytes());
+        cl.extend_from_slice(&[0; 4]);
+        cl.extend_from_slice(&1u32.to_le_bytes());
+        cl.extend_from_slice(&1u32.to_le_bytes());
+    }
+    cl.push(0);
+    attr(&mut h, "channels", "chlist", &cl);
+    if multipart {
+        attr(&mut h, "chunkCount", "int", &(chunks as i32).to_le_bytes());
+    }
+    attr(&mut h, "compression", "compression", &[p.comp]);
+    attr(&mut h, "dataWindow", "box2i", &box2i(p.data));
+    attr(&mut h, "displayWindow", "box2i", &box2i(p.data));
+    attr(&mut h, "lineOrder", "lineOrder", &[0]);
+    if multipart {
+        attr(&mut h, "name", "string", p.name.as_bytes());
+    }
+    attr(&mut h, "pixelAspectRatio", "float", &1f32.to_le_bytes());
+    if p.kind == "tiledimage" {
+        let mut t = (p.tile.0 as u32).to_le_bytes().to_vec();
+        t.extend_from_slice(&(p.tile.1 as u32).to_le_bytes());
+        t.push(p.tile.2);
+        attr(&mut h, "tiles", "tiledesc", &t);
+    }
+    if multipart {
+        attr(&mut h, "type", "string", p.kind.as_bytes());
+    }
+    h
+}
+
+/// A part's chunks, in table order: the coordinate fields and the stored data. A tiled part's
+/// level 0 comes first (tiles row by row); a mip-mapped one then has a level 1 of junk tiles.
+fn part_chunks(p: &TestPart) -> Vec<(Vec<i32>, Vec<u8>)> {
+    let (w, h) = ((p.data[2] - p.data[0] + 1) as usize, (p.data[3] - p.data[1] + 1) as usize);
+    let mut out = Vec::new();
+    match p.kind {
+        "scanlineimage" => {
+            let lpc = if p.comp == 3 || p.comp == 5 { 16 } else { 1 };
+            for y0 in (p.data[1]..=p.data[3]).step_by(lpc) {
+                let lines = lpc.min((p.data[3] - y0 + 1) as usize);
+                let raw = block_raw(p.chans, p.data[0], w, y0, lines, p.value);
+                out.push((vec![y0], pack(p.comp, raw, p.chans, w, lines)));
+            }
+        }
+        "tiledimage" => {
+            let (tw, th, mode) = p.tile;
+            for ty in 0..h.div_ceil(th) {
+                for tx in 0..w.div_ceil(tw) {
+                    let (bw, bl) = (tw.min(w - tx * tw), th.min(h - ty * th));
+                    let raw = block_raw(p.chans, p.data[0] + (tx * tw) as i32, bw, p.data[1] + (ty * th) as i32, bl, p.value);
+                    out.push((vec![tx as i32, ty as i32, 0, 0], pack(p.comp, raw, p.chans, bw, bl)));
+                }
+            }
+            if mode == 1 {
+                out.push((vec![0, 0, 1, 1], vec![0xEE; 7]));
+            }
+        }
+        _ => out.push((vec![p.data[1], 0, 0, 0], vec![0xDD; 9])),
+    }
+    out
+}
+
+/// A file of `parts`: a single-part file (tiled or scan-line, by the version flag) when there is
+/// one, else a multi-part file.
+fn exr_parts(parts: &[TestPart]) -> Vec<u8> {
+    let multipart = parts.len() > 1;
+    let chunks: Vec<Vec<(Vec<i32>, Vec<u8>)>> = parts.iter().map(part_chunks).collect();
+    let mut f = MAGIC.to_vec();
+    let mut flags = 2u32;
+    if multipart {
+        flags |= 0x1000;
+    } else if parts[0].kind == "tiledimage" {
+        flags |= 0x200;
+    }
+    f.extend_from_slice(&flags.to_le_bytes());
+    for (p, c) in parts.iter().zip(&chunks) {
+        f.extend(part_header(p, multipart, c.len()));
+        f.push(0);
+    }
+    if multipart {
+        f.push(0);
+    }
+    let table = f.len();
+    let entries: usize = chunks.iter().map(Vec::len).sum();
+    f.resize(table + entries * 8, 0);
+    let mut k = 0;
+    for (i, part) in chunks.iter().enumerate() {
+        for (fields, data) in part {
+            let off = f.len() as u64;
+            f[table + k * 8..table + k * 8 + 8].copy_from_slice(&off.to_le_bytes());
+            k += 1;
+            if multipart {
+                f.extend_from_slice(&(i as i32).to_le_bytes());
+            }
+            for v in fields {
+                f.extend_from_slice(&v.to_le_bytes());
+            }
+            f.extend_from_slice(&(data.len() as u32).to_le_bytes());
+            f.extend_from_slice(data);
+        }
+    }
+    f
+}
+
+fn tiled(chans: &'static [Chan], data: [i32; 4], comp: u8, tile: (usize, usize, u8), value: &'static dyn Fn(usize, i32, i32) -> f32) -> Vec<u8> {
+    exr_parts(&[TestPart { name: "", kind: "tiledimage", chans, data, comp, tile, value }])
 }
 
 fn floats(d: &Decoded) -> &[f32] {
@@ -307,9 +466,13 @@ fn still_source_reports_exr() {
 #[test]
 fn unsupported_files_say_why() {
     let f = exr_file(RGBA_HALF, [0, 0, 1, 1], [0, 0, 1, 1], 0, pattern);
+    // tiled without a tile description is damaged; deep data is not read
     let mut tiled = f.clone();
     tiled[5] |= 0x02;
-    assert!(matches!(decode("t.exr", &tiled), Err(MediaError::Unsupported(m)) if m.contains("tiled")));
+    assert!(matches!(decode("t.exr", &tiled), Err(MediaError::Decode(m)) if m.contains("tile description")));
+    let mut deep = f.clone();
+    deep[5] |= 0x08;
+    assert!(matches!(decode("d.exr", &deep), Err(MediaError::Unsupported(m)) if m.contains("deep")));
     let piz = exr_file(RGBA_HALF, [0, 0, 1, 1], [0, 0, 1, 1], 4, pattern);
     assert!(matches!(decode("p.exr", &piz), Err(MediaError::Unsupported(m)) if m.contains("PIZ")));
     let b44 = exr_file(RGBA_HALF, [0, 0, 1, 1], [0, 0, 1, 1], 6, pattern);
@@ -445,5 +608,243 @@ fn compressed_chunks_too_short_for_their_lines_fail_before_the_picture_is_alloca
         }
         let e = decode("a.exr", &f).err().expect("a chunk too short for its lines is an error").to_string();
         assert!(e.contains("chunk 0 is too short for its"), "compression {comp}: {e}");
+    }
+}
+
+/// Tiled files were refused. Every compression, edge tiles cut by the data window, a data window
+/// off the origin: the same pixels as the scan-line file of the same values.
+#[test]
+fn tiled_files_decode_like_scan_lines() {
+    for (data, tile) in [([0, 0, 12, 9], (4, 3)), ([3, -2, 9, 4], (2, 2)), ([0, 0, 4, 4], (64, 64)), ([0, 0, 6, 0], (1, 1))] {
+        let base = decode("s.exr", &exr_file(RGBA_HALF, data, data, 0, pattern)).unwrap();
+        for comp in [0, 1, 2, 3, 5] {
+            let f = tiled(RGBA_HALF, data, comp, (tile.0, tile.1, 0), &pattern);
+            let d = decode("t.exr", &f).unwrap_or_else(|e| panic!("{data:?} {tile:?} compression {comp}: {e}"));
+            assert_eq!((d.frame.width, d.frame.height), (base.frame.width, base.frame.height));
+            assert_eq!(floats(&d), floats(&base), "{data:?} {tile:?} compression {comp}");
+            assert_eq!(d.pixel_format, "RGBA 16-bit float");
+        }
+    }
+}
+
+/// A mip-mapped file shows its full-resolution level; the smaller levels are not read.
+#[test]
+fn mip_mapped_tiles_show_the_full_resolution_level() {
+    let data = [0, 0, 9, 6];
+    let base = decode("s.exr", &exr_file(RGBA_HALF, data, data, 0, pattern)).unwrap();
+    let f = tiled(RGBA_HALF, data, 3, (4, 4, 1), &pattern);
+    assert_eq!(floats(&decode("m.exr", &f).unwrap()), floats(&base));
+}
+
+#[test]
+fn damaged_tiled_files_are_errors() {
+    let f = tiled(RGBA_HALF, [0, 0, 7, 7], 0, (4, 4, 0), &pattern);
+    assert!(decode("t.exr", &f).is_ok());
+    let header_end = f.windows(9).position(|w| w == b"tiledesc\0").unwrap() + 9 + 4 + 9 + 1;
+    let entry = |f: &[u8], i: usize| u64::from_le_bytes(f[header_end + i * 8..header_end + i * 8 + 8].try_into().unwrap()) as usize;
+    // tile 1 stored twice (tile 0's table entry pointing at it), or of another level
+    let mut twice = f.clone();
+    let one = entry(&f, 1) as u64;
+    twice[header_end..header_end + 8].copy_from_slice(&one.to_le_bytes());
+    assert!(decode("t.exr", &twice).err().unwrap().to_string().contains("stored twice"));
+    let mut level = f.clone();
+    let at = entry(&f, 2) + 8;
+    level[at..at + 4].copy_from_slice(&1i32.to_le_bytes());
+    assert!(decode("t.exr", &level).err().unwrap().to_string().contains("level (1, 0)"));
+    // a tile outside the grid, and a tile size of 0
+    let mut outside = f.clone();
+    let at = entry(&f, 3);
+    outside[at..at + 4].copy_from_slice(&9i32.to_le_bytes());
+    assert!(decode("t.exr", &outside).err().unwrap().to_string().contains("of 2 × 2"));
+    let mut zero = f.clone();
+    let at = header_end - 10;
+    zero[at..at + 4].copy_from_slice(&0u32.to_le_bytes());
+    assert!(decode("t.exr", &zero).is_err());
+    // every truncation is an error, and corruptions never panic
+    for n in 0..f.len() {
+        assert!(decode("t.exr", &f[..n]).is_err(), "{n} bytes");
+    }
+    for comp in [0, 1, 3, 5] {
+        let f = tiled(RGBA_HALF, [0, 0, 5, 6], comp, (3, 2, 1), &pattern);
+        for n in 0..f.len() {
+            for x in [0x01, 0x80, 0xFF] {
+                let mut g = f.clone();
+                g[n] ^= x;
+                let _ = decode("t.exr", &g);
+            }
+        }
+    }
+}
+
+/// A huge tile of a small picture is cut to the data window; a picture of many channels in one
+/// tile larger than the chunk limit is refused before anything is allocated.
+#[test]
+fn tile_sizes_are_bounded_by_the_data_window() {
+    let f = tiled(RGBA_HALF, [0, 0, 2, 2], 0, (1 << 30, 1 << 30, 0), &pattern);
+    assert_eq!(floats(&decode("t.exr", &f).unwrap()), floats(&decode("s.exr", &exr_file(RGBA_HALF, [0, 0, 2, 2], [0, 0, 2, 2], 0, pattern)).unwrap()));
+    let names: Vec<String> = (0..MAX_CHANNELS - 3).map(|i| format!("C{i:04}")).collect();
+    let mut chans: Vec<Chan> = vec![("B", 2), ("G", 2), ("R", 2)];
+    chans.extend(names.iter().map(|n| -> Chan { (n.clone().leak(), 2) }));
+    let chans: &'static [Chan] = chans.leak();
+    let mut f = tiled(chans, [0, 0, 0, 0], 3, (4096, 4096, 0), &pattern);
+    let at = f.windows(10).position(|w| w == b"dataWindow").unwrap() + 10 + 1 + 6 + 4;
+    f[at..at + 16].copy_from_slice(&box2i([0, 0, 4095, 4095]));
+    assert!(matches!(decode("t.exr", &f), Err(MediaError::Unsupported(m)) if m.contains("tiles too large")));
+}
+
+/// Multi-part files were refused. The main picture is the first part with bare R, G and B (here a
+/// tiled part after a depth part); the other parts' chunks are skipped.
+#[test]
+fn multi_part_files_show_the_part_with_the_main_picture() {
+    let depth: &dyn Fn(usize, i32, i32) -> f32 = &|_, x, y| (x + y) as f32;
+    let beauty: &dyn Fn(usize, i32, i32) -> f32 = &pattern;
+    let other: &dyn Fn(usize, i32, i32) -> f32 = &|_, _, _| 7.0;
+    let data = [0, 0, 8, 5];
+    let parts = [
+        TestPart { name: "depth", kind: "scanlineimage", chans: &[("Z", 2)], data, comp: 3, tile: (0, 0, 0), value: depth },
+        TestPart { name: "beauty", kind: "tiledimage", chans: RGBA_HALF, data, comp: 2, tile: (4, 4, 0), value: beauty },
+        TestPart { name: "other", kind: "scanlineimage", chans: &[("B", 1), ("G", 1), ("R", 1)], data, comp: 0, tile: (0, 0, 0), value: other },
+    ];
+    let f = exr_parts(&parts);
+    let d = decode("multi.exr", &f).unwrap();
+    assert_eq!(d.pixel_format, "RGBA 16-bit float, part beauty");
+    assert_eq!(floats(&d), floats(&decode("s.exr", &exr_file(RGBA_HALF, data, data, 0, pattern)).unwrap()));
+    // a scan-line main picture after a deep part, which is never read
+    let parts = [
+        TestPart { name: "deep", kind: "deepscanline", chans: &[("A", 1), ("Z", 2)], data, comp: 0, tile: (0, 0, 0), value: depth },
+        TestPart { name: "rgb", kind: "scanlineimage", chans: &[("B", 1), ("G", 1), ("R", 1)], data, comp: 1, tile: (0, 0, 0), value: other },
+    ];
+    let d = decode("deep.exr", &exr_parts(&parts)).unwrap();
+    assert_eq!(d.pixel_format, "RGB 16-bit float, part rgb");
+    assert!(floats(&d).as_chunks::<4>().0.iter().all(|p| p == &[7.0, 7.0, 7.0, 1.0]));
+    // named layers in separate parts: the richest
+    let parts = [
+        TestPart { name: "ViewLayer.Depth", kind: "scanlineimage", chans: &[("ViewLayer.Depth.Z", 2)], data, comp: 0, tile: (0, 0, 0), value: depth },
+        TestPart {
+            name: "ViewLayer.Combined",
+            kind: "scanlineimage",
+            chans: &[("ViewLayer.Combined.B", 1), ("ViewLayer.Combined.G", 1), ("ViewLayer.Combined.R", 1)],
+            data,
+            comp: 0,
+            tile: (0, 0, 0),
+            value: other,
+        },
+    ];
+    let d = decode("layers.exr", &exr_parts(&parts)).unwrap();
+    assert_eq!(d.pixel_format, "RGB 16-bit float, part ViewLayer.Combined, layer ViewLayer.Combined");
+    // deep parts only: refused, saying why
+    let parts = [
+        TestPart { name: "a", kind: "deepscanline", chans: &[("B", 1), ("G", 1), ("R", 1)], data, comp: 0, tile: (0, 0, 0), value: depth },
+        TestPart { name: "b", kind: "deeptile", chans: &[("Y", 1)], data, comp: 0, tile: (0, 0, 0), value: depth },
+    ];
+    assert!(matches!(decode("d.exr", &exr_parts(&parts)), Err(MediaError::Unsupported(m)) if m.contains("deep")));
+}
+
+#[test]
+fn damaged_multi_part_files_are_errors() {
+    let depth: &dyn Fn(usize, i32, i32) -> f32 = &|_, x, y| (x + y) as f32;
+    let data = [0, 0, 3, 3];
+    let parts = [
+        TestPart { name: "z", kind: "scanlineimage", chans: &[("Z", 2)], data, comp: 0, tile: (0, 0, 0), value: depth },
+        TestPart { name: "rgba", kind: "tiledimage", chans: RGBA_HALF, data, comp: 1, tile: (2, 2, 0), value: &pattern },
+    ];
+    let f = exr_parts(&parts);
+    assert!(decode("m.exr", &f).is_ok());
+    // the part before the picture without a chunk count: its table cannot be skipped
+    let mut g = f.clone();
+    let at = g.windows(10).position(|w| w == b"chunkCount").unwrap();
+    g[at] = b'x';
+    assert!(decode("m.exr", &g).err().unwrap().to_string().contains("part 0 has no chunkCount"));
+    // a chunk count past the end of the file
+    let mut g = f.clone();
+    let at = f.windows(10).position(|w| w == b"chunkCount").unwrap() + 10 + 4 + 4;
+    g[at..at + 4].copy_from_slice(&i32::MAX.to_le_bytes());
+    assert!(decode("m.exr", &g).is_err());
+    // a chunk of the other part where the picture's should be: part 0 has four scan lines, so
+    // part 1's table starts at entry 4
+    let tables = 8 + part_header(&parts[0], true, 4).len() + 1 + part_header(&parts[1], true, 4).len() + 1 + 1;
+    let mut g = f.clone();
+    let first_z = g[tables..tables + 8].to_vec();
+    g[tables + 4 * 8..tables + 5 * 8].copy_from_slice(&first_z);
+    assert!(decode("m.exr", &g).err().unwrap().to_string().contains("not part 1's"));
+    // too many parts
+    let mut many = MAGIC.to_vec();
+    many.extend_from_slice(&(2u32 | 0x1000).to_le_bytes());
+    for _ in 0..=MAX_PARTS {
+        many.extend(part_header(&parts[0], true, 1));
+        many.push(0);
+    }
+    many.push(0);
+    assert!(matches!(decode("many.exr", &many), Err(MediaError::Unsupported(m)) if m.contains("parts")));
+    // every truncation is an error, and corruptions never panic
+    for n in 0..f.len() {
+        assert!(decode("m.exr", &f[..n]).is_err(), "{n} bytes");
+    }
+    for n in 0..f.len() {
+        for x in [0x01, 0x80, 0xFF] {
+            let mut g = f.clone();
+            g[n] ^= x;
+            let _ = decode("m.exr", &g);
+        }
+    }
+}
+
+/// ffmpeg (an external test oracle) reads the tiled and multi-part files these tests write as we
+/// do: the test writer follows the file layout as another reader understands it. The test writer
+/// packs ZIP chunks as stored deflate blocks, larger than the raw data, which other readers take
+/// to be raw (the format stores a chunk raw when compression would not shrink it): only
+/// uncompressed and RLE chunks of data that shrinks are compared. ffmpeg reads a multi-part file's
+/// first part only, and only when it is scan lines (asked for a later part or a tiled one it gives
+/// black), so multi-part files are compared on a first scan-line part; later and tiled parts are
+/// checked by [`multi_part_files_show_the_part_with_the_main_picture`].
+#[test]
+fn tiled_and_multi_part_files_match_ffmpeg() {
+    let Some(ff) = filmcraft_testkit::oracle::ffmpeg_or_skip("tiled and multi-part OpenEXR") else { return };
+    let dir = filmcraft_testkit::fixtures::fixtures_dir("media/exr_parts");
+    std::fs::create_dir_all(&dir).unwrap();
+    let rgba: &'static [Chan] = &[("A", 2), ("B", 2), ("G", 2), ("R", 2)];
+    let value: &dyn Fn(usize, i32, i32) -> f32 =
+        &|c, x, y| if c == 0 { ((x + 2 * y) % 5) as f32 / 4.0 } else { c as f32 * 0.3 + x as f32 * 0.07 - y as f32 * 0.11 };
+    // runs of equal samples, so RLE shrinks every block
+    let flat: &dyn Fn(usize, i32, i32) -> f32 = &|c, x, y| if c == 0 { 1.0 } else { c as f32 * 0.25 + (x / 6 + y / 4) as f32 };
+    let data = [0, 0, 18, 12];
+    let depth: &dyn Fn(usize, i32, i32) -> f32 = &|_, x, _| x as f32;
+    let one = |kind, comp, tile, value| exr_parts(&[TestPart { name: "", kind, chans: rgba, data, comp, tile, value }]);
+    let cases: Vec<(&str, Vec<u8>, Option<u32>)> = vec![
+        ("lines_none.exr", one("scanlineimage", 0, (0, 0, 0), value), None),
+        ("tiled_none.exr", one("tiledimage", 0, (8, 5, 0), value), None),
+        ("tiled_big_tile.exr", one("tiledimage", 0, (32, 32, 0), value), None),
+        ("tiled_rle.exr", one("tiledimage", 1, (6, 4, 0), flat), None),
+        (
+            "two_parts_rle.exr",
+            exr_parts(&[
+                TestPart { name: "rgba", kind: "scanlineimage", chans: rgba, data, comp: 1, tile: (0, 0, 0), value: flat },
+                TestPart { name: "depth", kind: "tiledimage", chans: &[("Z", 2)], data, comp: 0, tile: (4, 4, 0), value: depth },
+            ]),
+            Some(0),
+        ),
+    ];
+    // the RLE chunks are smaller than their raw data, so every reader decompresses them
+    let raw = block_raw(rgba, 0, 6, 0, 4, flat);
+    assert!(pack(1, raw.clone(), rgba, 6, 4).len() < raw.len());
+    for (file, bytes, part) in cases {
+        let path = dir.join(file);
+        std::fs::write(&path, &bytes).unwrap();
+        let mut cmd = std::process::Command::new(&ff);
+        cmd.args(["-v", "error"]);
+        if let Some(p) = part {
+            cmd.args(["-part", &p.to_string()]);
+        }
+        let out = cmd.arg("-i").arg(&path).args(["-f", "rawvideo", "-pix_fmt", "gbrapf32le", "-"]).output().unwrap();
+        if !out.status.success() {
+            eprintln!("SKIPPED: ffmpeg cannot read {file}: {}", String::from_utf8_lossy(&out.stderr));
+            continue;
+        }
+        let v: Vec<f32> = out.stdout.as_chunks::<4>().0.iter().map(|b| f32::from_le_bytes(*b)).collect();
+        let n = 19 * 13;
+        assert_eq!(v.len(), n * 4, "{file}");
+        let theirs: Vec<f32> = (0..n).flat_map(|i| [v[2 * n + i], v[i], v[n + i], v[3 * n + i]]).collect();
+        let d = decode(file, &bytes).unwrap_or_else(|e| panic!("{file}: {e}"));
+        assert_eq!(floats(&d), theirs.as_slice(), "{file}");
     }
 }
