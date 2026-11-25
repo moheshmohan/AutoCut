@@ -240,9 +240,11 @@ detectors, RTMPose person/pose models (faces in profile), and DFine tracking.
 ## Generation with the user's local tools
 
 `docs/generation.md` is the reference. Unlike the AI effects above, nothing here is a model
-inside the app: a **generation tool** is a program the user installed (an MLX, PyTorch or
-ComfyUI command line), listed in `<data dir>/generation/providers.json`. The app runs it
-with no shell in between, waits for the file it writes and takes it from there.
+inside the app: a **generation tool** is a program the user installed (an MLX or PyTorch
+command line), a workflow of the user's local ComfyUI server, or the user's Blender rendering a
+3D scene without its window, listed in `<data dir>/generation/providers.json`. The app runs it
+with no shell in between (or talks HTTP to ComfyUI on this computer only), waits for the file
+it writes and takes it from there.
 
 | Command | Does |
 |---|---|
@@ -257,6 +259,8 @@ with no shell in between, waits for the file it writes and takes it from there.
 | `generate.assets` | builds the files a scene's `assets.json` names (pictures, cut-outs, clips, sounds), keeps the ones that are there, makes a pose from a character by name |
 | `generate.pick` | swaps another variation in for the one on the timeline |
 | `generate.history` | what was generated into this project: item, tool, description, seed |
+| `generate.render3d` | a 3D scene rendered by the user's Blender, headless: a `.blend` or a plain stage for a title, named texts and objects, a camera track for a match-move; PNG or EXR frames with alpha come in as a clip |
+| `generate.checkTool` | whether a tool can run, without running it (program or workflow there, a ComfyUI workflow's models and licences, its server answering, Blender's version) |
 
 `variations` (up to 4) on pictures, clips and sounds; `generate.fillGap` `from` `before`, `after`,
 `both` (frame to frame) or `motion` (the movement carries on); a sound sized to a clip (`clip`); a
@@ -858,3 +862,46 @@ markup, layout, checks, words and code here are written fresh, and its renderer 
   §7), `docs/local-pipeline-upgrades.md` (the explainer rules, the sourced ledger, the
   `factSources` tier), this entry, the MCP server's instructions and the credit in
   `ATTRIBUTION.md`.
+
+## Update 2026-11-25 (PX9, more tools behind the generation provider list)
+
+The idea of a capability list per tool comes from open-design (nexu-io/open-design, Apache-2.0):
+the idea only, written fresh. ComfyUI (GPL-3.0) and Blender (GPL) are separate programs AutoCut
+talks to over loopback HTTP or starts as a command line; neither is linked, shipped or read, and
+installing them, their models or add-ons is the user's choice. Neither was run for these
+items: the tests use stand-ins.
+
+- **PX9.1**: a `capabilities` block for every provider entry: fixed `sizes` or `width`/`height`
+  ranges with a step, `aspects`, `seconds`, `frames` (`offset + k·step`), `fps`, `firstFrame`,
+  `lastFrame`, `references`, `transparent`, `negative`, `steps`, `audio`. `generate.image`,
+  `video`, `sound`, `fillGap`, `extend`, `augment`, `restyle` (its picture tool) and `assets`
+  refuse a request the tool cannot do before anything is written or run, saying what it can do
+  and the nearest value it allows; a value the request left open (the sequence's shape, a gap's
+  length) becomes the nearest allowed one. The block is validated as hostile input and must
+  agree with its entry. Without it nothing changes. `generate.providers` lists it with a line in
+  words (`can`), shown under the tool in the Generate panel. Also fixed: a `maxSeconds` under a
+  tenth of a second made the frame and length helpers clamp with crossing bounds, which panicked.
+- **PX9.2**: a provider entry can be a ComfyUI workflow (`comfyui`: server on 127.0.0.1,
+  localhost or [::1] only; the API-format workflow; which node inputs take `{prompt}`, `{seed}`,
+  `{width}`, `{image}`, `{reference1}`…; the output node; its models and their licences). Each
+  job fills a copy, uploads the pictures it needs, `POST /prompt`, follows `/history` and
+  `/queue`, fetches the result from `/view` and `POST /free` after every job, under the GPU lock,
+  cancellable (out of ComfyUI's queue, or interrupted only when it is the one running), with its
+  timeout. A model-licence allow-list per workflow: every model a loader names must be listed,
+  every licence open or named in `allowLicenses` (no non-commercial or no-derivatives licence by
+  default), and inputs may never choose a model. A small std-only loopback HTTP client in the
+  engine (no new dependency). `generate.checkTool {provider}` checks a tool without running it.
+  A panic inside a generation job now ends the job with an error.
+- **PX9.3**: `generate.render3d` and the `kind: "scene"` entry with a `blender` block: `blender
+  --background --factory-startup --disable-autoexec --python-exit-code 3 [scene.blend] --python
+  scene_render.py -- <request>` under the GPU lock, cancellable, with a timeout and the bar
+  following the script's `progress k/n`; PNG or EXR frames with alpha come in as an image
+  sequence (one frame: a still) placed over the picture. Requests: frame range or seconds, fps,
+  size, transparency, format, a camera track for a match-move, named texts and objects, and
+  Cryptomatte passes (EXR, beside the frames). The script is AutoCut's own
+  (`crates/engine/src/scene_render.py`), its bpy use behind one function so its request handling
+  is tested with plain `python3`.
+- **PX9.4**: `docs/generation.md` §3.1–3.4 (capabilities, ComfyUI and Blender entries with
+  examples, starting ComfyUI offline on loopback, the runbook for Blender over MCP: telemetry
+  off, safe mode on, port 9878, CC0 or CC BY assets only), the agent guide (§1, §3, §6.9, §13),
+  this entry and the MCP server's instructions. 962 commands.

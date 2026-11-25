@@ -9,9 +9,15 @@ several variations to choose from, and build the pictures, clips and sounds a mo
 needs from one list.
 
 Nothing here is a model built into the app, and the app downloads nothing. A **generation tool**
-is a program on your computer (an MLX, PyTorch or ComfyUI command line you set up yourself). The
-app runs it, waits for the file it writes, and takes it from there. This is the same stance as
-[RAEA](raea-workflow.md): separately installed, kept outside the repository and the app bundle.
+is a program on your computer (an MLX or PyTorch command line you set up yourself), a workflow of
+a ComfyUI server running on this computer (§3.2), or Blender rendering a 3D scene without its
+window (§3.3). The app runs it, waits for the file it writes, and takes it from there. This is
+the same stance as [RAEA](raea-workflow.md): separately installed, kept outside the repository
+and the app bundle.
+
+**Installing them is your choice.** Nothing in AutoCut downloads or installs ComfyUI, its custom
+nodes or models, Blender or its add-ons. You install what you want, accept its licences, and
+describe it in the provider list (§3); AutoCut only runs what that list names.
 
 Built into the app, without any of this: procedural music and sounds (`audio.generate`), neural
 music (`music.generateNeural`, ACE-Step) and narration (`tts.create`).
@@ -34,9 +40,14 @@ Every action is an engine command, so the Generate panel, the CLI, the control c
 | `generate.pick` | Puts a generated `item` in the place of the variation of the same request that is on the timeline (or of `clip`), as one undo step. |
 | `generate.augment` | Takes the program frame at the playhead (`atSeconds`), changes it by `instruction` (plus `references`: a character, a prop), and lays the result over the clip on the next free track, as a still for `seconds` or, with `animate: true`, as a clip made from the changed frame (`motion` says what moves). |
 | `generate.history` | What was generated into this project: item, tool, description, seed. |
+| `generate.render3d` | A 3D scene rendered by your Blender without its window (§3.3): a `scene` (.blend) or a plain stage for a `text` title, named `texts` and `objects` set, a `camera` track keyed on for a match-move, a frame range or `seconds`, `fps` and size (default the sequence's), `transparent` (default on), `format` `png` or `exr`, `cryptomatte` (EXR). The frames come in as a clip and are placed above what is at the playhead. |
+| `generate.checkTool` | Whether a tool can run, without running it: its program (or workflow) is there; a ComfyUI workflow is read and checked (inputs, models, licences) and the server asked whether it answers; Blender says its version. `ok`, `problems`. |
 
 All of them take `provider` (a tool id; default: the first installed one of the kind), `seed`,
 `dir` (where the file goes; default a `Generated` folder beside the project) and `wait`.
+A request the tool cannot do (a size, length, rate or input its `capabilities` do not allow,
+§3.1) is refused before anything runs, saying what the tool can do and the nearest value it
+allows.
 `generate.image`, `generate.video` and `generate.sound` take `variations` (1 to 4): each gets the
 next seed, all are imported, the first is the one placed, and `generate.pick` swaps another in.
 
@@ -65,8 +76,8 @@ Window ▸ Generate. Six modes: **Picture**, **Clip**, **Sound**, **Fill gap**, 
 **Restyle clip**. Pick
 the tool, describe what to make, and press Generate; the work runs in the background with a
 progress bar and a Stop button, and the result lands at the playhead. Under the tool menu the
-panel shows what the model's licence asks to be credited ("Made with …") and its licence line.
-"Generated in this project" lists the last results with a Place button, and a Use button on a
+panel shows what the model's licence asks to be credited ("Made with …"), its licence line and,
+when its entry says, what it can do ("What it can do: …", §3.1). "Generated in this project" lists the last results with a Place button, and a Use button on a
 variation that puts it in the place of the one on the timeline.
 
 - Picture, Clip and Sound have **How many to choose from** (1 to 4).
@@ -114,6 +125,9 @@ them. Each entry:
 | `restyleCommand`, `restyleOptional`, `restyles`, `restyleEstimateSeconds`, `restyleMaxSeconds` | For a video tool that can make a clip again (`generate.restyle`). `restyleCommand` is the program: it is given the stretch as a small H.264 video (`{video}`, each side a multiple of `extendMultipleOf`, holding exactly `{frames}` frames) and the adapter of the way asked for (`{adapter}`), and writes a clip as long (`{out}`); `{strength}` is how closely to follow it, and an argument that is exactly `{optional}` takes the groups of `restyleOptional` (`image`: the picture to start on). `restyles` names the ways: `{"edges": {"adapter": "/abs/file.safetensors", "args": ["--how", "edges"], "about": "one line", "license": "…"}}`; a way is there when its adapter file is. `restyleMaxSeconds` (default 5) is the longest stretch made in one go. |
 | `maxReferences`, `referencePromptPrefix`, `referenceMarker` | Reference pictures: how many, what to put before a prompt that does not mention them itself, and how a prompt mentions one. |
 | `estimateSeconds`, `timeoutSeconds` | For the progress bar (the tools say nothing while they work), and when a run is given up on (default an hour). |
+| `capabilities` | What the tool can do: sizes, shapes, lengths, frame counts, rates, inputs (§3.1). Optional. |
+| `comfyui` | Instead of `command`: a workflow of a local ComfyUI server (§3.2). |
+| `blender` | With `kind: "scene"`: Blender, rendering 3D scenes without its window (§3.3). |
 | `license`, `attribution`, `source` | Shown in `generate.providers` and the panel. |
 
 A program must write exactly the file `{out}` names and exit with status 0. Its output goes to a
@@ -174,6 +188,233 @@ with `rembg` (U2-Net), for `cutoutCommand`.
 
 The two poses came out as the same character as the first picture. One deleted picture of the
 list was made again in 31 s, and the file was the same, byte for byte.
+
+### 3.1 What a tool can do: `capabilities`
+
+An entry can say what its tool makes and takes. `generate.*` then checks every request against
+it **before anything is written or run**, and refuses what the tool cannot do with a message
+that says what it can and, where one is near, the value it allows (`SDXL cannot make 1000×1000:
+it makes widths 512 to 2048 px in steps of 64, heights 512 to 2048 px in steps of 64 (nearest:
+1024×1024)`). Where the request left a value open (no size, so the sequence's shape; a gap's or
+a clip's length), the nearest allowed value is used instead of a refusal. Every field is
+optional; without the block, or without a field, nothing is checked there and the tool behaves
+as it always did.
+
+```json
+"capabilities": {
+  "width": {"min": 256, "max": 768, "step": 32}, "height": {"min": 256, "max": 768, "step": 32},
+  "aspects": ["16:9", "9:16", "1:1"],
+  "seconds": {"max": 10}, "frames": {"min": 9, "max": 241, "step": 8, "offset": 1}, "fps": [24],
+  "firstFrame": true, "lastFrame": true, "audio": false
+}
+```
+
+| Field | Kinds | Meaning |
+|---|---|---|
+| `sizes` | image, video, scene | Fixed sizes, `[[1024, 1024], [1344, 768]]` (instead of `width` and `height`). |
+| `width`, `height` | image, video, scene | `{min, max, step}`: sides that are multiples of `step` from `min` to `max`. |
+| `aspects` | image, video, scene | Shapes it makes, `"16:9"` (2 % either way counts). |
+| `seconds` | video, music, sfx, scene | `{min, max}`: the lengths it makes. |
+| `frames` | video, scene | `{min, max, step, offset}`: frame counts `offset + k·step` (LTX: step 8, offset 1). The length a clip is asked for is rounded up to one. |
+| `fps` | video, scene | The rates it makes; the entry's own `fps` must be one of them. |
+| `firstFrame`, `lastFrame` | video | Whether a clip can start or end on a given picture. `true` needs an `{image}` (or `lastImage` option) to put it in; `false` refuses `image`, `lastImage` and the gap fills that need them. |
+| `references` | image | The most reference pictures, a frame taken from the timeline included (0: none). |
+| `transparent` | image, scene | Whether it makes transparent pictures (its own option or its cut-out step). |
+| `negative` | image | Whether it takes a negative prompt. |
+| `steps` | image | `{min, max}` sampler steps. |
+| `audio` | video | Whether a clip comes with its own sound. |
+
+The block is checked when the list is read: a step of 0, a range whose `min` is above its
+`max`, a grid that holds no value, a field the tool's kind is never asked for, an unknown field,
+or a claim the entry cannot back (`firstFrame: true` with nothing taking `{image}`) makes the
+list invalid, and `generate.providers` says why. `generate.providers` lists each tool's block
+and a line in words (`can`), which the Generate panel shows under the tool. The cut-out, extend
+and restyle programs keep their own fields; the block describes the main command.
+
+### 3.2 A ComfyUI workflow as a tool
+
+A tool can be a workflow of a [ComfyUI](https://github.com/comfyanonymous/ComfyUI) server running
+on this computer. ComfyUI is a separate program (GPL-3.0) that AutoCut only talks to over HTTP; it
+is not linked, shipped or read. Build and test the workflow in ComfyUI, then save it in its API
+format (Export (API), a JSON object of nodes), and describe it:
+
+```json
+{
+  "id": "sdxl", "kind": "image", "name": "SDXL base (ComfyUI)",
+  "comfyui": {
+    "server": "http://127.0.0.1:8188",
+    "workflow": "/absolute/path/workflows/sdxl_api.json",
+    "inputs": {
+      "6.text": "{prompt}",
+      "7.text": "{negative}",
+      "3.seed": "{seed}",
+      "5.width": "{width}", "5.height": "{height}",
+      "3.steps": 30
+    },
+    "output": "9",
+    "models": [{"file": "sd_xl_base_1.0.safetensors", "license": "CreativeML-OpenRAIL++-M"}],
+    "allowLicenses": ["CreativeML-OpenRAIL++-M"]
+  },
+  "capabilities": {"width": {"min": 512, "max": 2048, "step": 64}, "height": {"min": 512, "max": 2048, "step": 64}, "negative": true},
+  "estimateSeconds": 40, "timeoutSeconds": 900,
+  "license": "CreativeML Open RAIL++-M", "attribution": "Stable Diffusion XL"
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `server` | The server, on this computer only: `http://127.0.0.1:<port>`, `http://localhost:<port>` or `http://[::1]:<port>` (default `http://127.0.0.1:8188`). Any other host, https or a path makes the list invalid. |
+| `workflow` | The API-format workflow (an absolute `.json` path). The editor's own format is refused with a note to export it. |
+| `inputs` | `"<node id>.<input>"` → what that input takes: one placeholder alone (`"{seed}"` keeps its type: a number stays a number), text with placeholders (`"{prompt}, film still"`), or a fixed number, text or `true`/`false`. Placeholders: `{prompt}`, `{negative}`, `{width}`, `{height}`, `{seed}`, `{seconds}`, `{frames}`, `{lastFrame}`, `{fps}`, `{steps}`, `{strength}`, `{transparent}`, and the files `{image}`, `{lastImage}`, `{video}`, `{reference1}` … `{reference16}`. A value the request did not give leaves the workflow's own. Each named node and input must be in the workflow. |
+| `output` | The node whose saved file is the result (default: the first saved file of the tool's type, `png`, `mp4` or `wav` by kind, or `extension`). |
+| `models` | Every model the workflow loads, with its licence: `{"file": "name.safetensors", "license": "SPDX id or the licence's name"}` (a file in a sub-folder matches by its name). |
+| `allowLicenses` | Licences you allow for this workflow besides the open ones. |
+
+How a job runs: AutoCut fills a copy of the workflow, uploads the files it needs (a reference
+picture, the frame under the playhead) to ComfyUI's `/upload/image` under a name of its own
+(no path of your computer is sent), queues it (`POST /prompt`), follows it (`/history/<id>`, and
+`/queue` for where it waits: "Waiting in ComfyUI's queue (2 ahead)", "Running in ComfyUI"),
+fetches the result (`/view`) and then asks ComfyUI to unload its models and free its memory
+(`POST /free`) after every job, whatever became of it, so the GPU lock the job held means the
+GPU is free afterwards. It runs under the GPU lock as a job like the others: `jobs.cancel` takes
+it out of ComfyUI's queue, or interrupts it when it is the one running (never another
+client's), and so does `timeoutSeconds`. A server that stops answering for 30 seconds is given
+up on. ComfyUI says how far a job is only on its websocket, which AutoCut does not use, so the
+bar follows `estimateSeconds`.
+
+**Models and licences.** AutoCut reads the workflow before each job and refuses to run it when
+a node loads a model that `models` does not list (a loader's `*_name`, `model` or `model_path`
+input, or any input naming a `.safetensors`, `.ckpt`, `.pt`, `.pth`, `.bin`, `.gguf`, `.sft`,
+`.onnx` or `.pkl` file), or when a listed model's licence is not allowed. Allowed are the open
+licences (MIT, Apache-2.0, BSD-2-Clause, BSD-3-Clause, 0BSD, ISC, Zlib, Unlicense, CC0-1.0,
+CC-BY-3.0/4.0, CC-BY-SA-3.0/4.0, MPL-2.0) and what `allowLicenses` adds after you read it. No
+non-commercial or no-derivatives licence (CC BY-NC, CC BY-ND, the FLUX.1 [dev] Non-Commercial
+License…) runs unless you name it there, and a monetized channel is commercial use. `inputs`
+can never point at a model input: the workflow's models are its own, never a request's.
+
+**Starting ComfyUI** is yours to do, on loopback and offline:
+
+```sh
+cd /path/to/ComfyUI
+HF_HUB_OFFLINE=1 python main.py --listen 127.0.0.1 --port 8188 --offline --disable-auto-launch
+```
+
+`--listen 127.0.0.1` (its default) keeps it to this computer; `--offline` stops its front end
+from reaching the internet and leaves out the paid API nodes; `HF_HUB_OFFLINE=1` stops custom
+nodes that use the Hugging Face hub from downloading. Download the models you chose beforehand
+into its `models/` folders. Then `generate.checkTool {"provider": "sdxl"}` reads the workflow,
+checks its inputs, models and licences, asks the server whether it answers, and lists any
+problem without running anything.
+
+### 3.3 A 3D scene renderer: Blender without its window
+
+An entry of `kind: "scene"` names [Blender](https://www.blender.org) (GPL, a separate program
+AutoCut starts; nothing of it is linked or shipped). `generate.render3d` uses it, and no other
+command does:
+
+```json
+{
+  "id": "blender", "kind": "scene", "name": "Blender (headless)",
+  "blender": {"program": "/Applications/Blender.app/Contents/MacOS/Blender", "engine": "eevee"},
+  "capabilities": {"fps": [24, 25, 30], "frames": {"max": 1800}},
+  "estimateSeconds": 120, "timeoutSeconds": 3600
+}
+```
+
+| `blender` field | Meaning |
+|---|---|
+| `program` | Blender's program, an absolute path (refused otherwise). |
+| `scene` | The `.blend` rendered when the request names none (absolute). Without either, the script builds a plain stage for a `text` title. |
+| `engine`, `samples` | `eevee`, `cycles` or `workbench` (default: the scene's own; EEVEE for the plain stage), and its samples. Cycles uses the GPU (Metal, OptiX, CUDA, HIP or oneAPI) where there is one; `device: "cpu"` says not to. |
+| `format` | `png` (default) or `exr` (16-bit half, ZIP). |
+| `script` | A script of your own instead of AutoCut's (an absolute `.py`); it gets the same request. |
+| `factoryStartup` | `false` starts Blender with your own preferences and add-ons (a scene that needs an add-on); default `true`. |
+
+AutoCut runs
+
+```text
+blender --background --factory-startup --disable-autoexec --python-exit-code 3 [scene.blend] \
+    --python <data dir>/generation/scene_render.py -- '<request as JSON>'
+```
+
+so a scene's own Python (drivers, startup scripts) never runs, and a failing script ends Blender
+with an error whose last lines AutoCut shows. The script
+([`crates/engine/src/scene_render.py`](../crates/engine/src/scene_render.py)) is AutoCut's own,
+written for this from Blender's documented Python API; it is written to the data folder before
+a render. It sets the size, rate, frame range, transparency and format, sets the request's texts
+and objects, keys the camera track onto the scene's camera, renders, and prints `progress k/n`
+after each frame for the bar. The render runs under the GPU lock as a job (`jobs.cancel` stops
+Blender; so does `timeoutSeconds`), and the frames come in as an image sequence (one frame: a
+still), placed above what is at the playhead when they are transparent.
+
+```sh
+# a 3D title on the plain stage: 3 s at the sequence's size and rate, with alpha
+$CLI --project film.fcproj exec generate.render3d '{"text": "Chapter Two", "wait": true}'
+# a scene of yours, its title text and one object changed, frames 1 to 120 at 24 fps
+$CLI --project film.fcproj exec generate.render3d \
+    '{"scene": "/abs/scenes/lower_third.blend", "texts": {"Name": "Part Two"}, "objects": {"Logo": {"hide": true}},
+      "frameEnd": 120, "fps": 24, "wait": true}'
+```
+
+`generate.render3d` takes `scene`, `text` (the plain stage's title; with a scene, the text object
+named `Text`), `texts` (`{object name: text}`, at most 32), `objects` (`{name: {location: [x, y,
+z], rotation: [x, y, z] in degrees, scale: n or [x, y, z], hide}}`, at most 64), `camera`,
+`frameStart` (default 1), `frameEnd` or `seconds` (default 3 s), `fps` (default the tool's, else
+the sequence's, moved to the nearest rate its capabilities list), `width`/`height` (default the
+sequence's), `transparent` (default on), `format`, `cryptomatte`, `seed`, and the usual `dir`,
+`place`, `track`, `atSeconds`, `wait`. Frame numbers stop at 9999 (the frames are named
+`frame_0001.png` …). Everything is checked before Blender starts: the files are there, the
+names, numbers and camera track are well formed, and the tool's capabilities allow the size,
+rate, frame count and transparency.
+
+**A match-move.** `camera` is a camera track, a JSON file in metres on Blender's axes (Z up):
+
+```json
+{"sensorWidth": 36,
+ "frames": [{"frame": 1, "position": [0.0, -8.0, 1.6], "rotation": [90.0, 0.0, 0.0], "focalLength": 35},
+            {"frame": 2, "position": [0.05, -7.98, 1.6], "quaternion": [0.707, 0.707, 0.0, 0.0]}]}
+```
+
+Each frame has `position` and a `rotation` (XYZ Euler, degrees, as Blender shows a camera's) or a
+`quaternion` (w, x, y, z), and optionally `focalLength` (mm); they are keyed onto the scene's
+camera (one is made if the scene has none). A tracked camera exported in this shape (EffectCraft's
+tracked-camera export, or any solver's, converted to these axes) lets the render sit in the
+footage it was tracked from: render with alpha and lay it over the clip.
+
+**Cryptomatte.** With `"format": "exr", "cryptomatte": true` the object, material and asset
+passes are written as a multilayer EXR a frame in a `cryptomatte` folder inside the frames'
+folder, for compositing elsewhere; the frames AutoCut imports stay plain RGBA (its EXR reader
+takes R, G, B and A).
+
+`generate.checkTool {"provider": "blender"}` asks Blender for its version (`--version`, nothing
+is rendered) and checks that the entry's scene and script files are there.
+
+### 3.4 Blender over MCP, for interactive work
+
+For building a scene with an agent before rendering it, the community add-on
+[MCP for Blender](https://github.com/ahujasid/blender-mcp) (MIT; `uvx mcp-for-blender`) lets an
+MCP client drive a running Blender. It is not part of AutoCut and runs Python inside Blender;
+installing it is your choice. When you use it:
+
+1. **Save the .blend first.** Its code tool runs any Python in Blender.
+2. **Telemetry off.** Set `DISABLE_TELEMETRY=true` in the MCP server's environment (the `env`
+   block of the client's server entry), and leave the add-on's content-collection checkbox off.
+3. **Safe mode on.** Set `BLENDER_MCP_SAFE_MODE=1` in the same environment, so the scripts it
+   sends are screened.
+4. **Its own port, on this computer.** Not 9876 (its default, which another Blender may hold)
+   and not 9877 (AutoCut's control channel): for example `BLENDER_PORT=9878` (or `--port 9878`)
+   for the server and the same port in the add-on's panel, with its bind address on localhost
+   and "Allow Remote Connections" off. Its socket has no sign-in.
+5. **Assets CC0 or CC BY only.** Poly Haven's are CC0. From Sketchfab take only models marked
+   CC0 or CC BY, and note each CC BY author and link for the video's credits. Turn off the
+   integrations you do not use (in the add-on's sidebar); do not use generated 3D models whose
+   licence you have not read.
+6. **Hold the GPU** while you work, so AutoCut's own generation waits:
+   `filmcraft-cli locks hold gpu --minutes 30 --note "Blender over MCP"` in the background, and
+   stop it when done, before the render (which takes the lock itself).
+7. **Render with AutoCut.** Save the scene and render it with `generate.render3d {"scene":
+   "/abs/scene.blend", …}`, so the frames come in as a clip, under the lock, with the request on
+   record.
 
 ## 4. Licences are yours to accept
 
@@ -280,6 +521,16 @@ filmcraft-cli exec generate.restyle '{"prompt": "A small orange robot walks alon
   those yet (`ltx_restyle.py --how given` takes a control video made elsewhere).
 
 ## 7. Limits
+
+- **Not tried with the real programs yet.** The ComfyUI and Blender tools are tested against
+  stand-ins (a small HTTP server answering ComfyUI's endpoints, a script that writes frames as
+  Blender would); neither ComfyUI nor Blender was run. The first real use should start with
+  `generate.checkTool`, then a small picture or a few frames.
+- A ComfyUI job's bar follows `estimateSeconds` (its step progress is only on its websocket).
+  Uploading a file a workflow takes goes through `/upload/image`, which some custom loader nodes
+  may not read from; such a workflow takes its file another way.
+- Cryptomatte passes use the compositor's File Output node as Blender 4 has it; a Blender whose
+  compositor differs renders the frames and notes in its log that the passes were not written.
 
 - Short clips only: the tested video model makes up to ten seconds at a small size; AutoCut scales
   it to the frame. Use Upscale and Restore (`media.upscale`) and Smooth Slow Motion

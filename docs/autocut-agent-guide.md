@@ -97,7 +97,7 @@ Read these before you touch anything.
 | RAEA | `~/.raea/versions/0.1.8/bin/raea` for local custom animations, 3D scenes and effects (0.1.0 kept beside it). [Render and import workflow](raea-workflow.md). |
 | FrameAtlas | The footage catalogue beside this checkout (`../FrameAtlas`, `./run.sh serve`, loopback port 7318): the user's Google Photos and Insta360 recordings by what they show (search by meaning), people, places and trips, ideas and the footage each video used. AutoCut reads it for `photos pick --meaning` (§4) and its own MCP tools hand an idea to AutoCut (`idea_to_autocut`). [FrameAtlas README](https://github.com/moheshmohan/FrameAtlas#readme). |
 | EffectCraft | Linked into the installed AutoCut app: `effectcraft.templateInfo` and `effectcraft.renderTemplate` (§6.8). A workspace build without `--features effectcraft` answers that it lacks it. |
-| Generation tools | The user's own local models, listed in `~/Library/Application Support/FilmCraft/generation/providers.json`: `h3-image` (MiniMax-H3-Image, pictures and edits), `ltx-video` (LTX-2.3, clips up to 10 s; with the Union-Control adapter in `testground/ltxenv/adapters/` it also makes a clip again, `generate.restyle`), `sa3-sfx` and `sa3-music` (Stable Audio 3 small, up to 30 s). `filmcraft-cli exec generate.providers` says which are installed. Never edit that file or download a model without the user's OK. [generation.md](generation.md). |
+| Generation tools | The user's own local models, listed in `~/Library/Application Support/FilmCraft/generation/providers.json`: `h3-image` (MiniMax-H3-Image, pictures and edits), `ltx-video` (LTX-2.3, clips up to 10 s; with the Union-Control adapter in `testground/ltxenv/adapters/` it also makes a clip again, `generate.restyle`), `sa3-sfx` and `sa3-music` (Stable Audio 3 small, up to 30 s). `filmcraft-cli exec generate.providers` says which are installed. No ComfyUI server and no Blender are set up (installing them, their models or add-ons is the user's decision). Never edit that file or download a model without the user's OK. [generation.md](generation.md). |
 | Projects and exports | `~/Movies/AutoCut/<Video name>/`: the `.fcproj`, the exports, and a `build/` folder (scripts, logs, a `README.txt` recipe) |
 | Data folder | `~/Library/Application Support/FilmCraft/`: `google-photos/cache` (picked originals with `.json` date sidecars), `scene-cache`, `redact-cache`, `autocut/analysis-cache`, voices, models, control tokens |
 | Ollama models | `qwen2.5vl:7b` (picker and screen agents, clip analysis, redaction checks), `qwen3:8b` (scripts, Malayalam), `phi4-mini` (the AutoCut prompt classifier), `moondream` |
@@ -245,6 +245,8 @@ class FC:
 | a lower third, end card or chapter card from an `.ectemplate` | `exec effectcraft.renderTemplate {template, values, place, wait: true}` | `effectcraft.templateInfo` lists its controls first; ProRes 4444 with alpha, placed above the picture (§6.8) |
 | pictures, cut-outs, clips and sounds for a RAEA scene | `exec generate.assets {manifest}` | an `assets.json` beside the composition ([generation.md](generation.md) §5); `dryRun` first |
 | "add a boat / a character / snow to this shot" | `exec generate.augment {instruction, atSeconds, references?, animate?}` | a new picture laid over the clip; it does not track a moving shot |
+| a 3D title, a 3D object over the shot, a match-moved 3D element | `exec generate.render3d {text \| scene, texts?, objects?, camera?, seconds, wait: true}` | the user's Blender without its window (a `kind: "scene"` tool); frames with alpha come in as a clip over the picture ([generation.md](generation.md) §3.3) |
+| "is this tool ready?" (before a first or long job) | `exec generate.checkTool {provider}` | runs nothing: the program or workflow is there, a ComfyUI workflow's models and licences pass, its server answers, Blender's version |
 | "cut it like this reel I liked" | `direct` or `quick` with `--reference liked.mp4` (or an item id, or a kept fingerprint) | its shot lengths, cut rate and bursts become the targets; the report's `reference.distance` says how close it came (§5) |
 | "an explainer about X" (a narrated topic with chapters, no footage needed) | research and write the script yourself, then `recipe_run` `builtin:topic-explainer` | the script's markup, the fact ledger with sources and the steps are in §5 "Topic to explainer" |
 | a specific vision: mixed stills and clips, hand-timed beats, titles, its own look | **build it by hand** (§6) | full control, rebuildable from a script |
@@ -885,6 +887,23 @@ user's own local models; [generation.md](generation.md)):
   takes what the program shows over the clip, so hide titles above it first. About 1 min 45 s
   for 3 s, 7 min with `look`. `generate.providers` → `restyles` says which ways are installed.
 - `generate.augment {instruction, atSeconds, animate?, wait: true}` changes what the frame shows.
+- **Which tool.** A program tool (`runs: "program"`) and a ComfyUI workflow (`runs: "comfyui"`)
+  answer the same commands; pick with `provider` by what it is for (its `name`, `can`,
+  `license`). A ComfyUI tool needs the user's ComfyUI running on this computer:
+  `generate.checkTool {provider}` says whether it answers and whether the workflow's models and
+  licences pass; if it does not answer, tell the user (starting it is theirs, never yours). A
+  3D scene renderer (`kind: "scene"`, Blender) answers only `generate.render3d`: use it for 3D
+  titles and objects, a scene the user built, or a 3D element matched to a tracked camera
+  (`camera`: a track in metres on Blender's axes), not for pictures or b-roll.
+- **What a tool can do.** `generate.providers` → `can` (and `capabilities`) says the sizes,
+  lengths, frame counts, rates and inputs a tool takes. A request outside them is refused
+  before anything runs, with the nearest allowed value in the message: take that value, or
+  another tool. Leave `width`/`height`/`seconds` out when any will do; the nearest allowed one
+  is chosen.
+- `generate.render3d {text | scene, texts?, objects?, camera?, frameEnd | seconds, fps?,
+  transparent?, format?, wait: true}`: frames at the sequence's size and rate by default, with
+  alpha, placed above the picture at the playhead. A scene's own scripts never run. Look at
+  the first and last frames before a review build.
 - Common parameters: `provider` (default: the first installed tool of the kind), `seed`, `dir`
   (default a `Generated` folder beside the project), `place`, `track`, `atSeconds`.
 - One generation at a time; each takes the GPU lock itself, so never hold a GPU lease of your
@@ -1165,6 +1184,15 @@ The details are in [360-video.md](360-video.md).
   - The clip tool makes small pictures (480 on the long side by default). They are scaled to
     the frame; `media.upscale` when that shows.
   - A failed tool's last lines are the error; the full log is `<file>.generation.log`.
+  - A refusal that names a model or a licence (a ComfyUI workflow) is the user's to settle:
+    never change `models` or `allowLicenses` yourself, and never suggest a non-commercial model
+    for a monetized video.
+  - ComfyUI says nothing of how far a job is over HTTP: its bar follows the tool's estimate, and
+    its status says whether it waits in ComfyUI's queue or runs.
+  - The Blender MCP add-on (interactive scene building) follows the runbook in
+    [generation.md](generation.md) §3.4: telemetry off, safe mode on, port 9878 (never 9876 or
+    9877), CC0 or CC BY assets only, the GPU lock held; render the saved scene with
+    `generate.render3d`.
 
 ## 14. The user's taste
 
