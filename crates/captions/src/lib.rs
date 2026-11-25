@@ -11,6 +11,9 @@
 //!   STYLE/REGION/NOTE blocks are kept.
 //! - **Time:** cue times are exact [`Tick`]s. SRT/VTT milliseconds and SCC 29.97 fps timecodes
 //!   (drop-frame or not) convert exactly; [`Document::snap_to_frames`] snaps to a sequence's frames.
+//!   SCC and MCC time codes count from [`Document::start_timecode`] (a sequence's start timecode,
+//!   its label carried to 29.97 fps by [`label_time`] / [`label_frame`]);
+//!   [`Document::count_from`] reads them back from one.
 //! - **Model:** [`track_from_document`] / [`document_from_track`] convert to and from the project's
 //!   [`CaptionTrack`].
 //! - **Embedding:** [`embed`] carries CEA-608 / CEA-708 captions in H.264 / H.265 video as ATSC
@@ -34,7 +37,7 @@ pub mod ttml;
 pub mod vtt;
 
 use filmcraft_project::{Caption, CaptionFormat, CaptionStyle, CaptionTrack, ClipId, TrackId};
-use filmcraft_time::{FrameRate, TICKS_PER_SECOND, Tick};
+use filmcraft_time::{FrameRate, TICKS_PER_SECOND, Tick, fields_to_frames, frames_to_fields};
 
 /// A caption file format.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -150,9 +153,56 @@ pub struct Document {
     /// BCP 47 language tag of the text, when known: TTML's `xml:lang` on import, the caption
     /// track's language on export. TTML and DFXP write it (else `en`).
     pub language: Option<String>,
+    /// SCC / MCC: the time code label of time zero, read as a time ([`label_time`]: a sequence's
+    /// start timecode on export). The writers count their time codes from the label it reads as,
+    /// so 01:00:00:00 at 25 fps is 01:00:00;00 or 01:00:00:00 at 29.97. Readers leave it at zero.
+    pub start_timecode: Tick,
+    /// SCC / MCC read from a file: the frame rate of its time code labels and whether they are
+    /// drop-frame. [`Document::count_from`] needs it.
+    pub labels: Option<(FrameRate, bool)>,
+}
+
+/// Frame `frame` of a `rate` time code (drop-frame or not) as its label read as a time: hours,
+/// minutes, seconds and the frame's share of a second at the label's nominal rate (25 for 25 fps,
+/// 30 for 29.97). Negative frames read as zero.
+pub fn label_time(frame: i64, rate: FrameRate, drop_frame: bool) -> Tick {
+    let base = rate.timecode_base();
+    let (_, h, m, s, f) = frames_to_fields(frame.max(0), rate, drop_frame && rate.supports_drop_frame());
+    let seconds = h.saturating_mul(3600).saturating_add(m.saturating_mul(60)).saturating_add(s);
+    Tick(TICKS_PER_SECOND.saturating_mul(seconds)) + FrameRate::new(base, 1).tick_of(f)
+}
+
+/// The frame of a `rate` time code (drop-frame or not) whose label reads as `label` (as
+/// [`label_time`] gives it), to the nearest frame of the label's nominal rate.
+pub fn label_frame(label: Tick, rate: FrameRate, drop_frame: bool) -> i64 {
+    let nominal = FrameRate::new(rate.timecode_base(), 1);
+    let n = nominal.frame_at(nominal.snap_nearest(label.max(Tick::ZERO)));
+    let (_, h, m, s, f) = frames_to_fields(n, nominal, false);
+    fields_to_frames(h, m, s, f, rate, drop_frame && rate.supports_drop_frame())
 }
 
 impl Document {
+    /// SCC / MCC read from a file: count cue times from the time code labelled `start` (as
+    /// [`Document::start_timecode`]) rather than from 00:00:00:00, the inverse of what the writers
+    /// do. Only when every cue is at or after it, so a file that counts from zero keeps its times.
+    /// Returns whether the cues moved.
+    pub fn count_from(&mut self, start: Tick) -> bool {
+        let Some((rate, drop_frame)) = self.labels else { return false };
+        let origin = rate.tick_of(label_frame(start, rate, drop_frame));
+        if origin <= Tick::ZERO || self.cues.iter().any(|c| c.start < origin) {
+            return false;
+        }
+        for c in &mut self.cues {
+            c.start -= origin;
+            c.end -= origin;
+            for w in &mut c.words {
+                w.0 -= origin;
+                w.1 -= origin;
+            }
+        }
+        true
+    }
+
     /// Snap cue times to frame boundaries of `rate` (nearest), keeping every cue at least one frame
     /// long and removing overlaps (a cue is cut where the next one starts).
     pub fn snap_to_frames(&mut self, rate: FrameRate) {
@@ -403,12 +453,60 @@ pub fn document_from_track(t: &CaptionTrack, offset: Tick) -> Document {
         warnings: Vec::new(),
         style: Some(t.style.clone()),
         language: Some(t.language.clone()).filter(|l| !l.is_empty()),
+        start_timecode: Tick::ZERO,
+        labels: None,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A start time code keeps its label from a sequence's rate to the SCC / MCC 29.97 grid.
+    #[test]
+    fn start_timecode_labels_carry_across_rates() {
+        let secs = |s: i64| Tick(TICKS_PER_SECOND * s);
+        let scc = FrameRate::FPS_29_97;
+        // 01:00:00:00 at 25, 24 and 29.97 drop-frame all read as one hour
+        assert_eq!(label_time(90_000, FrameRate::FPS_25, false), secs(3600));
+        assert_eq!(label_time(86_400, FrameRate::FPS_23_976, false), secs(3600));
+        assert_eq!(label_time(107_892, scc, true), secs(3600));
+        assert_eq!(label_time(108_000, scc, false), secs(3600));
+        // 01:00:02:00 at 25 fps is 01:00:02;00 drop-frame and 01:00:02:00 non-drop at 29.97
+        let two = label_time(90_050, FrameRate::FPS_25, false);
+        assert_eq!(filmcraft_time::format_timecode_frames(label_frame(two, scc, true), scc, true), "01;00;02;00");
+        assert_eq!(filmcraft_time::format_timecode_frames(label_frame(two, scc, false), scc, false), "01:00:02:00");
+        // a frame's share of a second goes to the nearest 29.97 label frame
+        assert_eq!(label_frame(label_time(90_001, FrameRate::FPS_25, false), scc, false), 108_001);
+        // drop-frame on a rate that has none counts non-drop
+        assert_eq!(label_time(90_000, FrameRate::FPS_25, true), secs(3600));
+        // hostile values neither panic nor go negative
+        assert_eq!(label_time(-5, FrameRate::FPS_25, false), Tick::ZERO);
+        assert!(label_time(i64::MAX, FrameRate::FPS_25, false) > Tick::ZERO);
+        assert_eq!(label_frame(Tick(i64::MIN), scc, true), 0);
+        assert!(label_frame(Tick(i64::MAX), scc, true) > 0);
+        let hostile = FrameRate::new(i64::MAX, 1);
+        let _ = (label_time(i64::MAX, hostile, true), label_frame(Tick(i64::MAX), hostile, false));
+        let zero = FrameRate { num: 0, den: 0 };
+        let _ = (label_time(i64::MAX, zero, true), label_frame(Tick(i64::MAX), zero, true));
+    }
+
+    /// `count_from` moves cues only when the file has labels and every cue is at or after the
+    /// start time code; a hostile start neither panics nor moves anything.
+    #[test]
+    fn count_from_only_moves_cues_at_or_after_the_start() {
+        let rate = FrameRate::FPS_29_97;
+        let cue = |f: i64| Cue { start: rate.tick_of(f), end: rate.tick_of(f + 30), ..Default::default() };
+        let hour = Tick(3600 * TICKS_PER_SECOND);
+        let mut unlabelled = Document { cues: vec![cue(108_000)], ..Default::default() };
+        assert!(!unlabelled.count_from(hour), "no labels: not an SCC or MCC file");
+        let mut doc = Document { cues: vec![cue(108_030)], labels: Some((rate, false)), ..Default::default() };
+        for start in [Tick::ZERO, Tick(-1), Tick(i64::MIN), Tick(i64::MAX)] {
+            assert!(!doc.clone().count_from(start), "{start:?}");
+        }
+        assert!(doc.count_from(hour));
+        assert_eq!(doc.cues[0].start, rate.tick_of(30));
+    }
 
     #[test]
     fn clock() {

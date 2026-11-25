@@ -532,8 +532,11 @@ fn write_sidecar(s: &Session, project: &Project, seq: ItemId, settings: &ExportS
         cue.end = cue.end.min(range.duration);
         cue.start < cue.end
     });
-    let bytes =
-        filmcraft_captions::write(&doc, format, filmcraft_captions::WriteOptions { drop_frame: q.settings.drop_frame, rate: Some(q.settings.frame_rate) });
+    // SCC / MCC time codes count from the timecode of the range's first frame
+    let first = q.settings.frame_rate.frame_at(range.start).saturating_add(q.start_timecode);
+    doc.start_timecode = filmcraft_captions::label_time(first, q.settings.frame_rate, q.settings.drop_frame);
+    let opts = filmcraft_captions::WriteOptions { drop_frame: q.settings.drop_frame, rate: Some(q.settings.frame_rate) };
+    let bytes = filmcraft_captions::write(&doc, format, opts);
     let ext = if format == filmcraft_captions::Format::WebVtt { "vtt" } else { kind };
     let path = format!("{}.{ext}", settings.path.rsplit_once('.').map_or(settings.path.as_str(), |x| x.0));
     crate::output_safety::protect(s, project, &path, "file.exportMedia")?;

@@ -57,6 +57,15 @@ All cue times are exact `Tick`s. Milliseconds convert exactly (1 ms = 254 016 00
 frames map through `FrameRate::FPS_29_97`. `Document::snap_to_frames` snaps cues to a sequence's
 frame grid (the engine does this on import) and removes overlaps.
 
+SCC and MCC time codes count from `Document::start_timecode`, the label of time zero read as a
+time (`label_time`): the writers start at the 29.97 frame with the same label, so a sequence
+starting at 01:00:00:00 at 25 fps writes 01:00:00;00 (drop-frame) or 01:00:00:00. The readers note
+the rate and drop-frame mode of a file's labels in `Document::labels`, and `Document::count_from`
+counts the cues back from a start time code when every cue is at or after it. The engine passes
+the sequence's start timecode (`captions.export`, and the timecode of the range's first frame for
+export sidecars) and counts imported files from it (`captions.import` reports
+`fromStartTimecode`).
+
 ### TTML tick timing
 
 When `ttp:tickRate` is omitted and `ttp:frameRate` is present, tick offsets use the effective

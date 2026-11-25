@@ -56,7 +56,7 @@ Details of each format and the SCC encoder are in [`crates/captions/README.md`](
 | `captions.setTrack` | caption track header (eye, lock) | `track`, `name`, `format`, `language`, `enabled`, `locked`, `syncLock` |
 | `captions.setStyle` | Text panel style strip | `track`, `size`, `color`, `background`, `backgroundColor`, `outline`, `outlineColor`, `align`, `anchor`, `margin`, `lineSpacing`, `reset` |
 | `captions.deleteTrack` | | `track` |
-| `captions.import` / `captions.export` | File ▸ Export ▸ Captions… | `path`; import: `name`, `language` (default: the file's TTML `xml:lang`, else `en`); export: `format`, `track`, `dropFrame`. TTML and DFXP exports write the track's language as `xml:lang` |
+| `captions.import` / `captions.export` | File ▸ Export ▸ Captions… | `path`; import: `name`, `language` (default: the file's TTML `xml:lang`, else `en`); export: `format`, `track`, `dropFrame`. TTML and DFXP exports write the track's language as `xml:lang`. SCC and MCC time codes count from the sequence's start timecode (its label: 01:00:00:00 at 25 fps is 01:00:00;00 at 29.97), and an imported SCC or MCC file whose captions all come at or after that label counts from it (`fromStartTimecode` in the result) |
 | `captions.list` | (query) | `track` — tracks, styles and captions with timecodes (a `track` that names no caption track is an error) |
 
 Tracks are addressed by id or `"C1"`, `"C2"`… (top first). Edits are limited by neighbouring

@@ -125,7 +125,13 @@ pub fn import(s: &mut Session, path: &str, bytes: &[u8], format: Format, name: O
             id
         }
     };
-    let rate = s.project.sequence(seq_id).map(|q| q.settings.frame_rate).unwrap_or_default();
+    let (rate, start) = s
+        .project
+        .sequence(seq_id)
+        .map(|q| (q.settings.frame_rate, filmcraft_captions::label_time(q.start_timecode, q.settings.frame_rate, q.settings.drop_frame)))
+        .unwrap_or_default();
+    // SCC / MCC time codes that count from the sequence's start timecode land at its start
+    let from_start_timecode = doc.count_from(start);
     doc.snap_to_frames(rate);
     let n = doc.cues.len();
     let warnings = doc.warnings.clone();
@@ -152,7 +158,15 @@ pub fn import(s: &mut Session, path: &str, bytes: &[u8], format: Format, name: O
         st.caption_selection.clear();
         Ok((tid, language))
     })?;
-    Ok(json!({"format": format.name(), "sequence": seq_id.0, "track": tid.0, "language": language, "captions": n, "warnings": warnings}))
+    Ok(json!({
+        "format": format.name(),
+        "sequence": seq_id.0,
+        "track": tid.0,
+        "language": language,
+        "captions": n,
+        "warnings": warnings,
+        "fromStartTimecode": from_start_timecode,
+    }))
 }
 
 /// Delete captions (Clear / Ripple Delete with captions selected).
@@ -270,7 +284,9 @@ fn export(s: &mut Session, p: &Value) -> Result<Value> {
     let tid = track_param(s, p).ok_or_else(|| bad("captions.export", "no caption track"))?;
     let seq = s.active_sequence().ok_or(EngineError::NoSequence)?;
     let track = seq.caption_track(tid).ok_or_else(|| bad("captions.export", "no such caption track"))?;
-    let doc: Document = filmcraft_captions::document_from_track(track, Tick::ZERO);
+    let mut doc: Document = filmcraft_captions::document_from_track(track, Tick::ZERO);
+    // SCC / MCC time codes count from the sequence's start timecode
+    doc.start_timecode = filmcraft_captions::label_time(seq.start_timecode, seq.settings.frame_rate, seq.settings.drop_frame);
     let df = bool_p(p, "dropFrame").unwrap_or(true);
     let bytes = filmcraft_captions::write(&doc, format, WriteOptions { drop_frame: df, rate: Some(seq.settings.frame_rate) });
     let n = doc.cues.len();

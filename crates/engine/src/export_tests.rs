@@ -988,6 +988,23 @@ fn caption_sidecars_keep_only_the_exported_interval() {
         let doc = sidecar(&mut edge, &edge_files, format, json!({"range":"inOut"}), ticks(30));
         assert!(doc.cues.is_empty(), "half-open export excludes cues touching either boundary: {doc:?}");
     }
+
+    // SCC / MCC sidecars count their time codes from the timecode of the range's first frame:
+    // In at 2 s of a sequence starting at 01:00:00:00 (25 fps) is 01:00:02:00.
+    s.edit_sequence("Start Time", |q, _, _| {
+        q.start_timecode = 90_000;
+        Ok(())
+    })
+    .unwrap();
+    for format in [Format::Scc, Format::Mcc] {
+        let mut doc = sidecar(&mut s, &files, format, json!({"range":"inOut"}), ticks(30));
+        let text = String::from_utf8(files.0.lock().unwrap().get(&format!("output.{}", format.extension())).unwrap().clone()).unwrap();
+        let first = text.lines().find_map(|l| l.split_once('\t')).unwrap().0;
+        assert_eq!(first, "01:00:02:00", "{format:?}: the first caption starts at the In point");
+        assert!(doc.count_from(Tick(3602 * TICKS_PER_SECOND)), "{format:?}");
+        let texts: Vec<_> = doc.cues.iter().map(|c| c.text.as_str()).collect();
+        assert_eq!(texts, ["Crossing In", "Inside", "Crossing Out"], "{format:?}");
+    }
 }
 
 /// `file.exportMedia {embedCaptions: true}` carries the caption track inside the H.264 stream as

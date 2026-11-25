@@ -290,3 +290,44 @@ fn caption_track_language_survives_import_and_ttml_export() {
     assert_eq!(langs, ["pt-BR", "es-419", "pt-BR"], "new tracks go on top: {list}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// SCC and MCC exports count their time codes from the sequence's start timecode (its label, so
+/// 01:00:00:00 at 25 fps is 01:00:00;00 or 01:00:00:00 at 29.97), and importing such a file into
+/// the sequence puts the captions back where they were.
+#[test]
+fn scc_and_mcc_time_codes_count_from_the_sequence_start_timecode() {
+    let dir = std::env::temp_dir().join(format!("fc-cap-tc-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let srt = dir.join("tc.srt");
+    std::fs::write(&srt, "1\n00:00:02,000 --> 00:00:04,000\nFirst\n\n2\n00:00:05,000 --> 00:00:06,000\nSecond\n").unwrap();
+    let mut s = Session::default();
+    s.execute("file.newSequence", json!({"name": "TC", "fps": 25, "width": 16, "height": 16, "video": 1, "audio": 0})).unwrap();
+    s.execute("captions.import", json!({"path": srt.to_string_lossy()})).unwrap();
+    let starts = |s: &Session| -> Vec<Tick> { s.active_sequence().unwrap().caption_tracks[0].captions.iter().map(|c| c.start).collect() };
+    let original = starts(&s);
+    let first_label = |path: &str| -> String {
+        let text = std::fs::read_to_string(path).unwrap();
+        text.lines().find_map(|l| l.split_once('\t')).unwrap().0.to_string()
+    };
+    for (start_timecode, hour) in [(90_000, "01:00:0"), (0, "00:00:0")] {
+        s.edit_sequence("Start Time", |q, _, _| {
+            q.start_timecode = start_timecode;
+            Ok(())
+        })
+        .unwrap();
+        for ext in ["scc", "mcc"] {
+            for drop_frame in [true, false] {
+                let path = dir.join(format!("tc-{start_timecode}-{drop_frame}.{ext}")).to_string_lossy().to_string();
+                s.execute("captions.export", json!({"path": path, "track": "C1", "dropFrame": drop_frame})).unwrap();
+                let label = first_label(&path);
+                assert!(label.starts_with(hour), "{ext} drop-frame {drop_frame}: {label}");
+                assert_eq!(label.contains(';'), drop_frame, "{label}");
+                let r = s.execute("captions.import", json!({"path": path})).unwrap();
+                assert_eq!(r["fromStartTimecode"], start_timecode > 0, "{r}");
+                assert_eq!(starts(&s), original, "{ext} drop-frame {drop_frame} from {start_timecode}");
+                s.execute("edit.undo", json!({})).unwrap();
+            }
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
