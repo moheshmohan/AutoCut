@@ -937,3 +937,8 @@ Still-image improvements from upstream craft-libs, ported into AutoCut's own cra
 - **AV119**: tiled and multi-part OpenEXR stills and sequences open (they were refused): the part
   with the main picture is shown (the media info names it), and a tiled or mip-mapped file shows
   its full-resolution level. Deep parts are skipped; PIZ, B44 and DWA compression stay refused.
+- **AV120**: OpenEXR sequence exports carry the compositor's float picture instead of an 8-bit
+  frame: highlights above 1.0 and fine gradients survive, in 16-bit half or 32-bit float (Bit
+  depth in the export panel, `exrDepth: "half" | "float"` on `file.exportMedia`), with PXR24 as a
+  new compression. An HDR sequence exports its linear BT.2020 working space, named in the file's
+  chromaticities (`sdr: true` gives the SDR picture in BT.709).

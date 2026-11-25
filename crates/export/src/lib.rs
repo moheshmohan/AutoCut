@@ -372,6 +372,12 @@ pub struct ExportSettings {
     /// Compression of OpenEXR sequences (uncompressed unless set); other formats ignore it.
     #[serde(default)]
     pub exr_compression: ExrCompression,
+    /// Sample type of OpenEXR sequences (half float unless set). Their frames are the
+    /// compositor's float pictures, in the sequence's working space unless `sdr` is set (an HDR
+    /// sequence's linear BT.2020, its primaries in the file's chromaticities); other formats
+    /// ignore it.
+    #[serde(default)]
+    pub exr_depth: ExrDepth,
     /// Output frame size (None = Match Source: the sequence size times `scale`).
     pub frame_size: Option<(u32, u32)>,
     /// Output frame rate (None = Match Source).
@@ -667,6 +673,7 @@ impl Default for ExportSettings {
             sdr: false,
             alpha: false,
             exr_compression: ExrCompression::None,
+            exr_depth: ExrDepth::Half,
             frame_size: None,
             frame_rate: None,
             scaling: Scaling::default(),
@@ -2441,7 +2448,11 @@ fn export_here(project: &Arc<Project>, seq: ItemId, settings: &ExportSettings, s
             (n, frames)
         }
         f if f.is_image_sequence() || f == Format::Gif => {
-            let pipe = pipeline::Pipeline::new(project.clone(), seq, settings, false)?;
+            // OpenEXR frames are the compositor's float pictures, in the working space unless SDR
+            // is asked for
+            let exr = settings.format == Format::ExrSequence;
+            let pipe = pipeline::Pipeline::new(project.clone(), seq, settings, false)?.with_working_output(exr && !settings.sdr);
+            let chromaticities = raster::chromaticities(pipe.linear_gamut());
             let batch = pipe.render_batch_limit(batch);
             let (f0, f1) = frame_span(pipe.rate, range);
             let count = (f1 - f0) as u64;
@@ -2476,15 +2487,27 @@ fn export_here(project: &Arc<Project>, seq: ItemId, settings: &ExportSettings, s
                     let written: Vec<Result<u64>> = (f..end)
                         .into_par_iter()
                         .map(|fi| {
-                            let data = encode_still_with(
-                                settings.format,
-                                pipe.frame(fi, sources).0,
-                                w,
-                                h,
-                                settings.alpha,
-                                settings.quality,
-                                settings.exr_compression,
-                            )?;
+                            let data = if exr {
+                                let img = pipe.frame_linear(fi, sources);
+                                if (img.w, img.h) != (w as usize, h as usize) {
+                                    return Err(ExportError::Encode(format!("frame {fi} rendered at {} × {}, not {w} × {h}", img.w, img.h)));
+                                }
+                                let out = raster::exr_linear(
+                                    &img.px,
+                                    w,
+                                    h,
+                                    raster::ExrLayout {
+                                        alpha: settings.alpha,
+                                        depth: settings.exr_depth,
+                                        compression: settings.exr_compression,
+                                        chromaticities,
+                                    },
+                                );
+                                filmcraft_frame::pool::recycle_f32(img.px);
+                                out?
+                            } else {
+                                encode_still_with(settings.format, pipe.frame(fi, sources).0, w, h, settings.alpha, settings.quality, settings.exr_compression)?
+                            };
                             write_output(settings, &pcm::image_sequence_path(&settings.path, (fi - f0) as u64, count), data)
                         })
                         .collect();

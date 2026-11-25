@@ -340,6 +340,46 @@ impl Pipeline {
             note_gpu_fallback();
             return self.finish(filmcraft_render::render_sequence(&self.project, self.seq, t, self.opts, sources), t);
         }
+        let img = self.render_float(t, pool, sources);
+        self.finish(img, t)
+    }
+
+    /// Output frame `f` as the compositor's float picture at the output size, the overlays drawn:
+    /// premultiplied linear light (OpenEXR exports). Its primaries are [`Self::linear_gamut`]'s:
+    /// the sequence's working space after [`Self::with_working_output`], else what an SDR monitor
+    /// is shown.
+    pub fn frame_linear(&self, f: i64, sources: &dyn SourceProvider) -> Image {
+        let t = self.rate.tick_of(f);
+        let pool = self.renderer.as_ref().filter(|_| {
+            if filmcraft_render::plan::is_cpu_frame(&self.project, self.seq, t) {
+                filmcraft_render::plan::note_cpu_frame(&self.project, self.seq, t);
+                return false;
+            }
+            true
+        });
+        let mut img = self.place(self.render_float(t, pool, sources));
+        self.overlays(&mut img, t);
+        img
+    }
+
+    /// Frames in the sequence's working space (an HDR or wide-gamut sequence's linear BT.2020)
+    /// instead of an SDR monitor's, for [`Self::frame_linear`].
+    pub fn with_working_output(mut self, on: bool) -> Self {
+        self.opts.working_output = self.opts.working_output || on;
+        self
+    }
+
+    /// The primaries of [`Self::frame_linear`]'s pictures.
+    pub fn linear_gamut(&self) -> filmcraft_color::Gamut {
+        match self.project.sequence(self.seq) {
+            Some(q) if self.opts.working_output => q.settings.color.working_gamut(),
+            _ => filmcraft_color::Gamut::Bt709,
+        }
+    }
+
+    /// Frame time `t` rendered as a float picture: by a pooled GPU renderer when one draws it,
+    /// else by the CPU reference renderer.
+    fn render_float(&self, t: filmcraft_time::Tick, pool: Option<&RendererPool>, sources: &dyn SourceProvider) -> Image {
         let gpu = match pool {
             Some(pool) => {
                 let asked = web_time::Instant::now();
@@ -351,7 +391,7 @@ impl Pipeline {
             }
             None => None,
         };
-        let img = match gpu {
+        match gpu {
             Some(img) => {
                 note_gpu_frame();
                 img
@@ -362,8 +402,7 @@ impl Pipeline {
                 }
                 filmcraft_render::render_sequence(&self.project, self.seq, t, self.opts, sources)
             }
-        };
-        self.finish(img, t)
+        }
     }
 
     /// The rest of [`frame`](Self::frame) for a rendered picture: fitted into the output frame,

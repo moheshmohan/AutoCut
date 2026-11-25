@@ -29,8 +29,8 @@
 use egui::{Align2, Color32, Rect, Sense, pos2, vec2};
 use filmcraft_engine::export::presets::{DEFAULT_PRESET, preset_key};
 use filmcraft_engine::export::{
-    AudioCodec, BitrateMode, ExportSettings, ExrCompression, FieldOrder, Format, GpuRendering, H264Profile, HardwareEncoding, Multiplexer, MxfVideoCodec,
-    Placement, SampleFormat, Scaling, TextOverlay, builtin_presets, format_bytes,
+    AudioCodec, BitrateMode, ExportSettings, ExrCompression, ExrDepth, FieldOrder, Format, GpuRendering, H264Profile, HardwareEncoding, Multiplexer,
+    MxfVideoCodec, Placement, SampleFormat, Scaling, TextOverlay, builtin_presets, format_bytes,
 };
 use filmcraft_engine::time::{FrameRate, Tick};
 use serde::{Deserialize, Serialize};
@@ -936,17 +936,32 @@ fn video_section(ui: &mut egui::Ui, reg: &mut Reg, s: &mut ExportSettings, t: &T
             });
         }
         Format::ExrSequence => {
+            row(ui, t, tl!("Bit depth"), |ui| {
+                let label = |d: ExrDepth| match d {
+                    ExrDepth::Half => tl!("16-bit half float"),
+                    ExrDepth::Float => tl!("32-bit float"),
+                };
+                let labels: Vec<&str> = ExrDepth::ALL.iter().map(|&d| label(d)).collect();
+                if let Some(i) = combo(ui, reg, "export.video.exrDepth", label(s.exr_depth), &opts(&labels), 220.0)
+                    && let Some(&d) = ExrDepth::ALL.get(i)
+                {
+                    s.exr_depth = d;
+                }
+            });
             row(ui, t, tl!("Compression"), |ui| {
-                // every mode is lossless; RLE and the ZIP variants shrink the files
+                // every mode but PXR24 of 32-bit floats is lossless; all but None shrink the files
                 let label = |c: ExrCompression| match c {
                     ExrCompression::None => tl!("None"),
                     ExrCompression::Rle => "RLE",
                     ExrCompression::Zips => tl!("ZIP (1 scan line)"),
                     ExrCompression::Zip => tl!("ZIP (16 scan lines)"),
+                    ExrCompression::Pxr24 => "PXR24",
                 };
                 let labels: Vec<&str> = ExrCompression::ALL.iter().map(|&c| label(c)).collect();
-                if let Some(i) = combo(ui, reg, "export.video.exrCompression", label(s.exr_compression), &opts(&labels), 220.0) {
-                    s.exr_compression = ExrCompression::ALL[i];
+                if let Some(i) = combo(ui, reg, "export.video.exrCompression", label(s.exr_compression), &opts(&labels), 220.0)
+                    && let Some(&c) = ExrCompression::ALL.get(i)
+                {
+                    s.exr_compression = c;
                 }
             });
         }

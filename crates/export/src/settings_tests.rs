@@ -324,7 +324,7 @@ fn openexr_sequences_compress() {
         let path = dir.0.join("c000.exr");
         let bytes = std::fs::read(&path).unwrap();
         let at = bytes.windows(24).position(|w| w == b"compression\0compression\0").unwrap() + 28;
-        assert_eq!(bytes[at], [0, 1, 2, 3][files.len()], "{c:?}");
+        assert_eq!(bytes[at], [0, 1, 2, 3, 5][files.len()], "{c:?}");
         files.push((c, path, bytes.len(), dir));
     }
     let plain = files[0].2;
@@ -342,6 +342,81 @@ fn openexr_sequences_compress() {
     assert_eq!(want.len(), 64 * 36 * 16);
     for (c, path, _, _) in &files[1..] {
         assert!(decode(path) == want, "{c:?} decodes differently");
+    }
+}
+
+/// A 16 × 8 sequence of one OpenEXR still of linear (4.0, 0.5, 0.125), opaque, working in `color`.
+fn hot_exr(color: filmcraft_color::ColorPipeline) -> (Arc<Project>, ItemId, SourceMap) {
+    let px: Vec<f32> = [4.0f32, 0.5, 0.125, 1.0].repeat(16 * 8);
+    let layout = raster::ExrLayout {
+        alpha: true,
+        depth: ExrDepth::Float,
+        compression: ExrCompression::None,
+        chromaticities: raster::chromaticities(filmcraft_color::Gamut::Bt709),
+    };
+    let still = filmcraft_media::open_bytes("hot.exr", raster::exr_linear(&px, 16, 8, layout).unwrap().into(), &[]).unwrap();
+    let mut p = Project::new("hot");
+    let r = FrameRate::FPS_24;
+    let info = still.info().clone();
+    let clip = MediaClip {
+        media: MediaRef::File { path: "hot.exr".into() },
+        info,
+        interpret: Default::default(),
+        mark_in: None,
+        mark_out: None,
+        markers: vec![],
+        offline: false,
+        proxy: None,
+        identity: None,
+    };
+    let id = p.add_item("hot.exr", Label::Iris, ItemKind::Media(clip), None);
+    let mut m = SourceMap::default();
+    m.0.insert(id, still);
+    let seq = p.new_sequence("s", SequenceSettings { width: 16, height: 8, frame_rate: r, color, ..Default::default() }, 1, 1, None);
+    let vi = p.make_track_item(id, TrackKind::Video, Tick::ZERO, TimeRange::new(Tick::ZERO, r.tick_of(24)), r).unwrap();
+    p.sequence_mut(seq).unwrap().video_tracks[0].items.push(vi);
+    (Arc::new(p), seq, m)
+}
+
+/// OpenEXR sequences are written from the compositor's float pictures: a source of linear 4.0
+/// exports as 4.0, in half or 32-bit floats. The RGBA8 path clipped it to 1.0 and 8 bits. An HDR
+/// sequence's frames are its linear BT.2020 working space, named by the chromaticities, unless
+/// SDR is asked for.
+#[test]
+fn openexr_sequences_keep_the_float_picture() {
+    let read = |path: &Path| {
+        let bytes = std::fs::read(path).unwrap();
+        let d = filmcraft_media::still::exr::decode("out.exr", &bytes).unwrap();
+        let filmcraft_frame::PixelData::RgbaF32(px) = &d.frame.data else { panic!("EXR frames are float") };
+        let at = bytes.windows(30).position(|w| w == b"chromaticities\0chromaticities\0").unwrap() + 34;
+        let chroma: Vec<f32> = (0..8).map(|i| f32::from_le_bytes(bytes[at + i * 4..at + i * 4 + 4].try_into().unwrap())).collect();
+        (px[..4].to_vec(), d.pixel_format, chroma)
+    };
+    let (p, seq, m) = hot_exr(filmcraft_color::ColorPipeline::REC709);
+    for depth in ExrDepth::ALL {
+        for c in [ExrCompression::None, ExrCompression::Zip, ExrCompression::Pxr24] {
+            let dir = Scratch::new(&format!("seq-exr-float-{depth:?}-{c:?}"));
+            let mut s = ExportSettings { format: Format::ExrSequence, path: dir.path("f.exr"), exr_depth: depth, exr_compression: c, ..Default::default() };
+            s.range = Some(TimeRange::new(Tick::ZERO, FrameRate::FPS_24.tick_of(1)));
+            export(&p, seq, &s, &m, &Progress::default()).unwrap();
+            let (px, format, chroma) = read(&dir.0.join("f000.exr"));
+            let want = if depth == ExrDepth::Float { "RGB 32-bit float" } else { "RGB 16-bit float" };
+            assert_eq!(format, want, "{depth:?} {c:?}");
+            assert!((px[0] - 4.0).abs() < 1e-3 && (px[1] - 0.5).abs() < 1e-3 && (px[2] - 0.125).abs() < 1e-4, "{depth:?} {c:?}: {px:?}");
+            assert_eq!(chroma[..2], [0.64, 0.33]);
+        }
+    }
+    // an HDR sequence: linear BT.2020, unless SDR is asked for
+    let hdr = filmcraft_color::ColorPipeline { working: filmcraft_color::WorkingSpace::Rec2100Pq, ..filmcraft_color::ColorPipeline::REC709 };
+    let (p, seq, m) = hot_exr(hdr);
+    for sdr in [false, true] {
+        let dir = Scratch::new(&format!("seq-exr-hdr-{sdr}"));
+        let mut s = ExportSettings { format: Format::ExrSequence, path: dir.path("h.exr"), exr_depth: ExrDepth::Float, sdr, ..Default::default() };
+        s.range = Some(TimeRange::new(Tick::ZERO, FrameRate::FPS_24.tick_of(1)));
+        export(&p, seq, &s, &m, &Progress::default()).unwrap();
+        let (px, _, chroma) = read(&dir.0.join("h000.exr"));
+        assert_eq!(chroma[..2], if sdr { [0.64, 0.33] } else { [0.708, 0.292] }, "sdr {sdr}");
+        assert!(px[..3].iter().all(|v| v.is_finite() && *v > 0.0) && px[0] > px[1] && px[1] > px[2], "sdr {sdr}: {px:?}");
     }
 }
 

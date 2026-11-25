@@ -726,17 +726,25 @@ fn crf_param_picks_constant_quality() {
 
 #[test]
 fn exr_compression_param_is_parsed_and_defaults_to_none() {
-    use filmcraft_export::ExrCompression::{None as Plain, Rle, Zip, Zips};
+    use filmcraft_export::ExrCompression::{None as Plain, Pxr24, Rle, Zip, Zips};
+    use filmcraft_export::ExrDepth;
     let s = demo();
     let setting = |p: Value| crate::export_tools::settings_from_params(&s, &p, "file.exportMedia").map(|(_, st)| st.exr_compression);
     assert_eq!(setting(json!({"path": "x.exr", "format": "exr"})).unwrap(), Plain);
-    for (name, want) in [("none", Plain), ("rle", Rle), ("zips", Zips), ("zip", Zip)] {
+    for (name, want) in [("none", Plain), ("rle", Rle), ("zips", Zips), ("zip", Zip), ("pxr24", Pxr24)] {
         assert_eq!(setting(json!({"path": "x.exr", "format": "exr", "exrCompression": name})).unwrap(), want);
     }
     let e = setting(json!({"path": "x.exr", "format": "exr", "exrCompression": "piz"})).unwrap_err().to_string();
-    assert!(e.contains("none | rle | zips | zip"), "{e}");
+    assert!(e.contains("none | rle | zips | zip | pxr24"), "{e}");
     let old: filmcraft_export::ExportSettings = serde_json::from_value(json!({"format": "exr"})).unwrap();
-    assert_eq!(old.exr_compression, Plain);
+    assert_eq!((old.exr_compression, old.exr_depth), (Plain, ExrDepth::Half));
+    // the sample type: half unless asked
+    let depth = |p: Value| crate::export_tools::settings_from_params(&s, &p, "file.exportMedia").map(|(_, st)| st.exr_depth);
+    assert_eq!(depth(json!({"path": "x.exr", "format": "exr"})).unwrap(), ExrDepth::Half);
+    assert_eq!(depth(json!({"path": "x.exr", "format": "exr", "exrDepth": "float"})).unwrap(), ExrDepth::Float);
+    assert_eq!(depth(json!({"path": "x.exr", "format": "exr", "exrDepth": "half"})).unwrap(), ExrDepth::Half);
+    let e = depth(json!({"path": "x.exr", "format": "exr", "exrDepth": "double"})).unwrap_err().to_string();
+    assert!(e.contains("half | float"), "{e}");
 }
 
 #[test]

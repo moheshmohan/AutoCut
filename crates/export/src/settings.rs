@@ -173,7 +173,8 @@ impl MxfVideoCodec {
     }
 }
 
-/// Compression of OpenEXR stills (the file's `compression` attribute). Every mode is lossless.
+/// Compression of OpenEXR stills (the file's `compression` attribute). Every mode is lossless
+/// except PXR24 on 32-bit float samples, which keeps their top 24 bits.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ExrCompression {
@@ -186,16 +187,20 @@ pub enum ExrCompression {
     Zips,
     /// zlib (deflate) per block of 16 scan lines (ZIP_COMPRESSION).
     Zip,
+    /// Per-line sample differences as byte planes, deflated, per 16 scan lines
+    /// (PXR24_COMPRESSION): lossless for half floats, 24 bits of each 32-bit float.
+    Pxr24,
 }
 
 impl ExrCompression {
-    pub const ALL: [ExrCompression; 4] = [ExrCompression::None, ExrCompression::Rle, ExrCompression::Zips, ExrCompression::Zip];
+    pub const ALL: [ExrCompression; 5] = [ExrCompression::None, ExrCompression::Rle, ExrCompression::Zips, ExrCompression::Zip, ExrCompression::Pxr24];
     pub fn label(self) -> &'static str {
         match self {
             ExrCompression::None => "None",
             ExrCompression::Rle => "RLE",
             ExrCompression::Zips => "ZIP (1 scan line)",
             ExrCompression::Zip => "ZIP (16 scan lines)",
+            ExrCompression::Pxr24 => "PXR24",
         }
     }
     /// The value of the OpenEXR `compression` attribute.
@@ -205,11 +210,40 @@ impl ExrCompression {
             ExrCompression::Rle => 1,
             ExrCompression::Zips => 2,
             ExrCompression::Zip => 3,
+            ExrCompression::Pxr24 => 5,
         }
     }
     /// Scan lines per chunk.
     pub(crate) fn lines(self) -> usize {
-        if self == ExrCompression::Zip { 16 } else { 1 }
+        if matches!(self, ExrCompression::Zip | ExrCompression::Pxr24) { 16 } else { 1 }
+    }
+}
+
+/// Sample type of OpenEXR sequences: the channels' pixel type.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ExrDepth {
+    /// 16-bit half float (HALF): finite values up to ±65504, about three decimal digits.
+    #[default]
+    Half,
+    /// 32-bit float (FLOAT): the compositor's own precision.
+    Float,
+}
+
+impl ExrDepth {
+    pub const ALL: [ExrDepth; 2] = [ExrDepth::Half, ExrDepth::Float];
+    pub fn label(self) -> &'static str {
+        match self {
+            ExrDepth::Half => "16-bit half float",
+            ExrDepth::Float => "32-bit float",
+        }
+    }
+    /// Bytes of one sample.
+    pub(crate) fn bytes(self) -> usize {
+        match self {
+            ExrDepth::Half => 2,
+            ExrDepth::Float => 4,
+        }
     }
 }
 
@@ -656,10 +690,11 @@ impl ExportSettings {
             Format::TgaSequence => px * if self.keeps_alpha() { 4.0 } else { 3.0 } * 8.0 * fps,
             // 10-bit RGB in one 32-bit word per pixel
             Format::DpxSequence => px * 4.0 * 8.0 * fps,
-            // two bytes per half-float channel; lossless compression roughly halves it
+            // two or four bytes per channel; compression roughly halves it
             Format::ExrSequence => {
                 let k = if self.exr_compression == ExrCompression::None { 1.0 } else { 0.5 };
-                px * if self.keeps_alpha() { 8.0 } else { 6.0 } * 8.0 * fps * k
+                let bytes = self.exr_depth.bytes() as f64 * if self.keeps_alpha() { 4.0 } else { 3.0 };
+                px * bytes * 8.0 * fps * k
             }
             Format::Gif => px * 0.6 * 8.0 * fps,
             Format::Wav | Format::Aiff | Format::Flac | Format::MxfOp1a | Format::MxfOpAtom => 0.0,
@@ -751,7 +786,7 @@ impl ExportSettings {
                 Format::Mjpeg | Format::JpegSequence => v += &format!(", quality {}", self.quality),
                 Format::DpxSequence => v += ", 10-bit RGB",
                 Format::ExrSequence => {
-                    v += ", 16-bit half float, linear";
+                    v += &format!(", {}, linear", self.exr_depth.label());
                     match self.exr_compression {
                         ExrCompression::None => v += ", uncompressed",
                         c => v += &format!(", {} compression", c.label()),
