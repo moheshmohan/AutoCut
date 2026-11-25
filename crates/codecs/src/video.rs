@@ -887,7 +887,7 @@ impl VideoDecoder for ProResDecoder {
     fn decode(&mut self, sample: &[u8], pts: i64) -> Result<Vec<DecodedFrame>> {
         use std::sync::Arc;
         let opts = filmcraft_prores::DecodeOptions::default();
-        let f = filmcraft_prores::decode_frame_with_limits(sample, &opts, &self.limits).map_err(|e| CodecError::Decode(e.to_string()))?;
+        let f = filmcraft_prores::decode_frame_with_limits(sample, &opts, &self.limits).map_err(prores_error)?;
         let chroma = match f.chroma {
             filmcraft_prores::ChromaFormat::Yuv422 => filmcraft_frame::Chroma::C422,
             filmcraft_prores::ChromaFormat::Yuv444 => filmcraft_frame::Chroma::C444,
@@ -923,6 +923,16 @@ impl VideoDecoder for ProResDecoder {
     }
     fn intra_only(&self) -> bool {
         true
+    }
+}
+
+/// A ProRes decoder error as a [`CodecError`]: a frame over the decoder's size limit or a feature
+/// it does not implement is [`CodecError::Unsupported`], so the media pool shows the unreadable
+/// slate as it does for H.264 (see [`h264_error`]); anything else is a decode error.
+fn prores_error(e: filmcraft_prores::Error) -> CodecError {
+    match e {
+        filmcraft_prores::Error::Unsupported(what) => CodecError::Unsupported(format!("ProRes: {what}")),
+        e => CodecError::Decode(e.to_string()),
     }
 }
 
@@ -1695,5 +1705,32 @@ impl VideoDecoder for RawVideoDecoder {
     }
     fn intra_only(&self) -> bool {
         true
+    }
+}
+
+#[cfg(test)]
+mod prores_error_tests {
+    use super::*;
+
+    fn sample(w: u32, h: u32) -> Vec<u8> {
+        let frame = filmcraft_prores::Frame::new(w, h, filmcraft_prores::ChromaFormat::Yuv422, 10, false);
+        let mut enc = filmcraft_prores::Encoder::new(filmcraft_prores::Profile::Standard, w, h);
+        enc.encode(&frame).unwrap()
+    }
+
+    #[test]
+    fn a_frame_over_the_size_limit_is_unsupported_not_a_decode_error() {
+        let data = sample(64, 48);
+        let mut fits = ProResDecoder::with_limits(crate::DecoderLimits { max_luma_samples: Some(64 * 48), memory_budget: None });
+        assert_eq!(fits.decode(&data, 0).unwrap().len(), 1);
+        let mut over = ProResDecoder::with_limits(crate::DecoderLimits { max_luma_samples: Some(64 * 48 - 1), memory_budget: None });
+        match over.decode(&data, 0) {
+            Err(CodecError::Unsupported(s)) => assert!(s.starts_with("ProRes"), "{s}"),
+            Err(e) => panic!("expected unsupported, got {e:?}"),
+            Ok(_) => panic!("a frame over the limit decoded"),
+        }
+        // damaged data stays a decode error
+        let mut dec = ProResDecoder::with_limits(crate::DecoderLimits::default());
+        assert!(matches!(dec.decode(data.get(..12).unwrap(), 0), Err(CodecError::Decode(_))));
     }
 }
