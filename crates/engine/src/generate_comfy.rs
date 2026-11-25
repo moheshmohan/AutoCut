@@ -37,7 +37,8 @@ use crate::generate_run::Vars;
 
 /// The server when the entry names none (ComfyUI's own default).
 pub const DEFAULT_SERVER: &str = "http://127.0.0.1:8188";
-/// The most a workflow file may weigh.
+/// The most a workflow file may weigh (read only where files are).
+#[cfg(not(target_arch = "wasm32"))]
 const WORKFLOW_MAX: u64 = 8 * 1024 * 1024;
 const MAX_NODES: usize = 4000;
 const MAX_INPUTS: usize = 64;

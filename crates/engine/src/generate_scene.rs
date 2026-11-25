@@ -36,7 +36,8 @@ const MAX_TEXTS: usize = 32;
 /// The longest text a text object is given (the script takes no more).
 pub const MAX_TEXT: usize = 1000;
 const MAX_OBJECTS: usize = 64;
-/// The most a camera track file may weigh, and its most frames.
+/// The most a camera track file may weigh (read only where files are), and its most frames.
+#[cfg(not(target_arch = "wasm32"))]
 const TRACK_MAX: u64 = 16 * 1024 * 1024;
 const TRACK_FRAMES: usize = 100_000;
 /// The largest coordinate, angle or scale taken.
