@@ -304,11 +304,17 @@ pub struct WriteOptions {
     /// The sequence frame rate: TTML (IMSC1) writes exact frame times at it; EBU STL picks
     /// `STL25.01` or `STL30.01` from it (None = 25 fps). Other formats ignore it.
     pub rate: Option<FrameRate>,
+    /// MCC: a packet on every frame from the start to this time (the end of the programme), with
+    /// no caption data where there is none, as SDI and frame-wrapped MXF carry one per frame.
+    /// The frames are MCC's 29.97 fps ones, so this is one packet per video frame only for
+    /// 29.97 fps video. None (the default) writes only the frames that carry caption data. At
+    /// most [`mcc::MAX_PADDED_FRAMES`] (24 hours) are filled.
+    pub every_frame_until: Option<Tick>,
 }
 
 impl Default for WriteOptions {
     fn default() -> Self {
-        Self { drop_frame: true, rate: None }
+        Self { drop_frame: true, rate: None, every_frame_until: None }
     }
 }
 
@@ -318,12 +324,30 @@ pub fn write(doc: &Document, format: Format, opts: WriteOptions) -> Vec<u8> {
         Format::Srt => srt::write(doc).into_bytes(),
         Format::WebVtt => vtt::write(doc).into_bytes(),
         Format::Scc => scc::write(doc, opts.drop_frame).into_bytes(),
-        Format::Mcc => mcc::write(doc, opts.drop_frame).into_bytes(),
+        Format::Mcc => mcc::write_padded(doc, opts.drop_frame, true, true, mcc_pad_frames(opts)).into_bytes(),
         Format::Stl => stl::write(doc, opts.rate),
         Format::Ttml => ttml::write(doc, ttml::Flavor::Imsc1, opts.rate, doc.language.as_deref().unwrap_or("")).into_bytes(),
         Format::Dfxp => ttml::write(doc, ttml::Flavor::Dfxp, opts.rate, doc.language.as_deref().unwrap_or("")).into_bytes(),
         Format::Ass => ass::write(doc).into_bytes(),
     }
+}
+
+/// [`write`] into `out`. MCC goes out line by line, so a long `every_frame_until` export is never
+/// held in memory (wrap a file in a `BufWriter`); the other formats are small and written whole.
+pub fn write_to(out: &mut dyn std::io::Write, doc: &Document, format: Format, opts: WriteOptions) -> std::io::Result<()> {
+    match format {
+        Format::Mcc => mcc::write_padded_to(out, doc, opts.drop_frame, true, true, mcc_pad_frames(opts)),
+        _ => out.write_all(&write(doc, format, opts)),
+    }
+}
+
+/// The MCC frames `opts.every_frame_until` asks for: those that start before it, so a last
+/// partial frame gets its packet too.
+fn mcc_pad_frames(opts: WriteOptions) -> i64 {
+    opts.every_frame_until.map_or(0, |end| {
+        let f = mcc::RATE.frame_at(end);
+        if mcc::RATE.tick_of(f) < end { f.saturating_add(1) } else { f }
+    })
 }
 
 /// Decode text bytes: UTF-8 (BOM stripped), UTF-16 with BOM, else Windows-1252. Line endings are
@@ -506,6 +530,29 @@ mod tests {
         }
         assert!(doc.count_from(hour));
         assert_eq!(doc.cues[0].start, rate.tick_of(30));
+    }
+
+    /// `write_to` streams the same bytes `write` returns, for every format and a padded MCC, and
+    /// a padded MCC covers every 29.97 frame that starts before `every_frame_until`.
+    #[test]
+    fn write_to_matches_write() {
+        let cue = Cue { start: Tick(TICKS_PER_SECOND), end: Tick(2 * TICKS_PER_SECOND), text: "Hello".into(), ..Default::default() };
+        let doc = Document { cues: vec![cue], ..Default::default() };
+        let padded = WriteOptions { every_frame_until: Some(Tick(3 * TICKS_PER_SECOND)), ..Default::default() };
+        for (format, opts) in Format::ALL.map(|f| (f, WriteOptions::default())).into_iter().chain([(Format::Mcc, padded)]) {
+            let mut out = Vec::new();
+            write_to(&mut out, &doc, format, opts).unwrap();
+            assert_eq!(out, write(&doc, format, opts), "{format:?}");
+        }
+        let packets = |opts: WriteOptions| String::from_utf8(write(&doc, Format::Mcc, opts)).unwrap().lines().filter(|l| l.contains('\t')).count();
+        // 3 s is 89.91 frames at 29.97: frames 0..=89 start before it
+        assert_eq!(packets(padded), 90);
+        assert_eq!(packets(WriteOptions { every_frame_until: Some(mcc::RATE.tick_of(90)), ..Default::default() }), 90);
+        assert_eq!(packets(WriteOptions { every_frame_until: Some(mcc::RATE.tick_of(90) + Tick(1)), ..Default::default() }), 91);
+        let sparse = packets(WriteOptions::default());
+        for end in [Tick::ZERO, Tick(-1), Tick(i64::MIN)] {
+            assert_eq!(packets(WriteOptions { every_frame_until: Some(end), ..Default::default() }), sparse, "{end:?}");
+        }
     }
 
     #[test]

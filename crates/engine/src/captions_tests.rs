@@ -331,3 +331,45 @@ fn scc_and_mcc_time_codes_count_from_the_sequence_start_timecode() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// `captions.export {everyFrame: true}` writes an MCC packet on every 29.97 frame to the
+/// sequence's end (SDI / frame-wrapped MXF), warns when the sequence is at another rate, and is
+/// refused for other formats and non-boolean values.
+#[test]
+fn mcc_export_can_write_a_packet_on_every_frame() {
+    let dir = std::env::temp_dir().join(format!("fc-cap-every-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let srt = dir.join("every.srt");
+    std::fs::write(&srt, "1\n00:00:01,000 --> 00:00:02,000\nOne\n\n2\n00:00:09,000 --> 00:00:10,000\nTwo\n").unwrap();
+    let packets = |path: &str| std::fs::read_to_string(path).unwrap().lines().filter(|l| l.contains('\t')).count();
+    let frames_of = |path: &str| -> Vec<i64> {
+        let text = std::fs::read_to_string(path).unwrap();
+        text.lines().filter_map(|l| l.split_once('\t')).map(|(tc, _)| filmcraft_captions::scc::parse_timecode(tc).unwrap()).collect()
+    };
+    for (fps, warned) in [(json!(29.97), false), (json!(25), true)] {
+        let mut s = Session::default();
+        s.execute("file.newSequence", json!({"name": "Every", "fps": fps, "width": 16, "height": 16, "video": 1, "audio": 0})).unwrap();
+        s.execute("captions.import", json!({"path": srt.to_string_lossy()})).unwrap();
+        let end = s.active_sequence().unwrap().duration();
+        let path = dir.join(format!("every-{warned}.mcc")).to_string_lossy().to_string();
+        let r = s.execute("captions.export", json!({"path": path, "everyFrame": true})).unwrap();
+        assert_eq!(r["everyFrame"], true, "{r}");
+        assert_eq!(r["warnings"].as_array().unwrap().len(), usize::from(warned), "{r}");
+        let rate = filmcraft_captions::mcc::RATE;
+        let frames = rate.frame_at(end) + i64::from(rate.tick_of(rate.frame_at(end)) < end);
+        // one packet per 29.97 frame to the end, then the last caption's erase (at its out point)
+        let written = frames_of(&path);
+        assert_eq!(written[..frames as usize], (0..frames).collect::<Vec<_>>()[..], "one packet per 29.97 frame to {end:?}");
+        assert!(written[frames as usize..].iter().all(|&f| f >= frames) && written.len() <= frames as usize + 2, "{written:?}");
+        let back = filmcraft_captions::parse(&std::fs::read(&path).unwrap(), filmcraft_captions::Format::Mcc).unwrap();
+        assert_eq!(back.cues.len(), 2);
+        let sparse = dir.join(format!("sparse-{warned}.mcc")).to_string_lossy().to_string();
+        let r = s.execute("captions.export", json!({"path": sparse})).unwrap();
+        assert!(r.get("everyFrame").is_none(), "{r}");
+        assert!(packets(&sparse) < packets(&path) / 2);
+        for bad in [json!({"path": dir.join("x.srt").to_string_lossy(), "everyFrame": true}), json!({"path": path, "everyFrame": "yes"})] {
+            assert!(s.execute("captions.export", bad.clone()).is_err(), "{bad}");
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}

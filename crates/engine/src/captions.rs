@@ -288,12 +288,30 @@ fn export(s: &mut Session, p: &Value) -> Result<Value> {
     // SCC / MCC time codes count from the sequence's start timecode
     doc.start_timecode = filmcraft_captions::label_time(seq.start_timecode, seq.settings.frame_rate, seq.settings.drop_frame);
     let df = bool_p(p, "dropFrame").unwrap_or(true);
-    let bytes = filmcraft_captions::write(&doc, format, WriteOptions { drop_frame: df, rate: Some(seq.settings.frame_rate) });
+    // MCC for SDI / frame-wrapped MXF: a packet on every 29.97 frame to the sequence's end
+    let every_frame = p.get("everyFrame").map_or(Ok(false), |v| v.as_bool().ok_or_else(|| bad("captions.export", "everyFrame must be boolean")))?;
+    if every_frame && format != Format::Mcc {
+        return Err(bad("captions.export", format!("everyFrame writes a packet on every frame of an MCC file, not {}", format.name())));
+    }
+    let mut warnings = Vec::new();
+    if every_frame && seq.settings.frame_rate != filmcraft_captions::mcc::RATE {
+        warnings.push(format!(
+            "MCC packets are 29.97 fps: at {} fps the file has a packet on every 29.97 frame, not on every frame of the sequence",
+            seq.settings.frame_rate.label()
+        ));
+    }
+    let opts = WriteOptions { drop_frame: df, rate: Some(seq.settings.frame_rate), every_frame_until: every_frame.then(|| seq.duration()) };
+    let bytes = filmcraft_captions::write(&doc, format, opts);
     let n = doc.cues.len();
     crate::output_safety::protect(s, &s.project, &path, "captions.export")?;
     let overwrite = p.get("overwrite").map_or(Ok(true), |v| v.as_bool().ok_or_else(|| bad("captions.export", "overwrite must be boolean")))?;
     if overwrite { s.services.write_file(&path, &bytes) } else { s.services.write_file_new(&path, &bytes) }.map_err(|e| EngineError::Other(e.to_string()))?;
-    Ok(json!({"path": path, "format": format.name(), "captions": n, "bytes": bytes.len()}))
+    let mut out = json!({"path": path, "format": format.name(), "captions": n, "bytes": bytes.len()});
+    if every_frame {
+        out["everyFrame"] = json!(true);
+        out["warnings"] = json!(warnings);
+    }
+    Ok(out)
 }
 
 fn delta_p(s: &Session, p: &Value) -> Option<Tick> {
@@ -633,7 +651,7 @@ pub fn commands() -> Vec<CommandSpec> {
             "Captions…",
             &["File", "Export"],
             None,
-            r#"{"path":str,"format":"srt|vtt|scc|mcc|stl|ttml|dfxp|ass"? (default: from the extension),"track":id|"C1"?,"dropFrame":bool=true,"overwrite":bool=true}"#,
+            r#"{"path":str,"format":"srt|vtt|scc|mcc|stl|ttml|dfxp|ass"? (default: from the extension),"track":id|"C1"?,"dropFrame":bool=true,"everyFrame":bool=false (MCC: a packet on every 29.97 frame to the sequence's end, for SDI / MXF),"overwrite":bool=true}"#,
             has_caption_track,
             export,
         ),
