@@ -99,7 +99,7 @@ Ranked; detail and "done when" in [docs/roadmap.md](docs/roadmap.md) and [docs/g
 
 1. **No launch crashes, and CI on pull requests** (macOS 12, Intel UHD, Windows 11 reports; no workflow runs the tests today). 40–80 h.
 2. **Open Premiere's `.prproj`**, the beta blocker. 60–120 h.
-3. **The rest of camera media without hardware** (interlaced H.264, H.264 and HEVC 4:4:4; #626). H.264 High 10 / 4:2:2 and HEVC 4:2:2 decode in software since AutoCut 0.14 (AV95, AV99–AV100). 25–45 h.
+3. **The rest of camera media without hardware** (interlaced and 4:4:4 H.264; #626). H.264 High 10 / 4:2:2 and HEVC up to 4:4:4 12-bit decode in software (AutoCut AV95, AV99–AV107). 25–45 h.
 4. **Measure fidelity against Premiere** and add `cargo xtask parity`. 50–90 h.
 5. **Real-world media corpus and workflow acceptance tests.** 40–70 h.
 6. **Hardware acceleration, continued** (#30): zero-copy upload, more effects on the GPU, Quick Sync / AMD encoders, VideoToolbox Main 10. 120–200 h.
