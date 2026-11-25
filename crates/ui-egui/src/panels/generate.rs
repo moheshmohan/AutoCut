@@ -436,6 +436,10 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
                 if let Some(licence) = tool["license"].as_str().filter(|l| !l.is_empty()) {
                     dim(ui, licence);
                 }
+                // what the tool's entry says it can do (a request it cannot is refused before it runs)
+                if let Some(can) = tool["can"].as_str().filter(|c| !c.is_empty()) {
+                    dim(ui, &format!("What it can do: {can}."));
+                }
                 if tool["installed"] != true {
                     ui.label(egui::RichText::new("This tool's program is not on this computer.").color(t.text).size(11.0));
                 }

@@ -35,6 +35,7 @@ use filmcraft_project::{ClipId, ItemId, ItemKind, MediaRef, TrackItem};
 use filmcraft_time::{Tick, TimeRange};
 
 use crate::commands::{CommandSpec, always, bad, bool_p, checked_u32_p, f64_p, str_p, time_p, u64_p};
+use crate::generate_caps::Ask;
 use crate::generate_run::{self as run, Kind, Provider, Vars};
 use crate::{EngineError, Result, Session};
 
@@ -198,6 +199,8 @@ fn provider_json(p: &Provider) -> Value {
         "restyles": p.restyles.iter().map(|(name, w)| json!({
             "name": name, "about": w.about, "license": w.license, "installed": run::restyle_installed(p, name),
         })).collect::<Vec<_>>(),
+        // what the tool can do, as its entry says (null: not said, nothing checked) and in words
+        "capabilities": p.capabilities, "can": p.capabilities.as_ref().map(|c| c.summary()),
     })
 }
 
@@ -348,11 +351,15 @@ fn reference(s: &Session, cmd: &str, v: &Value) -> Result<String> {
 fn references_p(s: &Session, cmd: &str, p: &Value, provider: &Provider) -> Result<Vec<String>> {
     let Some(v) = p.get("references").filter(|v| !v.is_null()) else { return Ok(Vec::new()) };
     let list = v.as_array().ok_or_else(|| bad(cmd, "`references` must be a list"))?;
-    let most = provider.max_references.map_or(run::MAX_REFERENCES, |m| (m as usize).min(run::MAX_REFERENCES));
+    let most = run::max_references(provider);
     if list.len() > most {
-        return Err(bad(cmd, format!("{} takes at most {most} references", provider.name)));
+        let none = provider.capabilities.as_ref().and_then(|c| c.references) == Some(0);
+        return Err(bad(
+            cmd,
+            if none { format!("{} takes no reference pictures", provider.name) } else { format!("{} takes at most {most} references", provider.name) },
+        ));
     }
-    if !list.is_empty() && provider.per_reference.is_empty() {
+    if !list.is_empty() && !run::takes_references(provider) {
         return Err(bad(cmd, format!("{} takes no reference pictures", provider.name)));
     }
     list.iter().map(|x| reference(s, cmd, x)).collect()
@@ -797,16 +804,19 @@ fn image(s: &mut Session, p: &Value) -> Result<Value> {
     let cutter = cut_after(cmd, &prov, transparent)?;
     let dir = crate::voiceover::generated_dir(s, p, FOLDER)?;
     let frame_at = time_p(s, p, "frame").or_else(|| bool_p(p, "fromPlayhead").unwrap_or(false).then(|| s.playhead()));
+    if frame_at.is_some() && !run::takes_references(&prov) {
+        return Err(bad(cmd, format!("{} takes no reference pictures", prov.name)));
+    }
+    // what the tool can do, checked before anything is written or run
+    let (w, h) = run::size_for(&prov, want, aspect(s)).map_err(|e| bad(cmd, e))?;
+    let wants = Ask { references: refs.len() + usize::from(frame_at.is_some()), transparent, negative: negative.is_some(), steps, ..Default::default() };
+    run::ask(&prov, &wants).map_err(|e| bad(cmd, e))?;
     let mut taken = Vec::new();
     if let Some(t) = frame_at {
-        if prov.per_reference.is_empty() {
-            return Err(bad(cmd, format!("{} takes no reference pictures", prov.name)));
-        }
         let frame = frame_png(s, cmd, t, &dir, &taken)?;
         taken.push(frame.clone());
         refs.insert(0, frame);
     }
-    let (w, h) = run::size(&prov, want, aspect(s));
     let seed = seed_p(s, p);
     let import = bool_p(p, "import").unwrap_or(true);
     let placing = import && bool_p(p, "place").unwrap_or(false) && s.state.active_sequence.is_some();
@@ -860,6 +870,14 @@ fn start_image(s: &mut Session, cmd: &str, p: &Value, dir: &str) -> Result<Optio
     }
 }
 
+/// How long a clip is to be: the seconds, and whether the request named them (a length taken
+/// from the timeline, a gap's, is fitted to what the tool makes instead of refused).
+#[derive(Clone, Copy)]
+struct Length {
+    seconds: f64,
+    asked: bool,
+}
+
 /// A video step and what it makes: `seconds` wanted, from `image` when given.
 #[allow(clippy::too_many_arguments)]
 fn video_step(
@@ -868,7 +886,7 @@ fn video_step(
     prov: &Provider,
     prompt: &str,
     (image, last_image): (Option<String>, Option<String>),
-    seconds: f64,
+    length: Length,
     want: (Option<u32>, Option<u32>),
     seed: u64,
     dir: &str,
@@ -877,8 +895,10 @@ fn video_step(
     if last_image.is_some() && !prov.optional.contains_key("lastImage") {
         return Err(bad(cmd, format!("{} cannot end a clip on a given picture (it has no `lastImage` option)", prov.name)));
     }
-    let (frames, fps) = run::frames(prov, run::seconds(prov, seconds, 4.0));
-    let (w, h) = run::size(prov, want, aspect(s));
+    run::ask(prov, &Ask { first_frame: image.is_some(), last_frame: last_image.is_some(), ..Default::default() }).map_err(|e| bad(cmd, e))?;
+    let secs = run::seconds_for(prov, length.seconds, length.asked, 4.0).map_err(|e| bad(cmd, e))?;
+    let (frames, fps) = run::frames(prov, secs);
+    let (w, h) = run::size_for(prov, want, aspect(s)).map_err(|e| bad(cmd, e))?;
     let out = unique_path(s, dir, "Generated Video", &ext(prov), taken)?;
     let made = f64::from(frames) / fps;
     let vars = Vars {
@@ -903,9 +923,11 @@ fn video(s: &mut Session, p: &Value) -> Result<Value> {
     poll(s);
     let prov = provider_for(cmd, p, Kind::Video, "provider")?;
     let prompt = prompt_p(cmd, p, "prompt")?;
-    let seconds = seconds_p(cmd, p, 60.0)?.unwrap_or(4.0);
+    let asked = seconds_p(cmd, p, 60.0)?;
+    let wanted = Length { seconds: asked.unwrap_or(4.0), asked: asked.is_some() };
     let want = (checked_u32_p(p, "width", cmd)?, checked_u32_p(p, "height", cmd)?);
     let count = variations_p(cmd, p)?;
+    run::ask(&prov, &Ask { audio: bool_p(p, "audio").unwrap_or(false), ..Default::default() }).map_err(|e| bad(cmd, e))?;
     let dir = crate::voiceover::generated_dir(s, p, FOLDER)?;
     let image = start_image(s, cmd, p, &dir)?;
     let last = match p.get("lastImage") {
@@ -918,7 +940,7 @@ fn video(s: &mut Session, p: &Value) -> Result<Value> {
     let (mut steps, mut lands, mut taken, mut first, mut length) = (Vec::new(), Vec::new(), Vec::new(), None, 0.0);
     for k in 0..count {
         let this = seed.wrapping_add(k);
-        let (step, made, (w, h)) = video_step(s, cmd, &prov, &prompt, (image.clone(), last.clone()), seconds, want, this, &dir, &taken)?;
+        let (step, made, (w, h)) = video_step(s, cmd, &prov, &prompt, (image.clone(), last.clone()), wanted, want, this, &dir, &taken)?;
         taken.push(step.out.clone());
         length = made;
         let place =
@@ -952,8 +974,9 @@ fn sound(s: &mut Session, p: &Value) -> Result<Value> {
         Some(id) => Some(clip_span(s, id).ok_or_else(|| bad(cmd, format!("there is no clip {id} in the open sequence")))?),
         None => None,
     };
-    let asked = seconds_p(cmd, p, 600.0)?.or(under.map(|(_, d)| d.seconds())).unwrap_or(if kind == Kind::Sfx { 5.0 } else { 20.0 });
-    let seconds = run::seconds(&prov, asked, 5.0);
+    let named = seconds_p(cmd, p, 600.0)?;
+    let asked = named.or(under.map(|(_, d)| d.seconds())).unwrap_or(if kind == Kind::Sfx { 5.0 } else { 20.0 });
+    let seconds = run::seconds_for(&prov, asked, named.is_some(), 5.0).map_err(|e| bad(cmd, e))?;
     let dir = crate::voiceover::generated_dir(s, p, FOLDER)?;
     let seed = seed_p(s, p);
     let placing = bool_p(p, "place").unwrap_or(true) && s.state.active_sequence.is_some();
@@ -996,7 +1019,7 @@ struct CarryOn {
 #[allow(clippy::too_many_arguments)]
 fn carry_on(s: &mut Session, cmd: &str, prov: &Provider, prompt: &str, at: Tick, seconds: f64, seed: u64, dir: &str, taken: &[String]) -> Result<CarryOn> {
     let ext_prov = run::extender(prov).ok_or_else(|| bad(cmd, format!("{} cannot carry a shot on (it has no `extendCommand`)", prov.name)))?;
-    let fps = prov.fps.filter(|f| f.is_finite() && *f >= 1.0 && *f <= 240.0).unwrap_or(24.0);
+    let fps = run::rate(prov);
     let carry = run::carry_frames(prov);
     let carried = f64::from(carry) / fps;
     let from = at.seconds() - carried;
@@ -1022,8 +1045,9 @@ fn carry_on(s: &mut Session, cmd: &str, prov: &Provider, prompt: &str, at: Tick,
     }
     // new frames in the counts the tool takes (LTX: eights)
     let step = prov.frames_step.unwrap_or(1).clamp(1, 1024);
-    let most = prov.max_seconds.filter(|m| m.is_finite() && *m > 0.0).unwrap_or(10.0);
-    let want = (seconds.clamp(0.1, most) * fps).round().clamp(1.0, 100_000.0) as u32;
+    let most = run::longest(prov, 10.0);
+    // (never a crossing clamp: a tool may say it makes less than a tenth of a second)
+    let want = (seconds.max(0.1_f64.min(most)).min(most) * fps).round().clamp(1.0, 100_000.0) as u32;
     let frames = want.div_ceil(step).max(1).saturating_mul(step);
     let made = f64::from(frames) / fps;
     let mut taken2 = taken.to_vec();
@@ -1057,7 +1081,7 @@ fn extend(s: &mut Session, p: &Value) -> Result<Value> {
     let seconds = match p.get("seconds") {
         None | Some(Value::Null) => 2.0,
         Some(v) => match v.as_f64() {
-            Some(x) if x.is_finite() && (0.3..=10.0).contains(&x) => x,
+            Some(x) if x.is_finite() && (0.3..=10.0).contains(&x) => run::seconds_for(&prov, x, true, 2.0).map(|_| x).map_err(|e| bad(cmd, e))?,
             _ => return Err(bad(cmd, "`seconds` must be 0.3 to 10")),
         },
     };
@@ -1195,19 +1219,20 @@ fn restyle(s: &mut Session, p: &Value) -> Result<Value> {
         (None, Some(look)) => {
             // the picture tool changes the first frame, and the new clip starts on its picture
             let iprov = provider_for(cmd, p, Kind::Image, "imageProvider")?;
-            if iprov.per_reference.is_empty() {
+            if !run::takes_references(&iprov) {
                 return Err(bad(cmd, format!("{} cannot change a picture (it takes no references)", iprov.name)));
             }
             let frame = frame_png(s, cmd, at, &dir, &taken)?;
             taken.push(frame.clone());
             let mut refs = vec![frame];
             let extra = references_p(s, cmd, p, &iprov)?;
-            let most = iprov.max_references.map_or(run::MAX_REFERENCES, |m| (m as usize).min(run::MAX_REFERENCES));
+            let most = run::max_references(&iprov);
             if extra.len() + 1 > most {
                 return Err(bad(cmd, format!("{} takes at most {most} references, the frame included", iprov.name)));
             }
             refs.extend(extra);
-            let size = run::size(&iprov, (None, None), aspect(s));
+            run::ask(&iprov, &Ask { references: refs.len(), ..Default::default() }).map_err(|e| bad(cmd, e))?;
+            let size = run::size_for(&iprov, (None, None), aspect(s)).map_err(|e| bad(cmd, e))?;
             let first = unique_path(s, &dir, "Restyled Frame", &ext(&iprov), &taken)?;
             taken.push(first.clone());
             let q = Picture { prov: &iprov, prompt: &look, negative: None, refs, size, seed, steps: None, strength: None, transparent: false };
@@ -1332,6 +1357,8 @@ fn read_asset_list(cmd: &str, _: &str) -> Result<AssetList> {
 
 fn assets(s: &mut Session, p: &Value) -> Result<Value> {
     let cmd = "generate.assets";
+    // a refusal says which asset of the list it is about
+    let of_asset = |name: &str, e: String| bad(cmd, format!("{name}: {e}"));
     poll(s);
     let manifest = str_p(p, "manifest").ok_or_else(|| bad(cmd, "`manifest` is needed: the absolute path of an assets.json"))?;
     let mpath = std::path::Path::new(manifest);
@@ -1399,27 +1426,29 @@ fn assets(s: &mut Session, p: &Value) -> Result<Value> {
             let want = (a.width.or(list.width), a.height.or(list.height));
             let note = match kind {
                 Kind::Image => {
-                    let most = prov.max_references.map_or(run::MAX_REFERENCES, |m| (m as usize).min(run::MAX_REFERENCES));
-                    if a.references.len() > most || (!a.references.is_empty() && prov.per_reference.is_empty()) {
-                        return Err(bad(
-                            cmd,
-                            format!("{}: {} takes at most {} references", a.name, prov.name, if prov.per_reference.is_empty() { 0 } else { most }),
-                        ));
+                    let most = run::max_references(&prov);
+                    let takes = run::takes_references(&prov);
+                    if a.references.len() > most || (!a.references.is_empty() && !takes) {
+                        return Err(bad(cmd, format!("{}: {} takes at most {} references", a.name, prov.name, if takes { most } else { 0 })));
                     }
                     let refs = a.references.iter().map(|r| resolve(r, &known)).collect::<Result<Vec<_>>>()?;
-                    let size = run::size(&prov, want, shape);
+                    let negative = a.negative.clone().filter(|n| n.chars().count() <= MAX_PROMPT && !n.contains('\0'));
+                    let wants = Ask { references: refs.len(), transparent: a.transparent, negative: negative.is_some(), ..Default::default() };
+                    run::ask(&prov, &wants).map_err(|e| of_asset(&a.name, e))?;
+                    let size = run::size_for(&prov, want, shape).map_err(|e| of_asset(&a.name, e))?;
                     let cutter = cut_after(cmd, &prov, a.transparent)?
                         .map(|c| (c, std::path::Path::new(&dir).join(format!("{} source.{}", a.name, ext(&prov))).to_string_lossy().into_owned()));
-                    let negative = a.negative.clone().filter(|n| n.chars().count() <= MAX_PROMPT && !n.contains('\0'));
                     let q = Picture { prov: &prov, prompt: &prompt, negative, refs, size, seed, steps: None, strength: None, transparent: a.transparent };
                     steps.extend(picture_steps(cmd, &q, &out, cutter)?);
                     format!("{}×{}", size.0, size.1)
                 }
                 Kind::Video => {
                     let image = a.image.as_deref().map(|r| resolve(r, &known)).transpose()?;
-                    let secs = a.seconds.filter(|x| x.is_finite() && *x > 0.0).unwrap_or(4.0);
-                    let (frames, fps) = run::frames(&prov, run::seconds(&prov, secs, 4.0));
-                    let (w, h) = run::size(&prov, want, shape);
+                    run::ask(&prov, &Ask { first_frame: image.is_some(), ..Default::default() }).map_err(|e| of_asset(&a.name, e))?;
+                    let named = a.seconds.filter(|x| x.is_finite() && *x > 0.0);
+                    let secs = run::seconds_for(&prov, named.unwrap_or(4.0), named.is_some(), 4.0).map_err(|e| of_asset(&a.name, e))?;
+                    let (frames, fps) = run::frames(&prov, secs);
+                    let (w, h) = run::size_for(&prov, want, shape).map_err(|e| of_asset(&a.name, e))?;
                     let made = f64::from(frames) / fps;
                     let vars = Vars {
                         out: out.clone(),
@@ -1438,7 +1467,9 @@ fn assets(s: &mut Session, p: &Value) -> Result<Value> {
                     format!("{made:.1} s · {w}×{h}")
                 }
                 Kind::Sfx | Kind::Music => {
-                    let secs = run::seconds(&prov, a.seconds.filter(|x| x.is_finite() && *x > 0.0).unwrap_or(if kind == Kind::Sfx { 5.0 } else { 20.0 }), 5.0);
+                    let named = a.seconds.filter(|x| x.is_finite() && *x > 0.0);
+                    let secs = run::seconds_for(&prov, named.unwrap_or(if kind == Kind::Sfx { 5.0 } else { 20.0 }), named.is_some(), 5.0)
+                        .map_err(|e| of_asset(&a.name, e))?;
                     let vars = Vars { out: out.clone(), prompt: prompt.clone(), seed, seconds: Some(secs), ..Default::default() };
                     let args = run::argv(&prov, &vars).map_err(|e| bad(cmd, e))?;
                     steps.push(Step { provider: prov.clone(), args, out: out.clone() });
@@ -1538,9 +1569,13 @@ fn fill_gap(s: &mut Session, p: &Value) -> Result<Value> {
     if !matches!(from, "before" | "after" | "both" | "motion" | "prompt") {
         return Err(bad(cmd, format!("unknown `from` `{from}` (before, after, both, motion, prompt)")));
     }
-    let ends = prov.optional.contains_key("lastImage");
+    let ends = run::ends_on_picture(&prov);
     if from == "both" && !ends {
-        return Err(bad(cmd, format!("{} cannot end a clip on a given picture (it has no `lastImage` option): use `from: \"before\"`", prov.name)));
+        let why = if prov.optional.contains_key("lastImage") { "its capabilities say lastFrame: false" } else { "it has no `lastImage` option" };
+        return Err(bad(cmd, format!("{} cannot end a clip on a given picture ({why}): use `from: \"before\"`", prov.name)));
+    }
+    if !run::starts_on_picture(&prov) && (matches!(from, "before" | "both") || (from == "after" && !ends)) {
+        return Err(bad(cmd, format!("{} cannot start a clip on a given picture (its capabilities say firstFrame: false): use `from: \"prompt\"`", prov.name)));
     }
     if from == "motion" && prov.extend_command.is_empty() {
         return Err(bad(cmd, format!("{} cannot carry a shot on (it has no `extendCommand`): use `from: \"before\"`", prov.name)));
@@ -1608,7 +1643,8 @@ fn fill_gap(s: &mut Session, p: &Value) -> Result<Value> {
             _ if lead_in => LEAD_IN.to_string(),
             _ => CONTINUE.to_string(),
         });
-        let (step, made, (w, h)) = video_step(s, cmd, &prov, &prompt, (image, last), g.duration.seconds(), (None, None), seed, &dir, &taken)?;
+        let length = Length { seconds: g.duration.seconds(), asked: false };
+        let (step, made, (w, h)) = video_step(s, cmd, &prov, &prompt, (image, last), length, (None, None), seed, &dir, &taken)?;
         taken.push(step.out.clone());
         lands.push(land_of(&prov, &step.out, &prompt, seed, &format!("{made:.1} s · {w}×{h} · fills a gap"), true, Some(place)));
         about.push(json!({"start": g.start.0, "duration": g.duration.0, "seconds": made, "seed": seed}));
@@ -1631,7 +1667,7 @@ fn augment(s: &mut Session, p: &Value) -> Result<Value> {
     let cmd = "generate.augment";
     poll(s);
     let prov = provider_for(cmd, p, Kind::Image, "provider")?;
-    if prov.per_reference.is_empty() {
+    if !run::takes_references(&prov) {
         return Err(bad(cmd, format!("{} cannot change a picture (it takes no references)", prov.name)));
     }
     let instruction = prompt_p(cmd, p, "instruction")?;
@@ -1646,12 +1682,13 @@ fn augment(s: &mut Session, p: &Value) -> Result<Value> {
     taken.push(frame.clone());
     let mut refs = vec![frame];
     let extra = references_p(s, cmd, p, &prov)?;
-    let most = prov.max_references.map_or(run::MAX_REFERENCES, |m| (m as usize).min(run::MAX_REFERENCES));
+    let most = run::max_references(&prov);
     if extra.len() + 1 > most {
         return Err(bad(cmd, format!("{} takes at most {most} references, the frame included", prov.name)));
     }
     refs.extend(extra);
-    let (w, h) = run::size(&prov, (None, None), aspect(s));
+    run::ask(&prov, &Ask { references: refs.len(), ..Default::default() }).map_err(|e| bad(cmd, e))?;
+    let (w, h) = run::size_for(&prov, (None, None), aspect(s)).map_err(|e| bad(cmd, e))?;
     let out = unique_path(s, &dir, "Augmented Frame", &ext(&prov), &taken)?;
     taken.push(out.clone());
     let seed = seed_p(s, p);
@@ -1686,7 +1723,8 @@ fn augment(s: &mut Session, p: &Value) -> Result<Value> {
         Some(vp) => {
             let motion = text_p(cmd, p, "motion")?.unwrap_or_else(|| instruction.clone());
             let secs = wanted.unwrap_or_else(|| left.seconds().clamp(1.0, 4.0));
-            let (step, made, _) = video_step(s, cmd, &vp, &motion, (Some(out.clone()), None), secs, (None, None), seed, &dir, &taken)?;
+            let length = Length { seconds: secs, asked: wanted.is_some() };
+            let (step, made, _) = video_step(s, cmd, &vp, &motion, (Some(out.clone()), None), length, (None, None), seed, &dir, &taken)?;
             lands.push(land_of(&prov, &out, &instruction, seed, &format!("{w}×{h} · augments a frame"), true, None));
             lands.push(land_of(&vp, &step.out, &motion, seed, &format!("{made:.1} s · from the augmented frame"), true, place.then(|| over(None, None))));
             steps.push(step);

@@ -19,6 +19,8 @@ use std::path::PathBuf;
 
 use serde::Deserialize;
 
+use crate::generate_caps::{self as caps, Ask, Capabilities};
+
 /// The most a provider list may weigh.
 pub const MANIFEST_MAX: u64 = 256 * 1024;
 const MAX_PROVIDERS: usize = 32;
@@ -161,6 +163,10 @@ pub struct Provider {
     /// The longest stretch made again in one go (default 5 s, never more than `maxSeconds`).
     #[serde(default)]
     pub restyle_max_seconds: Option<f64>,
+    /// What the tool can do (sizes, lengths, frame counts, inputs): a request it cannot do is
+    /// refused before it runs ([`crate::generate_caps`]). Without it nothing is checked there.
+    #[serde(default)]
+    pub capabilities: Option<Capabilities>,
     #[serde(default)]
     pub license: String,
     /// What the model's licence asks to be shown where it is used.
@@ -245,6 +251,11 @@ fn number(v: f64) -> String {
     let s = format!("{v:.3}");
     let s = s.trim_end_matches('0').trim_end_matches('.');
     if s.is_empty() { "0".into() } else { s.into() }
+}
+
+/// A number as a placeholder writes it (at most three decimals, no trailing zeros).
+pub(crate) fn number_text(v: f64) -> String {
+    number(v)
 }
 
 impl Vars {
@@ -384,24 +395,159 @@ pub fn size(p: &Provider, want: (Option<u32>, Option<u32>), aspect: (u32, u32)) 
     (snap(w), snap(h))
 }
 
+/// The size a request gets: [`size`], then what the tool's capabilities allow. A size the
+/// request named that the tool cannot make is refused (saying what it makes and the nearest it
+/// allows); a size it left open becomes the nearest allowed one.
+pub fn size_for(p: &Provider, want: (Option<u32>, Option<u32>), aspect: (u32, u32)) -> Result<(u32, u32), String> {
+    let computed = size(p, want, aspect);
+    match &p.capabilities {
+        Some(c) => {
+            let grid = (p.multiple_of.unwrap_or(16).clamp(1, 256), p.max_side.unwrap_or(4096).clamp(64, 16_384));
+            caps::fit_size(&p.name, c, computed, want, grid)
+        }
+        None => Ok(computed),
+    }
+}
+
+/// The frame rate a video tool makes: its `fps`, else the first its capabilities list, else 24.
+pub fn rate(p: &Provider) -> f64 {
+    let ok = |f: &f64| f.is_finite() && *f >= 1.0 && *f <= 240.0;
+    p.fps.filter(ok).or_else(|| p.capabilities.as_ref().and_then(|c| c.fps.as_ref()).and_then(|r| r.first().copied()).filter(ok)).unwrap_or(24.0)
+}
+
+/// `x` within `lo..=hi` (`hi` wins when they cross: never a panic).
+fn within(x: f64, lo: f64, hi: f64) -> f64 {
+    x.max(lo.min(hi)).min(hi)
+}
+
+/// The longest a tool makes in one go: its `maxSeconds`, its capabilities' length, the shorter of
+/// the two, else `default`.
+pub fn longest(p: &Provider, default: f64) -> f64 {
+    let own = p.max_seconds.filter(|m| m.is_finite() && *m > 0.0);
+    let cap = p.capabilities.as_ref().and_then(|c| caps::length_range(c, rate(p))).map(|(_, hi)| hi);
+    match (own, cap) {
+        (Some(a), Some(b)) => a.min(b),
+        (Some(a), None) => a,
+        (None, Some(b)) => b,
+        (None, None) => default,
+    }
+}
+
+/// The shortest a tool makes: a tenth of a second, or more when its capabilities say so.
+fn shortest(p: &Provider) -> f64 {
+    p.capabilities.as_ref().and_then(|c| caps::length_range(c, rate(p))).map_or(0.1, |(lo, _)| lo.max(0.1))
+}
+
 /// The frame count and rate for `seconds` of video: a count the provider takes, at least the
 /// wanted length where its longest allows.
 pub fn frames(p: &Provider, seconds: f64) -> (u32, f64) {
-    let fps = p.fps.filter(|f| f.is_finite() && *f >= 1.0 && *f <= 240.0).unwrap_or(24.0);
-    let most = p.max_seconds.filter(|m| m.is_finite() && *m > 0.0).unwrap_or(10.0);
-    let secs = if seconds.is_finite() { seconds.clamp(0.1, most) } else { most.min(4.0) };
+    let fps = rate(p);
+    let most = longest(p, 10.0);
+    let secs = if seconds.is_finite() { within(seconds, 0.1, most) } else { most.min(4.0) };
     let want = (secs * fps).round().clamp(1.0, 100_000.0) as u32;
-    let step = p.frames_step.unwrap_or(1).clamp(1, 1024);
-    let off = p.frames_offset.unwrap_or(0) % step;
+    let counts = p.capabilities.as_ref().and_then(|c| c.frames);
+    let (step, off) = match counts {
+        Some(c) => (c.step(), c.offset()),
+        None => {
+            let step = p.frames_step.unwrap_or(1).clamp(1, 1024);
+            (step, p.frames_offset.unwrap_or(0) % step)
+        }
+    };
     let k = want.saturating_sub(off).div_ceil(step).max(1);
-    (k.saturating_mul(step).saturating_add(off), fps)
+    let n = k.saturating_mul(step).saturating_add(off);
+    (counts.map_or(n, |c| c.fit(n)), fps)
 }
 
 /// The length a provider can make for a wanted one (seconds).
 pub fn seconds(p: &Provider, want: f64, default: f64) -> f64 {
-    let most = p.max_seconds.filter(|m| m.is_finite() && *m > 0.0).unwrap_or(if p.kind == Kind::Video { 10.0 } else { 180.0 });
+    let most = longest(p, if p.kind == Kind::Video { 10.0 } else { 180.0 });
     let w = if want.is_finite() && want > 0.0 { want } else { default };
-    w.clamp(0.1, most)
+    within(w, shortest(p), most)
+}
+
+/// [`seconds`] for a length the request named (`asked`) or one taken from the timeline (a gap,
+/// a clip): a named length the tool's capabilities do not allow is refused, saying what it makes.
+pub fn seconds_for(p: &Provider, want: f64, asked: bool, default: f64) -> Result<f64, String> {
+    if asked && let Some(c) = &p.capabilities {
+        caps::check_length(&p.name, c, want, rate(p))?;
+    }
+    Ok(seconds(p, want, default))
+}
+
+/// Whether a request's other wishes (a first or last picture, references, transparency, a
+/// negative prompt, steps, sound) are ones the tool's capabilities allow.
+pub fn ask(p: &Provider, a: &Ask) -> Result<(), String> {
+    match &p.capabilities {
+        Some(c) => caps::check(&p.name, c, a),
+        None => Ok(()),
+    }
+}
+
+/// Whether the tool takes reference pictures at all.
+pub fn takes_references(p: &Provider) -> bool {
+    !p.per_reference.is_empty()
+}
+
+/// The most reference pictures a request may give the tool.
+pub fn max_references(p: &Provider) -> usize {
+    let own = p.max_references.map_or(MAX_REFERENCES, |m| (m as usize).min(MAX_REFERENCES));
+    p.capabilities.as_ref().and_then(|c| c.references).map_or(own, |n| own.min(n as usize))
+}
+
+/// Whether a video tool can start a clip on a given picture (unless its capabilities say not).
+pub fn starts_on_picture(p: &Provider) -> bool {
+    p.capabilities.as_ref().and_then(|c| c.first_frame) != Some(false)
+}
+
+/// Whether a video tool can end a clip on a given picture.
+pub fn ends_on_picture(p: &Provider) -> bool {
+    p.optional.contains_key("lastImage") && p.capabilities.as_ref().and_then(|c| c.last_frame) != Some(false)
+}
+
+/// Whether any argument of the tool's command (its optional groups and per-reference arguments
+/// included) takes the placeholder `name`, or an optional group is keyed by it.
+fn uses(p: &Provider, name: &str) -> bool {
+    let tag = format!("{{{name}}}");
+    p.optional.contains_key(name) || p.command.iter().chain(&p.per_reference).chain(p.optional.values().flatten()).any(|a| a.contains(&tag))
+}
+
+/// A tool's capabilities checked on their own and against what its entry can do.
+fn check_capabilities(p: &Provider) -> Result<(), String> {
+    let Some(c) = &p.capabilities else { return Ok(()) };
+    c.validate(p.kind)?;
+    let claim = |what: &str, needs: &str| Err(format!("`capabilities.{what}` is true, but {needs}"));
+    if c.first_frame == Some(true) && !uses(p, "image") {
+        return claim("firstFrame", "nothing in `command` or `optional` takes {image}");
+    }
+    if c.last_frame == Some(true) && !uses(p, "lastImage") {
+        return claim("lastFrame", "nothing in `command` or `optional` takes {lastImage}");
+    }
+    if c.references.is_some_and(|n| n > 0) && !takes_references(p) {
+        return Err("`capabilities.references` is more than 0, but there is no `perReference`".into());
+    }
+    if c.transparent == Some(true) && !p.optional.contains_key("transparent") && p.cutout_command.is_empty() {
+        return claim("transparent", "there is no `transparent` option and no `cutoutCommand`");
+    }
+    if c.negative == Some(true) && !uses(p, "negative") {
+        return claim("negative", "nothing in `command` or `optional` takes {negative}");
+    }
+    if let (Some(own), Some(list)) = (p.fps, &c.fps)
+        && !list.iter().any(|f| (f - own).abs() < 1.0e-6)
+    {
+        return Err(format!("`fps` {} is not one of `capabilities.fps`", number(own)));
+    }
+    if let Some(f) = c.frames {
+        let step = p.frames_step.map(|s| s.clamp(1, 1024));
+        if step.is_some_and(|s| s != f.step()) || p.frames_offset.is_some_and(|o| o % f.step() != f.offset()) {
+            return Err("`framesStep` / `framesOffset` disagree with `capabilities.frames`".into());
+        }
+    }
+    if let (Some(own), Some(lo)) = (p.max_seconds, c.seconds.and_then(|s| s.min))
+        && own < lo
+    {
+        return Err("`maxSeconds` is shorter than `capabilities.seconds.min`".into());
+    }
+    Ok(())
 }
 
 fn check(p: &Provider) -> Result<(), String> {
@@ -510,7 +656,7 @@ fn check(p: &Provider) -> Result<(), String> {
             return err(format!("`{name}` must be a positive number"));
         }
     }
-    Ok(())
+    check_capabilities(p).or_else(err)
 }
 
 /// A composition tool: at most its program (an absolute path, no placeholders), nothing a
@@ -527,9 +673,10 @@ fn check_composition(p: &Provider) -> Result<(), String> {
         || !p.cutout_command.is_empty()
         || !p.extend_command.is_empty()
         || !p.restyle_command.is_empty()
-        || !p.restyles.is_empty();
+        || !p.restyles.is_empty()
+        || p.capabilities.is_some();
     if generation_only {
-        return err("it takes no generation options (perReference, optional, cutoutCommand, extendCommand, restyleCommand, restyles)");
+        return err("it takes no generation options (perReference, optional, cutoutCommand, extendCommand, restyleCommand, restyles, capabilities)");
     }
     if p.env.len() > 64 || p.env.iter().any(|(k, v)| k.is_empty() || k.len() > 128 || k.contains(['=', '\0']) || v.len() > MAX_ARG_LEN || v.contains('\0')) {
         return err("`env` has too many or malformed names");
@@ -656,7 +803,7 @@ pub struct Stretch {
 /// every new frame shows the moment of the old one; a longer stretch is covered from its start
 /// as far as the tool goes. `None` when it is shorter than the fewest frames the tool makes.
 pub fn restyle_stretch(p: &Provider, seconds: f64) -> Option<Stretch> {
-    let fps = p.fps.filter(|f| f.is_finite() && *f >= 1.0 && *f <= 240.0).unwrap_or(24.0);
+    let fps = rate(p);
     let cap = p.max_seconds.filter(|m| m.is_finite() && *m > 0.0).unwrap_or(10.0);
     let most = p.restyle_max_seconds.filter(|m| m.is_finite() && *m > 0.0).unwrap_or(5.0).min(cap);
     if !seconds.is_finite() || seconds <= 0.0 {
@@ -1120,5 +1267,59 @@ mod tests {
         let gone = one("image", r#"["/nonexistent/gen","{out}"]"#, "");
         assert!(run(&gone, &argv(&gone, &v2).unwrap(), &out2, &AtomicBool::new(false), &mut |_, _| {}).unwrap_err().contains("not on this computer"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `maxSeconds` under a tenth of a second made `frames` and `seconds` clamp with crossing
+    /// bounds, which panics.
+    #[test]
+    fn a_tool_that_makes_less_than_a_tenth_of_a_second_does_not_crash() {
+        let p = one("video", r#"["/bin/gen","{out}"]"#, r#","maxSeconds":0.05"#);
+        assert_eq!(frames(&p, 2.0), (1, 24.0));
+        assert_eq!(frames(&p, f64::NAN), (1, 24.0));
+        assert!((seconds(&p, 2.0, 4.0) - 0.05).abs() < 1e-12);
+        assert!((seconds(&p, -1.0, f64::NAN) - 0.05).abs() < 1e-12);
+    }
+
+    #[test]
+    fn capabilities_must_match_what_the_entry_can_do() {
+        let wrap = |body: &str| format!(r#"{{"providers":[{body}]}}"#);
+        for (kind, command, extra, why) in [
+            ("video", r#"["/bin/gen","{out}"]"#, r#","capabilities":{"firstFrame":true}"#, "takes {image}"),
+            ("video", r#"["/bin/gen","{out}"]"#, r#","capabilities":{"lastFrame":true}"#, "takes {lastImage}"),
+            ("image", r#"["/bin/gen","{out}"]"#, r#","capabilities":{"references":2}"#, "perReference"),
+            ("image", r#"["/bin/gen","{out}"]"#, r#","capabilities":{"transparent":true}"#, "cutoutCommand"),
+            ("image", r#"["/bin/gen","{out}"]"#, r#","capabilities":{"negative":true}"#, "takes {negative}"),
+            ("video", r#"["/bin/gen","{out}"]"#, r#","fps":25,"capabilities":{"fps":[24,30]}"#, "not one of"),
+            ("video", r#"["/bin/gen","{out}"]"#, r#","framesStep":4,"capabilities":{"frames":{"step":8,"offset":1}}"#, "disagree"),
+            ("video", r#"["/bin/gen","{out}"]"#, r#","maxSeconds":2,"capabilities":{"seconds":{"min":3}}"#, "shorter than"),
+            ("video", r#"["/bin/gen","{out}"]"#, r#","capabilities":{"references":1}"#, "not something a video tool"),
+            ("image", r#"["/bin/gen","{out}"]"#, r#","capabilities":{"width":{"step":0}}"#, "step"),
+            ("image", r#"["/bin/gen","{out}"]"#, r#","capabilities":{"colour":true}"#, "unknown field"),
+        ] {
+            let e = parse(&wrap(&provider(kind, command, extra))).unwrap_err();
+            assert!(e.contains(why), "{extra}: {e}");
+        }
+        let e = parse(&wrap(r#"{"id":"raea","kind":"composition","name":"RAEA","capabilities":{}}"#)).unwrap_err();
+        assert!(e.contains("capabilities"), "{e}");
+        // what an entry can do, it may say; frame counts and rates then come from the block
+        let p = one(
+            "video",
+            r#"["/bin/gen","{out}","{optional}"]"#,
+            r#","optional":{"image":["--image","{image}"],"lastImage":["--last","{lastImage}"]},"capabilities":{"firstFrame":true,"lastFrame":true,"frames":{"min":9,"max":121,"step":8,"offset":1},"fps":[25]}"#,
+        );
+        assert_eq!(rate(&p), 25.0);
+        assert_eq!(frames(&p, 2.0), (57, 25.0));
+        assert_eq!(frames(&p, 30.0), (121, 25.0), "never past its most frames");
+        assert!((longest(&p, 10.0) - 121.0 / 25.0).abs() < 1e-9);
+        assert!(starts_on_picture(&p) && ends_on_picture(&p));
+        // without the block the tool is as it always was
+        let plain = one("video", r#"["/bin/gen","{out}"]"#, r#","framesStep":8,"framesOffset":1"#);
+        assert_eq!(size_for(&plain, (Some(1000), Some(1000)), (1, 1)), Ok(size(&plain, (Some(1000), Some(1000)), (1, 1))));
+        assert_eq!(seconds_for(&plain, 60.0, true, 4.0), Ok(10.0));
+        assert_eq!(frames(&plain, 4.0), (97, 24.0));
+        assert!(
+            ask(&plain, &Ask { first_frame: true, last_frame: true, references: 99, transparent: true, negative: true, steps: Some(9999), audio: true })
+                .is_ok()
+        );
     }
 }

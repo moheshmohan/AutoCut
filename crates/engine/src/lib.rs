@@ -53,6 +53,7 @@ pub mod feedback;
 pub mod fingerprint;
 pub mod follow_reid;
 pub mod generate;
+pub mod generate_caps;
 pub mod generate_run;
 pub mod graphic_templates;
 pub mod graphics;

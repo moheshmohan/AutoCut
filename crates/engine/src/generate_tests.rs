@@ -792,3 +792,77 @@ fn a_clip_is_made_again_over_itself() {
     );
     let _ = std::fs::remove_dir_all(&dir0);
 }
+
+/// The `.args` files the stand-in tools wrote under `dir` (one a run).
+fn runs_in(dir: &str) -> usize {
+    std::fs::read_dir(dir).map(|d| d.flatten().filter(|e| e.file_name().to_string_lossy().ends_with(".args")).count()).unwrap_or(0)
+}
+
+#[test]
+fn capabilities_refuse_what_a_tool_cannot_do_before_it_runs() {
+    let dir0 = std::env::temp_dir().join(format!("fc-generate-fixture-k-{}", std::process::id()));
+    std::fs::create_dir_all(&dir0).unwrap();
+    let still = dir0.join("still.png");
+    std::fs::write(&still, png(64, 36, 70)).unwrap();
+    let tone = dir0.join("tone.wav");
+    std::fs::write(&tone, wav()).unwrap();
+    let img = tool(
+        "capimg",
+        "image",
+        &still,
+        r#","--size","{width}x{height}","{references}","{optional}""#,
+        r#","perReference":["--reference","{path}"],"optional":{"negative":["--negative","{negative}"]},"maxReferences":4,"capabilities":{"sizes":[[1344,768],[1024,1024],[768,1344]],"references":1,"negative":false,"transparent":false}"#,
+    );
+    let vid = tool(
+        "capvid",
+        "video",
+        &still,
+        r#","--frames","{frames}","--size","{width}x{height}","{optional}""#,
+        r#","extension":"png","optional":{"image":["--image","{image}"]},"framesStep":8,"framesOffset":1,"capabilities":{"seconds":{"max":5},"frames":{"min":9,"max":121,"step":8,"offset":1},"fps":[24],"firstFrame":false,"audio":false,"width":{"min":256,"max":1024,"step":64},"height":{"min":256,"max":1024,"step":64}}"#,
+    );
+    let sfx = tool("capsfx", "sfx", &tone, r#","--seconds","{seconds}""#, r#","capabilities":{"seconds":{"min":1,"max":30}}"#);
+    let mut b = bench("capabilities", &[img, vid, sfx]);
+    // the listing says what each tool can do, as data and in words
+    let listed = b.s.execute("generate.providers", json!({})).unwrap();
+    let can = listed["providers"][0]["can"].as_str().unwrap();
+    assert!(can.contains("1344×768") && can.contains("1 reference picture") && can.contains("no negative prompt"), "{can}");
+    assert_eq!(listed["providers"][0]["capabilities"]["references"], 1);
+    assert!(listed["providers"][1]["can"].as_str().unwrap().contains("9 to 121 frames (8k + 1)"), "{listed}");
+    // a size left open becomes the nearest one the tool makes
+    let v = b.s.execute("generate.image", json!({"prompt": "a harbour", "dir": b.out(), "wait": true})).unwrap();
+    let (w, h) = (v["width"].as_u64().unwrap(), v["height"].as_u64().unwrap());
+    assert!([(1344, 768), (1024, 1024), (768, 1344)].contains(&(w, h)), "{v}");
+    assert!(b.args_of(made(&v, 0)["path"].as_str().unwrap()).contains(&format!("{w}x{h}")));
+    let ref_file = made(&v, 0)["path"].as_str().unwrap().to_string();
+    // what it cannot do is refused before anything runs, saying what it can
+    let runs0 = runs_in(&b.out());
+    for (cmd, p, why) in [
+        ("generate.image", json!({"prompt": "x", "width": 1000, "height": 1000}), "nearest: 1024×1024"),
+        ("generate.image", json!({"prompt": "x", "negative": "blur"}), "negative prompt"),
+        ("generate.image", json!({"prompt": "x", "transparent": true}), "transparent"),
+        ("generate.image", json!({"prompt": "x", "references": [ref_file, ref_file]}), "at most 1"),
+        ("generate.image", json!({"prompt": "x", "references": [ref_file], "fromPlayhead": true}), "this asks for 2"),
+        ("generate.video", json!({"prompt": "x", "seconds": 8}), "nearest: 5 s"),
+        ("generate.video", json!({"prompt": "x", "image": ref_file}), "start a clip on a given picture"),
+        ("generate.video", json!({"prompt": "x", "audio": true}), "own sound"),
+        ("generate.video", json!({"prompt": "x", "width": 500, "height": 300}), "steps of 64"),
+        ("generate.fillGap", json!({"provider": "capvid"}), "firstFrame: false"),
+        ("generate.sound", json!({"prompt": "x", "seconds": 45}), "nearest: 30 s"),
+        ("generate.sound", json!({"prompt": "x", "seconds": 0.5}), "nearest: 1 s"),
+    ] {
+        let e = b.s.execute(cmd, p.clone()).unwrap_err().to_string();
+        assert!(e.contains(why), "{cmd} {p}: {e}");
+    }
+    assert_eq!(runs_in(&b.out()), runs0, "no tool ran for a refused request");
+    assert!(running(&b.s).is_none());
+    // what it can do runs: the length in its frame counts, the size on its grid
+    let v = b.s.execute("generate.video", json!({"prompt": "waves", "dir": b.out(), "wait": true})).unwrap();
+    let args = b.args_of(made(&v, 0)["path"].as_str().unwrap());
+    assert!(args.contains(&"97".to_string()), "four seconds, 8k + 1: {args:?}");
+    let size = args.iter().skip_while(|a| *a != "--size").nth(1).unwrap();
+    let (sw, sh) = size.split_once('x').map(|(a, b)| (a.parse::<u32>().unwrap(), b.parse::<u32>().unwrap())).unwrap();
+    assert!(sw % 64 == 0 && sh % 64 == 0 && (256..=1024).contains(&sw) && (256..=1024).contains(&sh), "{size}");
+    let v = b.s.execute("generate.sound", json!({"prompt": "rain", "seconds": 2, "dir": b.out(), "wait": true})).unwrap();
+    assert!(b.args_of(made(&v, 0)["path"].as_str().unwrap()).contains(&"2".to_string()));
+    let _ = std::fs::remove_dir_all(&dir0);
+}
