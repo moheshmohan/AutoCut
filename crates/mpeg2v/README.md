@@ -40,7 +40,16 @@ parameters, so a random-access point without its own sequence header still decod
   Simple Profile, MPEG-1 (including D pictures). 4:4:4 is refused (no profile in use for it).
 - Pictures above 2^25 luma samples (8192 x 4096; 8K UHD at 7680 x 4320 fits, and the largest MPEG-2 level,
   High, is 1920 x 1152) are refused as `Unsupported`: the 14-bit header fields allow 16383 x 16383, which
-  would ask for gigabytes per frame from hostile input.
+  would ask for gigabytes per frame from hostile input. A caller past 8K raises the area with
+  `Decoder::set_max_picture_luma_samples` (`MAX_PICTURE_AREA` by default; `probe_with_limit` probes
+  with the same limit).
+- Memory budget: a sequence is refused when the 13 pictures the decoder may hold for it (two anchors,
+  the frame being decoded and its first-field copy, the gray stand-in and the output of one access
+  unit, 8-bit planes on the macroblock grid) do not fit `Decoder::set_memory_budget`
+  (`DECODE_MEMORY_BUDGET` by default: 4 GiB, 1 GiB on 32-bit targets). The check runs, with checked
+  arithmetic, before anything is allocated; a refused sequence counts as an error (`last_error`) and
+  does not become active, so its pictures are not decoded. At the default area every sequence fits
+  the 64-bit budget (8K 4:4:4 is 1.3 GB).
 - Frame pictures with frame and field motion compensation, dual prime, frame and field DCT;
   field pictures with field, 16x8 and dual-prime motion compensation, the second field of a
   P frame predicted from the first; open and closed GOPs; B pictures without a forward

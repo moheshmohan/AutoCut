@@ -26,6 +26,7 @@
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable))]
 
 mod bits;
+mod budget;
 pub mod headers;
 mod idct;
 mod mc;
@@ -40,9 +41,15 @@ pub use headers::{
     profile_level_name, start_codes,
 };
 
+pub use budget::DECODE_MEMORY_BUDGET;
+
 use headers::{EXTENSION, GROUP_START, PICTURE_START, SEQUENCE_END, SEQUENCE_HEADER, SLICE_MAX, SLICE_MIN};
 use mc::Frame;
 use slice::{PicParams, Target, decode_slice, slice_row};
+
+/// Pictures a decoder holds at once, for the memory budget: two anchors, the frame being
+/// decoded, the copy of its first field, the gray stand-in, and the output of one access unit.
+const BUDGET_PICTURES: u64 = 5 + MAX_OUTPUT_PICTURES_PER_ACCESS_UNIT as u64;
 
 /// One access unit must not retain an unbounded number of cropped decoded pictures.
 const MAX_OUTPUT_PICTURES_PER_ACCESS_UNIT: usize = 8;
@@ -166,11 +173,13 @@ struct Seq {
 /// MPEG-1 pel_aspect_ratio (height/width of a sample) ×10000, Table 2-D.2.
 const MPEG1_PEL_ASPECT: [u32; 15] = [0, 10000, 6735, 7031, 7615, 8055, 8437, 8935, 9157, 9815, 10255, 10695, 10950, 11575, 12015];
 
-/// Largest accepted luma area (8192 x 4096; 8K UHD is 7680 x 4320).
-const MAX_PICTURE_AREA: u64 = 1 << 25;
+/// Default largest luma area ([`Decoder::set_max_picture_luma_samples`]): 2^25 samples
+/// (8192 x 4096; 8K UHD is 7680 x 4320).
+pub const MAX_PICTURE_AREA: u64 = 1 << 25;
 
 impl Seq {
-    fn new(hdr: SequenceHeader, ext: Option<SequenceExtension>, display: Option<DisplayExtension>) -> Result<Seq> {
+    /// The sequence of these headers, if its luma area (width x height) is at most `max_area`.
+    fn new(hdr: SequenceHeader, ext: Option<SequenceExtension>, display: Option<DisplayExtension>, max_area: u64) -> Result<Seq> {
         let (w, h) = match &ext {
             Some(e) => (hdr.horizontal_size | (e.horizontal_size_extension as u32) << 12, hdr.vertical_size | (e.vertical_size_extension as u32) << 12),
             None => (hdr.horizontal_size, hdr.vertical_size),
@@ -182,8 +191,8 @@ impl Seq {
             _ => return Err(Error::Invalid("reserved chroma_format".into())),
         };
         // The 14-bit sizes allow 16383 x 16383 (gigabytes per frame, several frames and a gray reference
-        // held); no real stream exceeds 8K, so cap the area there.
-        if w > 16383 || h > 16383 || u64::from(w) * u64::from(h) > MAX_PICTURE_AREA {
+        // held); no real stream exceeds 8K, so the area is capped there unless the caller raises it.
+        if w > 16383 || h > 16383 || u64::from(w) * u64::from(h) > max_area {
             return Err(Error::Unsupported(format!("{w}x{h}")));
         }
         let progressive_sequence = ext.is_none_or(|e| e.progressive_sequence);
@@ -234,6 +243,21 @@ impl Seq {
         Ok(Seq { hdr, ext, display, info: Arc::new(info), mb_width, mb_height })
     }
 
+    /// Whether the pictures a decoder holds for this sequence ([`BUDGET_PICTURES`], 8-bit planes
+    /// on the macroblock grid) fit in `budget` bytes.
+    fn fits(&self, budget: u64) -> bool {
+        let (shift_x, shift_y) = self.shifts();
+        let shape = budget::PictureShape {
+            width: (self.mb_width as u64).saturating_mul(16),
+            height: (self.mb_height as u64).saturating_mul(16),
+            shift_x,
+            shift_y,
+            chroma_planes: 2,
+            bytes_per_sample: 1,
+        };
+        shape.fits(BUDGET_PICTURES, budget)
+    }
+
     fn shifts(&self) -> (u32, u32) {
         match self.info.chroma {
             ChromaFormat::Yuv420 => (1, 1),
@@ -255,8 +279,15 @@ fn reduce_sar((n, d): (u32, u32)) -> (u32, u32) {
     (n / g, d / g)
 }
 
-/// Parse the first sequence header (and its extensions) in `data`.
+/// Parse the first sequence header (and its extensions) in `data`: `None` without one, or when
+/// its luma area is over the default limit ([`MAX_PICTURE_AREA`]).
 pub fn probe(data: &[u8]) -> Option<SequenceInfo> {
+    probe_with_limit(data, MAX_PICTURE_AREA)
+}
+
+/// [`probe`] for a decoder whose area limit is `max_area`
+/// ([`Decoder::set_max_picture_luma_samples`]).
+pub fn probe_with_limit(data: &[u8], max_area: u64) -> Option<SequenceInfo> {
     let codes = start_codes(data);
     let mut seq: Option<(SequenceHeader, Option<SequenceExtension>, Option<DisplayExtension>)> = None;
     for (k, &(pos, code)) in codes.iter().enumerate() {
@@ -278,7 +309,7 @@ pub fn probe(data: &[u8]) -> Option<SequenceInfo> {
         }
     }
     let (h, e, d) = seq?;
-    Seq::new(h, e, d).ok().map(|s| (*s.info).clone())
+    Seq::new(h, e, d, max_area).ok().map(|s| (*s.info).clone())
 }
 
 /// What an access unit holds, without decoding it.
@@ -432,6 +463,10 @@ pub struct Decoder {
     errors: usize,
     last_error: Option<&'static str>,
     threads: bool,
+    /// Bytes the picture store may take ([`Decoder::set_memory_budget`]).
+    memory_budget: u64,
+    /// Largest luma area of a sequence ([`Decoder::set_max_picture_luma_samples`]).
+    max_area: u64,
 }
 
 impl Default for Decoder {
@@ -458,7 +493,37 @@ impl Decoder {
             errors: 0,
             last_error: None,
             threads: cfg!(feature = "threads"),
+            memory_budget: DECODE_MEMORY_BUDGET,
+            max_area: MAX_PICTURE_AREA,
         }
+    }
+
+    /// Bytes the decoded pictures may take (default [`DECODE_MEMORY_BUDGET`]: 4 GiB, 1 GiB on
+    /// 32-bit targets). A sequence whose pictures (two anchors, the frame being decoded and its
+    /// first-field copy, the gray stand-in and the output of one access unit, 8-bit planes on
+    /// the macroblock grid) do not fit is refused before anything is allocated for it: it counts
+    /// as an error ([`Decoder::last_error`]) and does not become active. Applies to the sequence
+    /// headers fed from now on.
+    pub fn set_memory_budget(&mut self, bytes: u64) {
+        self.memory_budget = bytes;
+    }
+
+    /// The picture memory budget ([`Decoder::set_memory_budget`]).
+    pub fn memory_budget(&self) -> u64 {
+        self.memory_budget
+    }
+
+    /// The largest luma area (width x height) a sequence may have (default
+    /// [`MAX_PICTURE_AREA`], 2^25: 8192 x 4096). A larger sequence is refused like one over
+    /// the memory budget; the 14-bit size fields stop at 16383 x 16383 whatever the limit.
+    /// Raise it, with the budget, for pictures past 8K.
+    pub fn set_max_picture_luma_samples(&mut self, samples: u64) {
+        self.max_area = samples;
+    }
+
+    /// The area limit ([`Decoder::set_max_picture_luma_samples`]).
+    pub fn max_picture_luma_samples(&self) -> u64 {
+        self.max_area
     }
 
     /// Decode slices on the rayon pool (default with the `threads` feature).
@@ -471,7 +536,7 @@ impl Decoder {
         self.errors
     }
 
-    /// What the most recent slice error was.
+    /// What the most recent slice error, or refused sequence, was.
     pub fn last_error(&self) -> Option<&'static str> {
         self.last_error
     }
@@ -610,7 +675,11 @@ impl Decoder {
         let intra = h.intra_matrix.unwrap_or(headers::DEFAULT_INTRA);
         let non_intra = h.non_intra_matrix.unwrap_or([16; 64]);
         self.matrices = [intra, non_intra, intra, non_intra];
-        match Seq::new(h, e, d) {
+        match Seq::new(h, e, d, self.max_area) {
+            Ok(s) if !s.fits(self.memory_budget) => {
+                self.errors += 1;
+                self.last_error = Some("sequence exceeds the decoder memory budget");
+            }
             Ok(s) => {
                 let changed = self.seq.as_ref().is_none_or(|o| o.mb_width != s.mb_width || o.mb_height != s.mb_height || o.info.chroma != s.info.chroma);
                 if changed {

@@ -172,3 +172,73 @@ fn an_mpeg1_d_picture_restarts_decoding_after_a_refused_access_unit() {
     let two = [mpeg1(&picture_of(4)), mpeg1(&picture_of(4))].concat();
     assert_eq!(dec.decode(&two, 1).unwrap().len(), 1, "the first D picture is shown when the second arrives");
 }
+
+/// 352x288 4:2:0 pads to 352x288: 152064 bytes a picture, 13 pictures held.
+#[test]
+fn sequence_over_the_memory_budget_is_refused() {
+    let need = 13 * (352 * 288 * 3 / 2);
+    for (budget, ok) in [(need, true), (need - 1, false)] {
+        let mut dec = Decoder::new();
+        dec.set_memory_budget(budget);
+        assert_eq!(dec.memory_budget(), budget);
+        let _ = dec.decode(&sequence(352, 288, 1), 0);
+        assert_eq!(dec.sequence().is_some(), ok, "budget {budget}");
+        assert_eq!(dec.errors(), usize::from(!ok));
+        assert_eq!(dec.last_error().is_some(), !ok);
+    }
+    // 8K 4:4:4 (13 pictures of about 100 MB) fits the default budget.
+    assert_eq!(Decoder::new().memory_budget(), filmcraft_mpeg2v::DECODE_MEMORY_BUDGET);
+    assert!(accepted(7680, 4320, 3));
+}
+
+/// A refused sequence allocates and decodes nothing: the pictures after it are errors, and the
+/// stream decodes again from the next sequence that fits.
+#[test]
+fn pictures_of_a_refused_sequence_are_not_decoded() {
+    let need = 13 * (64 * 64 * 3 / 2);
+    let mut dec = Decoder::new();
+    dec.set_memory_budget(need - 1);
+    let mut data = sequence(64, 64, 1);
+    data.extend(picture());
+    data.extend(picture());
+    assert!(dec.decode(&data, 0).is_ok_and(|p| p.is_empty()));
+    assert!(dec.flush().is_empty());
+    assert!(dec.sequence().is_none());
+    assert_eq!(dec.last_error(), Some("sequence exceeds the decoder memory budget"));
+    let mut fits = sequence(48, 48, 1);
+    fits.extend(picture());
+    fits.extend(picture());
+    assert_eq!(dec.decode(&fits, 1).map(|p| p.len()).ok(), Some(1));
+    assert_eq!(dec.sequence().map(|s| (s.width, s.height)), Some((48, 48)));
+}
+
+/// Past 8K the caller raises the area limit; the memory budget still bounds what it lets in.
+#[test]
+fn a_raised_area_limit_is_still_bounded_by_the_budget() {
+    let raised = |w: u32, h: u32, chroma: u32, area: u64, budget: Option<u64>| {
+        let mut dec = Decoder::new();
+        dec.set_max_picture_luma_samples(area);
+        assert_eq!(dec.max_picture_luma_samples(), area);
+        if let Some(b) = budget {
+            dec.set_memory_budget(b);
+        }
+        let _ = dec.decode(&sequence(w, h, chroma), 0);
+        dec.sequence().map(|s| (s.width, s.height))
+    };
+    assert_eq!(Decoder::new().max_picture_luma_samples(), filmcraft_mpeg2v::MAX_PICTURE_AREA);
+    // 8000 x 8000 is 64 million luma samples, over the default 2^25
+    assert!(!accepted(8000, 8000, 1));
+    assert_eq!(raised(8000, 8000, 1, 1 << 26, None), Some((8000, 8000)));
+    assert_eq!(raised(8000, 8000, 1, 8000 * 8000, None), Some((8000, 8000)));
+    assert_eq!(raised(8000, 8000, 1, 8000 * 8000 - 1, None), None);
+    // 13 pictures of 8000 x 8000 4:2:0 are 1.25 GB
+    let need = 13 * 8000 * 8000 * 3 / 2;
+    assert_eq!(raised(8000, 8000, 1, 1 << 26, Some(need)), Some((8000, 8000)));
+    assert_eq!(raised(8000, 8000, 1, 1 << 26, Some(need - 1)), None);
+    // the largest the header can code, 4:4:4, is 10 GB of pictures: over the default budget
+    assert_eq!(raised(16383, 16383, 3, u64::MAX, None), None);
+    // the probe follows the same limit
+    let big = sequence(8000, 8000, 1);
+    assert!(filmcraft_mpeg2v::probe(&big).is_none());
+    assert_eq!(filmcraft_mpeg2v::probe_with_limit(&big, 1 << 26).map(|s| (s.width, s.height)), Some((8000, 8000)));
+}

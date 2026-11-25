@@ -824,3 +824,62 @@ fn frame_pictures_field_mc_and_dual_prime() {
         ..BASE
     });
 }
+
+/// ffmpeg's encoder writes no field pictures, 16x8 or dual-prime prediction, so the hostile sweep
+/// over its streams (`tests/fuzz_hostile.rs`) never reaches that code. Mutate and truncate the
+/// synthetic streams instead; needs no ffmpeg. A third decoder runs with a memory budget that
+/// fits the 4:2:0 streams and refuses the 4:2:2 ones (and mutated sizes either way), so refused
+/// sequences meet mutated pictures too.
+#[test]
+fn mutated_field_and_dual_prime_streams_never_panic() {
+    let cfgs = [
+        Cfg { name: "mut_field_ibp", seed: 0x1234_5678_9abc, ..BASE },
+        Cfg { name: "mut_field_dual_422", seed: 0x1357_9bdf_2468, b_frames: false, dual: true, chroma: 2, tff: false, frames: 4, ..BASE },
+        Cfg { name: "mut_frame_dual", seed: 0x5555_aaaa_1111, field_pics: false, b_frames: false, dual: true, frames: 4, dc_prec: 3, ..BASE },
+        Cfg { name: "mut_frame_ib_422", seed: 0x2468_ace0_1357, field_pics: false, chroma: 2, tff: false, q_scale_type: true, ..BASE },
+    ];
+    let budget_420 = 13 * (BASE.w * BASE.h * 3 / 2) as u64;
+    let mut state = 0x9E37_79B9_7F4A_7C15u64;
+    let mut next = move |n: usize| {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        (state % n.max(1) as u64) as usize
+    };
+    for cfg in cfgs {
+        let es = stream(cfg);
+        // unmutated, the budget lets exactly the 4:2:0 streams in
+        let mut dec = Decoder::new();
+        dec.set_memory_budget(budget_420);
+        for (i, r) in access_units(&es).into_iter().enumerate() {
+            let _ = dec.decode(&es[r], i as i64);
+        }
+        assert_eq!(dec.sequence().is_some(), cfg.chroma == 1, "{}", cfg.name);
+        for round in 0..400 {
+            let mut d = es.clone();
+            for _ in 0..1 + next(6) {
+                // every fourth round stays in the sequence and picture headers
+                let p = if round % 4 == 0 { next(d.len().min(160)) } else { next(d.len()) };
+                match next(3) {
+                    0 => d[p] ^= 1 << next(8),
+                    1 => d[p] = next(256) as u8,
+                    _ => d[p] = [0, 0xff, 0x80, 1][next(4)],
+                }
+            }
+            if round % 5 == 4 {
+                d.truncate(next(d.len()));
+            }
+            for (threads, budget) in [(false, None), (true, None), (false, Some(budget_420))] {
+                let mut dec = Decoder::new();
+                dec.set_threads(threads);
+                if let Some(b) = budget {
+                    dec.set_memory_budget(b);
+                }
+                for (i, r) in access_units(&d).into_iter().enumerate() {
+                    let _ = dec.decode(&d[r], i as i64);
+                }
+                let _ = dec.flush();
+            }
+        }
+    }
+}
