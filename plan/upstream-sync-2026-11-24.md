@@ -331,3 +331,28 @@ builder APIs (no counterpart here), `frames_between`, craft-cfb's lenient-readin
 `VideoFrame` refactor, Ogg FLAC/Speex/Theora handling. Noticed, not changed: the AAF tape
 timecode offset still converts at the file slot's rate (the fork writes 0 there), and
 `crates/captions/tests/it/ttml_clock_overflow.rs` is never compiled (no `main.rs`).
+
+## Ported for AutoCut 0.15 (AV110–AV115, 25 November 2026)
+
+The `list` item "picture memory budgets and frame limits" was ported in one lane (own worktree and
+target, lane gate), behaviour only (the file moves left out), in the fork's per-crate layout: each
+decoder that needs a budget has a small private `budget` module (`PictureShape`) and exports its
+`DECODE_MEMORY_BUDGET`, since `mpeg2v` does not depend on `filmcraft-bitstream`.
+
+| Commit | Port | craft-libs |
+|---|---|---|
+| AV110 | H.264 `Decoder::set_max_picture_luma_samples`; unlike upstream's plain sample count the limit counts bytes (every plane, two bytes a sample above 8 bits), so High 10 and 4:2:2 pictures get the memory of the 8-bit 4:2:0 picture | `4cca9be2ab` |
+| AV111 | ProRes `DecodeLimits`, `decode_frame_with_limits`, `decode_frame_into_with_limits` | `4cca9be2ab` |
+| AV112 | VP8 `Decoder::with_max_luma_samples` | `07a4cd0fc7` |
+| AV113 | MPEG-2 sequence memory budget (`Decoder::set_memory_budget`) and the mutation test over the synthetic field / 16x8 / dual-prime streams; also a settable area cap (`set_max_picture_luma_samples`, `probe_with_limit`) | `5e892217ed` (budget part) |
+| AV114 | VP9 picture-store budget; unlike upstream's `threads + 2` it counts what the decoder's threading really keeps (eight references, at most six frames in their post stage, at most 14 output pictures), with frames at their real band sizes; also a settable luma cap | `6ac2a6a34a` (budget part) |
+| AV115 | `filmcraft_codecs::limits`: one process-wide `DecoderLimits { max_luma_samples, memory_budget }` (`set_decoder_limits`, like the hardware decoding switch) that every software H.264, VP8, VP9, MPEG-2 and ProRes decoder the media layer makes reads, for a future workflow past 8K; no UI | — |
+
+Defaults keep today's limits (H.264 2^25 as bytes, VP8 2^26, MPEG-2 2^25, ProRes 1 GiB with no area
+limit; upstream's stricter ProRes 300 MiB and VP8 36M defaults were not taken). The budgets are new.
+On 64-bit targets they refuse nothing that opens today: MPEG-2 uses upstream's 4 GiB (its area cap
+needs at most 1.3 GB), VP9 12 GiB (the most it can hold within its size limits is about 12.1 GB,
+4:4:4 12-bit at 2^26 luma samples with 18 or more threads; every level 6.2 frame in every profile
+at most about 6.5 GB, 8K UHD 4:4:4 12-bit about 5.9 GB). On 32-bit targets both are 1 GiB, which
+refuses VP9 8-bit 4:2:0 above about 29 million luma samples (8K UHD) and MPEG-2 4:4:4 above about
+27.5 million on wasm32. HEVC, AV1, APV and DNx keep their fixed caps and do not read the setting.

@@ -19,6 +19,8 @@
 //! - [`Y4mSource`]: uncompressed YUV4MPEG2 (`.y4m`) video, frames read on demand.
 //! - [`heif`]: HEIF / HEIC photos (HEVC pictures and grids of them) as stills.
 //! - [`insp`]: Insta360 photos (a JPEG of the two lenses and the camera's trailer) as 360° stills.
+//! - [`limits`]: how large a picture, and how much picture memory, our own decoders accept
+//!   (process-wide, [`set_decoder_limits`]; the defaults admit every picture up to 8K).
 //! - [`openers`]: the openers to register with the engine's media pool.
 
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable))]
@@ -31,6 +33,7 @@ pub mod heif;
 pub mod hw;
 mod hw_frame;
 pub mod insp;
+pub mod limits;
 pub mod mkv;
 pub mod mp4;
 pub mod mpeg;
@@ -51,6 +54,7 @@ pub use apv::ApvSource;
 pub use audio::AudioFileSource;
 pub use avi::AviSource;
 pub use gop::{FRAME_BUDGET, GopStats, cached_bytes, gop_stats, live_decoders};
+pub use limits::{DecoderLimits, decoder_limits, set_decoder_limits};
 pub use mkv::MkvSource;
 pub use mp4::Mp4Source;
 pub use mpeg::MpegSource;

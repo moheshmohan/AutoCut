@@ -249,10 +249,13 @@ impl MxfSource {
             vcount = t.duration.map_or(avail, |d| d.min(avail)).max(0);
             let rate = if t.edit_rate.is_valid() { FrameRate::new(t.edit_rate.num as i64, t.edit_rate.den as i64) } else { FrameRate::FPS_25 };
             // MPEG-2 (D-10 / IMX, XDCAM): the sequence header of the first picture
-            let mpeg = (t.codec == Codec::Mpeg2)
-                .then(|| file.read_sample(&bytes, vi, 0).ok())
-                .flatten()
-                .and_then(|s| Some((filmcraft_mpeg2v::probe(&s)?, filmcraft_mpeg2v::scan_access_unit(&s), crate::video::mpeg2_sequence_header(&s)?)));
+            let mpeg = (t.codec == Codec::Mpeg2).then(|| file.read_sample(&bytes, vi, 0).ok()).flatten().and_then(|s| {
+                Some((
+                    filmcraft_mpeg2v::probe_with_limit(&s, crate::decoder_limits().mpeg2_area())?,
+                    filmcraft_mpeg2v::scan_access_unit(&s),
+                    crate::video::mpeg2_sequence_header(&s)?,
+                ))
+            });
             let (w, h) = match &mpeg {
                 Some((info, _, _)) => (info.width, info.height),
                 None => (p.frame_width(), p.frame_height()),

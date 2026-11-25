@@ -273,6 +273,8 @@ pub struct H264Decoder {
     draft: bool,
     /// Worker threads (a background decoder gets fewer).
     threads: usize,
+    /// Picture-size limit ([`crate::limits`]), kept across resets.
+    limits: crate::DecoderLimits,
 }
 
 impl H264Decoder {
@@ -281,26 +283,38 @@ impl H264Decoder {
         if filmcraft_media::cancel::background() { BACKGROUND_H264_THREADS.min(h264_threads()) } else { h264_threads() }
     }
 
-    fn make_inner(avcc: &[u8], threads: usize) -> Result<filmcraft_h264::Decoder> {
+    fn make_inner(avcc: &[u8], threads: usize, limits: &crate::DecoderLimits) -> Result<filmcraft_h264::Decoder> {
         let mut dec = filmcraft_h264::Decoder::with_threads(threads);
+        limits.apply_h264(&mut dec);
         if !avcc.is_empty() {
             dec.configure_avcc(avcc).map_err(h264_error)?;
         }
         Ok(dec)
     }
 
+    /// A decoder for `avcC`-configured samples with the process-wide [`crate::decoder_limits`].
     pub fn new(avcc: Vec<u8>) -> Result<Self> {
+        Self::with_limits(avcc, crate::decoder_limits())
+    }
+    /// [`H264Decoder::new`] with explicit limits.
+    pub fn with_limits(avcc: Vec<u8>, limits: crate::DecoderLimits) -> Result<Self> {
         recycle_h264_planes();
         let threads = Self::threads_now();
-        let dec = Self::make_inner(&avcc, threads)?;
+        let dec = Self::make_inner(&avcc, threads, &limits)?;
         let length_size = avcc_length_size(&avcc);
-        Ok(Self { avcc, dec, length_size, draft: false, threads })
+        Ok(Self { avcc, dec, length_size, draft: false, threads, limits })
     }
     /// A decoder for Annex B byte-stream samples (start codes, in-band parameter sets: MXF, TS).
     pub fn annexb() -> Self {
+        Self::annexb_with_limits(crate::decoder_limits())
+    }
+    /// [`H264Decoder::annexb`] with explicit limits.
+    pub fn annexb_with_limits(limits: crate::DecoderLimits) -> Self {
         recycle_h264_planes();
         let threads = Self::threads_now();
-        Self { avcc: Vec::new(), dec: filmcraft_h264::Decoder::with_threads(threads), length_size: 0, draft: false, threads }
+        let mut dec = filmcraft_h264::Decoder::with_threads(threads);
+        limits.apply_h264(&mut dec);
+        Self { avcc: Vec::new(), dec, length_size: 0, draft: false, threads, limits }
     }
     fn convert(p: filmcraft_h264::Picture) -> DecodedFrame {
         let draft = p.draft;
@@ -396,7 +410,7 @@ impl VideoDecoder for H264Decoder {
         self.dec.flush().into_iter().map(Self::convert).collect()
     }
     fn reset(&mut self) {
-        if let Ok(d) = Self::make_inner(&self.avcc, self.threads) {
+        if let Ok(d) = Self::make_inner(&self.avcc, self.threads, &self.limits) {
             self.dec = d;
         }
         self.dec.set_draft(self.draft);
@@ -588,9 +602,17 @@ pub(crate) fn primaries_from_code(c: u8) -> Option<filmcraft_color::Primaries> {
 }
 
 impl Vp9Decoder {
+    /// A decoder with the process-wide [`crate::decoder_limits`].
     pub fn new(cfg: Option<&filmcraft_isobmff::VpcConfig>) -> Self {
+        Self::with_limits(cfg, crate::decoder_limits())
+    }
+
+    /// [`Vp9Decoder::new`] with explicit limits (kept across resets).
+    pub fn with_limits(cfg: Option<&filmcraft_isobmff::VpcConfig>, limits: crate::DecoderLimits) -> Self {
+        let mut dec = filmcraft_vp9::Decoder::new();
+        limits.apply_vp9(&mut dec);
         Self {
-            dec: filmcraft_vp9::Decoder::new(),
+            dec,
             transfer: cfg.and_then(|c| filmcraft_color::Transfer::from_code(c.transfer_characteristics)),
             primaries: cfg.and_then(|c| primaries_from_code(c.colour_primaries)),
         }
@@ -698,8 +720,14 @@ impl Default for Vp8Decoder {
 }
 
 impl Vp8Decoder {
+    /// A decoder with the process-wide [`crate::decoder_limits`].
     pub fn new() -> Self {
-        Self { dec: filmcraft_vp8::Decoder::new() }
+        Self::with_limits(crate::decoder_limits())
+    }
+
+    /// [`Vp8Decoder::new`] with explicit limits (kept across resets).
+    pub fn with_limits(limits: crate::DecoderLimits) -> Self {
+        Self { dec: limits.vp8_decoder() }
     }
 
     fn convert(p: filmcraft_vp8::Picture) -> DecodedFrame {
@@ -833,12 +861,33 @@ pub fn av1_factory(e: &SampleEntry) -> Option<Result<Box<dyn VideoDecoder>>> {
 }
 
 /// Our ProRes decoder (every frame is intra; slices decode in parallel).
-pub struct ProResDecoder;
+pub struct ProResDecoder {
+    limits: filmcraft_prores::DecodeLimits,
+}
+
+impl Default for ProResDecoder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ProResDecoder {
+    /// A decoder with the process-wide [`crate::decoder_limits`].
+    pub fn new() -> Self {
+        Self::with_limits(crate::decoder_limits())
+    }
+
+    /// [`ProResDecoder::new`] with explicit limits.
+    pub fn with_limits(limits: crate::DecoderLimits) -> Self {
+        Self { limits: limits.prores() }
+    }
+}
 
 impl VideoDecoder for ProResDecoder {
     fn decode(&mut self, sample: &[u8], pts: i64) -> Result<Vec<DecodedFrame>> {
         use std::sync::Arc;
-        let f = filmcraft_prores::decode_frame(sample).map_err(|e| CodecError::Decode(e.to_string()))?;
+        let opts = filmcraft_prores::DecodeOptions::default();
+        let f = filmcraft_prores::decode_frame_with_limits(sample, &opts, &self.limits).map_err(|e| CodecError::Decode(e.to_string()))?;
         let chroma = match f.chroma {
             filmcraft_prores::ChromaFormat::Yuv422 => filmcraft_frame::Chroma::C422,
             filmcraft_prores::ChromaFormat::Yuv444 => filmcraft_frame::Chroma::C444,
@@ -878,7 +927,7 @@ impl VideoDecoder for ProResDecoder {
 }
 
 pub fn prores_factory(e: &SampleEntry) -> Option<Result<Box<dyn VideoDecoder>>> {
-    matches!(e.codec, CodecConfig::ProRes { .. }).then(|| Ok(Box::new(ProResDecoder) as Box<dyn VideoDecoder>))
+    matches!(e.codec, CodecConfig::ProRes { .. }).then(|| Ok(Box::new(ProResDecoder::new()) as Box<dyn VideoDecoder>))
 }
 
 /// Our APV (Advanced Professional Video, RFC 9924) decoder (every frame is intra; tiles decode in
@@ -1028,8 +1077,15 @@ pub struct Mpeg2Decoder {
 }
 
 impl Mpeg2Decoder {
+    /// A decoder with the process-wide [`crate::decoder_limits`].
     pub fn new(header: Vec<u8>) -> Self {
-        let mut d = Self { dec: filmcraft_mpeg2v::Decoder::new(), header };
+        Self::with_limits(header, crate::decoder_limits())
+    }
+    /// [`Mpeg2Decoder::new`] with explicit limits (kept across resets).
+    pub fn with_limits(header: Vec<u8>, limits: crate::DecoderLimits) -> Self {
+        let mut dec = filmcraft_mpeg2v::Decoder::new();
+        limits.apply_mpeg2(&mut dec);
+        let mut d = Self { dec, header };
         d.prime();
         d
     }

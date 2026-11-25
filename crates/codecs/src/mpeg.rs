@@ -392,10 +392,13 @@ impl MpegSource {
         color = filmcraft_color::ColorInfo::REC709;
         match v.kind {
             VKind::Mpeg2 => {
-                let info = filmcraft_mpeg2v::probe(&first).ok_or_else(|| CodecError::Decode("no MPEG video sequence header at the first I picture".into()))?;
+                let limits = crate::decoder_limits();
+                let info = filmcraft_mpeg2v::probe_with_limit(&first, limits.mpeg2_area())
+                    .ok_or_else(|| CodecError::Decode("no MPEG video sequence header at the first I picture".into()))?;
                 let header = crate::video::mpeg2_sequence_header(&first).unwrap_or_default();
                 // field order from the first frames' picture coding extensions
                 let mut d = filmcraft_mpeg2v::Decoder::new();
+                limits.apply_mpeg2(&mut d);
                 let mut fo = None;
                 for i in 0..v.units.len().min(4) {
                     if let Ok(pics) = d.decode(&self.read_unit(v, i)?, i as i64)
