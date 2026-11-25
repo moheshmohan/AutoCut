@@ -2,6 +2,46 @@
 
 Newest first. Each release is tagged `autocut-v<version>` on [moheshmohan/AutoCut](https://github.com/moheshmohan/AutoCut/releases) (the `v<version>` tags in a clone that also fetches upstream are FilmCraft's own); its downloads are on the release page. How a release is cut: [releasing.md](releasing.md) (FilmCraft's process; AutoCut's macOS build is `packaging/macos/package.sh` with `AUTOCUT_APP_NAME=AutoCut`).
 
+## 0.14.0 — 25 November 2026
+
+Faster, wider decoding in AutoCut's own pure-Rust decoders, and the follow-ups to 0.13.0.
+
+### Download
+
+- **macOS, Apple silicon:** `autocut-0.14.0-macos-aarch64.dmg` (the app) and
+  `filmcraft-cli-0.14.0-macos-aarch64.zip` (the command line and MCP server). Ad-hoc signed, not
+  notarized: the first time, right-click AutoCut.app and choose **Open**.
+- Windows, Linux and Intel Macs: build from source.
+
+### What's new
+
+- **4:2:2 HEVC camera footage decodes without hardware.** Main 4:2:2 10 at 8 and 10 bit (Sony
+  XAVC HS, Fujifilm, Canon and others) goes through AutoCut's own decoder: intra and inter
+  prediction, transforms, deblocking and SAO. It matches ffmpeg sample for sample on 30 test
+  streams (intra-only and P/B, deblocking and SAO on and off, weighted prediction, transform
+  skip, lossless, scaling lists, odd sizes up to 3840×2160), and a hardware decoder that fails
+  mid-stream now carries on in software. 4:2:0 output is unchanged.
+- **HEVC decodes 4–10 % faster** on one thread: residuals are dequantised as they are read
+  (−10 % cycles on high-bitrate 1080p).
+- **AV1 decodes 1.6–2.1× faster with several threads**: each frame is rebuilt row by row while
+  later frames start, with pictures bit-identical to before (32 streams at 1, 2, 4 and 14
+  threads, all equal to libdav1d). One thread is unchanged.
+- **`insta360 import --folder F` and `--until D`** take their values (the folder was read as a
+  recording name).
+- **Downloads carry no builder paths**: `package.sh` keeps the home folder and checkout out of
+  the binaries.
+- **Docs for agents**: the agent guide, the MCP server's instructions and the README describe
+  0.13.0's features (FrameAtlas and the pick by meaning, craft and motion checks, keyframes,
+  music fitted to the film, review).
+
+### Known limits
+
+- Only the macOS Apple-silicon build is published, and it isn't notarized.
+- HEVC 4:4:4 and the range-extension coding tools, and H.264 10-bit / 4:2:2, still need a hardware
+  decoder. 12-bit 4:2:2 HEVC is tested only on synthetic streams.
+- An AV1 decoder with many threads uses more memory (about 540 MB instead of 265 MB at 1080p with
+  14 threads).
+
 ## 0.13.0 — 24 November 2026
 
 The first tagged release of AutoCut, the agent-driven, local-first video editor built on

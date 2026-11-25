@@ -737,3 +737,16 @@ craft-libs fixes (AV62–AV90, recorded in `plan/upstream-sync-2026-11-24.md`):
   keyframes, music fitted to the film, exact-item picks), the README's feature list and the
   Google Photos README describe the 0.13.0 features. 954 commands.
 
+## Update 2026-11-25 (release 0.14.0)
+
+- **AV95**: HEVC Main 4:2:2 10 (8- and 10-bit 4:2:2) decodes with AutoCut's own decoder (craft-libs
+  `bb57d422d0`, FilmCraft #1952): intra and inter prediction, transforms, deblocking and SAO;
+  frames are labelled C422 (`video::hevc_pixel_data`, shared with HEIF); the picture-size limit
+  counts all three planes. Bit-exact with ffmpeg on 30 libx265 streams; 4:2:0 unchanged.
+- **AV96**: residuals dequantised as they are read, a bounding-box clear, a DC-only add and
+  table-driven sig_coeff contexts (craft-libs `c25999c8a4`): 4–10 % fewer cycles, bit-identical.
+- **AV98**: AV1's cross-frame row wavefront (craft-libs `62e09222f1`, FilmCraft #4542): parse
+  first, then rebuild row by row while later frames start; 1.6–2.1× with 4–14 threads,
+  bit-identical; a failing frame gives waiting frames an error, never a hang; the pool is capped
+  at 64 threads.
+

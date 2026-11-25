@@ -2471,7 +2471,7 @@ dependencies = [
 
 [[package]]
 name = "filmcraft"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "arboard",
  "chrono",
@@ -2511,7 +2511,7 @@ dependencies = [
 
 [[package]]
 name = "filmcraft-aac"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "filmcraft-bitstream",
  "filmcraft-testkit",
@@ -2521,7 +2521,7 @@ dependencies = [
 
 [[package]]
 name = "filmcraft-ac3"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "filmcraft-testkit",
  "thiserror 2.0.21",
@@ -2529,7 +2529,7 @@ dependencies = [
 
 [[package]]
 name = "filmcraft-acestep"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "candle-core",
  "candle-nn",
@@ -2544,7 +2544,7 @@ dependencies = [
 
 [[package]]
 name = "filmcraft-apv"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "filmcraft-bitstream",
  "filmcraft-testkit",
@@ -2554,7 +2554,7 @@ dependencies = [
 
 [[package]]
 name = "filmcraft-audio-dsp"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "filmcraft-testkit",
  "filmcraft-time",
@@ -2562,7 +2562,7 @@ dependencies = [
 
 [[package]]
 name = "filmcraft-autocut"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -2585,7 +2585,7 @@ dependencies = [
 
 [[package]]
 name = "filmcraft-automation"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "base64 0.23.1",
  "filmcraft-autocut",
@@ -2607,7 +2607,7 @@ dependencies = [
 
 [[package]]
 name = "filmcraft-av1"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "filmcraft-bitstream",
  "filmcraft-testkit",
@@ -2618,21 +2618,21 @@ dependencies = [
 
 [[package]]
 name = "filmcraft-avi"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "filmcraft-testkit",
 ]
 
 [[package]]
 name = "filmcraft-bitstream"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "proptest",
 ]
 
 [[package]]
 name = "filmcraft-captions"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "filmcraft-bitstream",
  "filmcraft-color",
@@ -2646,11 +2646,11 @@ dependencies = [
 
 [[package]]
 name = "filmcraft-cfb"
-version = "0.13.0"
+version = "0.14.0"
 
 [[package]]
 name = "filmcraft-cli"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "filmcraft-autocut",
  "filmcraft-automation",
@@ -2683,7 +2683,7 @@ dependencies = [
 
 [[package]]
 name = "filmcraft-codecs"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "filmcraft-aac",
  "filmcraft-ac3",
@@ -2721,7 +2721,7 @@ dependencies = [
 
 [[package]]
 name = "filmcraft-color"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "proptest",
  "serde",
@@ -2729,7 +2729,7 @@ dependencies = [
 
 [[package]]
 name = "filmcraft-dng"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "filmcraft-dng",
  "rayon",
@@ -2738,7 +2738,7 @@ dependencies = [
 
 [[package]]
 name = "filmcraft-dnx"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "filmcraft-bitstream",
  "filmcraft-testkit",
@@ -2748,7 +2748,7 @@ dependencies = [
 
 [[package]]
 name = "filmcraft-edit"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "filmcraft-geom",
  "filmcraft-media",
@@ -2761,7 +2761,7 @@ dependencies = [
 
 [[package]]
 name = "filmcraft-effectcraft"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "effectcraft-expr",
  "effectcraft-gpu",
@@ -2782,7 +2782,7 @@ dependencies = [
 
 [[package]]
 name = "filmcraft-engine"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "chrono",
  "craft-docpath",
@@ -2831,7 +2831,7 @@ dependencies = [
 
 [[package]]
 name = "filmcraft-export"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "filmcraft-aac",
  "filmcraft-apv",
@@ -2865,7 +2865,7 @@ dependencies = [
 
 [[package]]
 name = "filmcraft-flac"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "filmcraft-bitstream",
  "filmcraft-testkit",
@@ -2874,7 +2874,7 @@ dependencies = [
 
 [[package]]
 name = "filmcraft-format"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "chrono",
  "filmcraft-media",
@@ -2889,7 +2889,7 @@ dependencies = [
 
 [[package]]
 name = "filmcraft-frame"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "filmcraft-color",
  "filmcraft-time",
@@ -2899,7 +2899,7 @@ dependencies = [
 
 [[package]]
 name = "filmcraft-geom"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "proptest",
  "serde",
@@ -2907,7 +2907,7 @@ dependencies = [
 
 [[package]]
 name = "filmcraft-golden"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "filmcraft-color",
  "filmcraft-frame",
@@ -2924,7 +2924,7 @@ dependencies = [
 
 [[package]]
 name = "filmcraft-gphotos"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "filmcraft-engine",
  "filmcraft-oauth",
@@ -2938,7 +2938,7 @@ dependencies = [
 
 [[package]]
 name = "filmcraft-gpu"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "filmcraft-color",
  "filmcraft-export",
@@ -2957,7 +2957,7 @@ dependencies = [
 
 [[package]]
 name = "filmcraft-h264"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "filmcraft-bitstream",
  "filmcraft-testkit",
@@ -2967,7 +2967,7 @@ dependencies = [
 
 [[package]]
 name = "filmcraft-h264enc"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "filmcraft-bitstream",
  "filmcraft-testkit",
@@ -2977,7 +2977,7 @@ dependencies = [
 
 [[package]]
 name = "filmcraft-hevc"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "filmcraft-bitstream",
  "filmcraft-testkit",
@@ -2987,7 +2987,7 @@ dependencies = [
 
 [[package]]
 name = "filmcraft-insta360"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "chrono",
  "filmcraft-engine",
@@ -3000,7 +3000,7 @@ dependencies = [
 
 [[package]]
 name = "filmcraft-instagram"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "filmcraft-engine",
  "filmcraft-oauth",
@@ -3015,7 +3015,7 @@ dependencies = [
 
 [[package]]
 name = "filmcraft-interchange"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "filmcraft-cfb",
  "filmcraft-color",
@@ -3032,7 +3032,7 @@ dependencies = [
 
 [[package]]
 name = "filmcraft-isobmff"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "filmcraft-bitstream",
  "filmcraft-testkit",
@@ -3043,11 +3043,11 @@ dependencies = [
 
 [[package]]
 name = "filmcraft-locks"
-version = "0.13.0"
+version = "0.14.0"
 
 [[package]]
 name = "filmcraft-matroska"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "filmcraft-testkit",
  "serde_json",
@@ -3055,7 +3055,7 @@ dependencies = [
 
 [[package]]
 name = "filmcraft-media"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "filmcraft-color",
  "filmcraft-dng",
@@ -3072,7 +3072,7 @@ dependencies = [
 
 [[package]]
 name = "filmcraft-mp3enc"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "filmcraft-bitstream",
  "filmcraft-testkit",
@@ -3081,7 +3081,7 @@ dependencies = [
 
 [[package]]
 name = "filmcraft-mpa"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "filmcraft-bitstream",
  "filmcraft-testkit",
@@ -3090,7 +3090,7 @@ dependencies = [
 
 [[package]]
 name = "filmcraft-mpeg2v"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "filmcraft-testkit",
  "rayon",
@@ -3099,7 +3099,7 @@ dependencies = [
 
 [[package]]
 name = "filmcraft-mpegts"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "filmcraft-testkit",
  "thiserror 2.0.21",
@@ -3107,7 +3107,7 @@ dependencies = [
 
 [[package]]
 name = "filmcraft-mxf"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "chrono",
  "filmcraft-testkit",
@@ -3115,7 +3115,7 @@ dependencies = [
 
 [[package]]
 name = "filmcraft-oauth"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "getrandom 0.3.4",
  "rustls",
@@ -3129,21 +3129,21 @@ dependencies = [
 
 [[package]]
 name = "filmcraft-ogg"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "filmcraft-testkit",
 ]
 
 [[package]]
 name = "filmcraft-opus"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "filmcraft-testkit",
 ]
 
 [[package]]
 name = "filmcraft-platform"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "filmcraft-bitstream",
  "filmcraft-codecs",
@@ -3170,7 +3170,7 @@ dependencies = [
 
 [[package]]
 name = "filmcraft-project"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "filmcraft-color",
  "filmcraft-geom",
@@ -3184,7 +3184,7 @@ dependencies = [
 
 [[package]]
 name = "filmcraft-prores"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "filmcraft-bitstream",
  "filmcraft-testkit",
@@ -3194,7 +3194,7 @@ dependencies = [
 
 [[package]]
 name = "filmcraft-render"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "filmcraft-audio-dsp",
  "filmcraft-captions",
@@ -3215,7 +3215,7 @@ dependencies = [
 
 [[package]]
 name = "filmcraft-scenes"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "candle-core",
  "candle-nn",
@@ -3232,7 +3232,7 @@ dependencies = [
 
 [[package]]
 name = "filmcraft-scopes"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "filmcraft-color",
  "serde",
@@ -3241,7 +3241,7 @@ dependencies = [
 
 [[package]]
 name = "filmcraft-screenagent"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -3256,7 +3256,7 @@ dependencies = [
 
 [[package]]
 name = "filmcraft-soundfont"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "filmcraft-audio-dsp",
  "filmcraft-time",
@@ -3265,7 +3265,7 @@ dependencies = [
 
 [[package]]
 name = "filmcraft-speech"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "candle-core",
  "candle-nn",
@@ -3284,7 +3284,7 @@ dependencies = [
 
 [[package]]
 name = "filmcraft-templates"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "filmcraft-format",
  "filmcraft-geom",
@@ -3300,7 +3300,7 @@ dependencies = [
 
 [[package]]
 name = "filmcraft-testkit"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "chrono",
  "png",
@@ -3309,7 +3309,7 @@ dependencies = [
 
 [[package]]
 name = "filmcraft-text"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "filmcraft-color",
  "harfrust",
@@ -3323,7 +3323,7 @@ dependencies = [
 
 [[package]]
 name = "filmcraft-time"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "proptest",
  "serde",
@@ -3331,7 +3331,7 @@ dependencies = [
 
 [[package]]
 name = "filmcraft-tts"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "candle-core",
  "candle-nn",
@@ -3349,7 +3349,7 @@ dependencies = [
 
 [[package]]
 name = "filmcraft-tts-text"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "serde",
  "thiserror 2.0.21",
@@ -3357,7 +3357,7 @@ dependencies = [
 
 [[package]]
 name = "filmcraft-ui-egui"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "cpu-time",
  "craft-ui",
@@ -3401,7 +3401,7 @@ dependencies = [
 
 [[package]]
 name = "filmcraft-vision"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "candle-core",
  "candle-nn",
@@ -3418,7 +3418,7 @@ dependencies = [
 
 [[package]]
 name = "filmcraft-voice"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "filmcraft-audio-dsp",
  "filmcraft-vision",
@@ -3429,7 +3429,7 @@ dependencies = [
 
 [[package]]
 name = "filmcraft-vp8"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "filmcraft-testkit",
  "thiserror 2.0.21",
@@ -3437,7 +3437,7 @@ dependencies = [
 
 [[package]]
 name = "filmcraft-vp9"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "filmcraft-bitstream",
  "filmcraft-testkit",
@@ -3447,7 +3447,7 @@ dependencies = [
 
 [[package]]
 name = "filmcraft-web"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "eframe",
  "egui",
@@ -3471,7 +3471,7 @@ dependencies = [
 
 [[package]]
 name = "filmcraft-youtube"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "chrono",
  "filmcraft-engine",
@@ -9366,7 +9366,7 @@ checksum = "e450f9b2ed1dff33c94c12589a87338689467b9c4f5d8a5710bd09a847d2c8a7"
 
 [[package]]
 name = "xtask"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "filmcraft-testkit",
  "serde_json",
