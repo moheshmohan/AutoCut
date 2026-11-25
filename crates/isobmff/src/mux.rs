@@ -599,6 +599,11 @@ fn validate_track(cfg: &TrackConfig) -> Result<Option<u32>> {
     Ok(None)
 }
 
+/// `stsz` counts samples (PCM: frames) in 32 bits.
+fn too_many_samples() -> Error {
+    Error::Mux("more than 2^32 - 1 samples in one track".into())
+}
+
 fn past_the_last_position() -> Error {
     Error::Mux("the file would end past the last position".into())
 }
@@ -702,7 +707,7 @@ impl<W: Write + Seek> Mp4Writer<W> {
                 if !s.data.len().is_multiple_of(fb as usize) {
                     return Err(Error::Mux("PCM data is not a whole number of frames".into()));
                 }
-                ((s.data.len() / fb as usize) as u32, 1u32)
+                (s.data.len() as u64 / u64::from(fb), 1u32)
             }
             None => {
                 if s.data.len() > u32::MAX as usize {
@@ -714,6 +719,11 @@ impl<W: Write + Seek> Mp4Writer<W> {
         if count == 0 {
             return Ok(());
         }
+        // `stsz` and `stss` number samples (PCM: frames) in 32 bits
+        if tr.t.sample_count.saturating_add(count) > u64::from(u32::MAX) {
+            return Err(too_many_samples());
+        }
+        let count = u32::try_from(count).map_err(|_| too_many_samples())?;
         // checked before anything is written: a sample the file cannot hold leaves it as it was
         let end = advance(self.pos, s.data.len())?;
         self.w.write_all(s.data)?;
@@ -728,7 +738,8 @@ impl<W: Write + Seek> Mp4Writer<W> {
         if tr.pcm_frame_bytes.is_none() {
             t.sizes.push(s.data.len() as u32);
             if s.is_sync {
-                t.sync.push(t.sample_count as u32 + 1);
+                // below u32::MAX: checked above
+                t.sync.push(u32::try_from(t.sample_count + 1).map_err(|_| too_many_samples())?);
             } else {
                 t.all_sync = false;
             }
@@ -1504,6 +1515,29 @@ mod tests {
         let mut w = FragmentedWriter::new(Vec::new(), opts);
         w.add_track(TrackConfig::new(avc_entry(), 1000)).unwrap();
         assert!(matches!(w.finish(), Err(Error::Mux(_))));
+    }
+
+    /// The 2^32nd sample of a track is refused before it is written: `stsz` and `stss` count in
+    /// 32 bits (a sync sample past it used to overflow its number).
+    #[test]
+    fn a_track_holds_at_most_u32_max_samples() {
+        let mut w = Mp4Writer::new(Cursor::new(Vec::new()), WriterOptions::new(Brand::Mp4)).unwrap();
+        let v = w.add_track(TrackConfig::new(avc_entry(), 12800)).unwrap();
+        let sample = |data| WriteSample { data, duration: 512, composition_offset: 0, is_sync: true };
+        w.tracks[v].t.sample_count = u64::from(u32::MAX) - 1;
+        w.write_sample(v, sample(&[1, 2, 3])).unwrap();
+        assert_eq!(w.tracks[v].t.sync.last(), Some(&u32::MAX));
+        let pos = w.pos;
+        let e = w.write_sample(v, sample(&[4, 5, 6])).unwrap_err().to_string();
+        assert!(e.contains("2^32 - 1 samples"), "{e}");
+        assert_eq!((w.pos, w.tracks[v].t.sample_count), (pos, u64::from(u32::MAX)), "a refused sample leaves the file as it was");
+        // PCM counts frames: a chunk of more frames than are left is refused whole
+        let pcm = PcmConfig { bits: 16, float: false, big_endian: false, signed: true, channels: 1, sample_rate: 48000.0 };
+        let a = w.add_track(TrackConfig::new(SampleEntry::pcm(pcm), 48000)).unwrap();
+        w.tracks[a].t.sample_count = u64::from(u32::MAX) - 1;
+        let e = w.write_sample(a, WriteSample { data: &[0; 4], duration: 1, composition_offset: 0, is_sync: true }).unwrap_err().to_string();
+        assert!(e.contains("2^32 - 1 samples"), "{e}");
+        w.write_sample(a, WriteSample { data: &[0; 2], duration: 1, composition_offset: 0, is_sync: true }).unwrap();
     }
 
     /// A writer positioned where the header's end would pass `u64::MAX` is refused, not overflowed.
