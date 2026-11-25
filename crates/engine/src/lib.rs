@@ -47,6 +47,7 @@ pub mod essential_sound;
 pub mod explainer;
 pub mod export_tools;
 pub mod faces;
+pub mod fact_ledger;
 pub mod feedback;
 pub mod fingerprint;
 pub mod follow_reid;

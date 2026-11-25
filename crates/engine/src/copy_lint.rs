@@ -279,7 +279,7 @@ pub fn commands() -> Vec<CommandSpec> {
         label: "Check Copy",
         menu: &[],
         shortcut: None,
-        params: r#"{"text":str? (checked as narration),"sequence":id? (title text layers and caption cues),"publish":{"title":str?,"description":str?,"caption":str?,"tags":[str]?}?,"script":path? (a lines file, a showcase plan or plain text),"facts":[str|number]? (the fact ledger; default build/facts.json beside the saved project),"allow":[str]? (phrases never flagged, with the taste profiles' own phrases)} — at least one of text, sequence, publish or script"#,
+        params: r#"{"text":str? (checked as narration),"sequence":id? (title text layers and caption cues),"publish":{"title":str?,"description":str?,"caption":str?,"tags":[str]?}?,"script":path? (a lines file, a showcase plan or plain text),"facts":[str|number|{"text","source"?}]? (the fact ledger; default build/facts.json beside the saved project),"allow":[str]? (phrases never flagged, with the taste profiles' own phrases)} — at least one of text, sequence, publish or script"#,
         enabled: always,
         run,
         journal: false,
@@ -328,7 +328,7 @@ pub(crate) struct Segment {
 }
 
 impl Segment {
-    fn new(unit: &str, kind: Kind, text: String) -> Self {
+    pub(crate) fn new(unit: &str, kind: Kind, text: String) -> Self {
         Segment { unit: unit.to_string(), kind, text, at: Map::new() }
     }
 }
@@ -523,12 +523,63 @@ pub(crate) struct Ledger {
     pub from: String,
     pub entries: usize,
     pub values: Vec<f64>,
+    /// Every entry with its figures and its sources (PX7.3, `script.factLedger`).
+    pub facts: Vec<Fact>,
+}
+
+/// One entry of the ledger: its text (a claim, or a figure), the figures in it and where it is
+/// from (web addresses or notes; none for a bare text or number).
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Fact {
+    pub text: String,
+    pub values: Vec<f64>,
+    pub sources: Vec<String>,
+}
+
+/// Whether two figures are the same value.
+pub(crate) fn same_value(a: f64, b: f64) -> bool {
+    (a - b).abs() <= 1e-9 * b.abs().max(1.0)
 }
 
 impl Ledger {
     fn holds(&self, x: f64) -> bool {
-        self.values.iter().any(|v| (v - x).abs() <= 1e-9 * x.abs().max(1.0))
+        self.values.iter().any(|v| same_value(*v, x))
     }
+
+    /// Whether any entry names a source.
+    pub(crate) fn sourced(&self) -> bool {
+        self.facts.iter().any(|f| !f.sources.is_empty())
+    }
+}
+
+/// Most sources an entry names, and the longest.
+const MAX_SOURCES: usize = 16;
+const MAX_SOURCE_CHARS: usize = 2000;
+
+/// The sources of a ledger entry object: `source` (a text) and `sources` (texts).
+fn sources_of(o: &Map<String, Value>) -> std::result::Result<Vec<String>, String> {
+    let one = |v: &Value| -> std::result::Result<Option<String>, String> {
+        match v {
+            Value::String(t) if t.chars().count() <= MAX_SOURCE_CHARS => Ok(Some(t.trim().to_string()).filter(|t| !t.is_empty())),
+            _ => Err(format!("a ledger entry's source is a text of at most {MAX_SOURCE_CHARS} characters (a web address or a note)")),
+        }
+    };
+    let mut out = Vec::new();
+    match o.get("source") {
+        None | Some(Value::Null) => {}
+        Some(v) => out.extend(one(v)?),
+    }
+    match o.get("sources") {
+        None | Some(Value::Null) => {}
+        Some(Value::Array(a)) if a.len() <= MAX_SOURCES => {
+            for v in a {
+                out.extend(one(v)?);
+            }
+        }
+        Some(_) => return Err(format!("a ledger entry's `sources` is a list of at most {MAX_SOURCES} texts")),
+    }
+    out.truncate(MAX_SOURCES);
+    Ok(out)
 }
 
 /// Where the ledger came from, or why there is none.
@@ -541,24 +592,34 @@ pub(crate) enum LedgerState {
     Broken(String),
 }
 
-/// The ledger of `entries` (texts, numbers or `{text}`).
-fn ledger_of(from: String, entries: &[Value]) -> std::result::Result<Ledger, String> {
+/// The ledger of `entries` (texts, numbers or `{text, source?, sources?}`).
+pub(crate) fn ledger_of(from: String, entries: &[Value]) -> std::result::Result<Ledger, String> {
     if entries.len() > MAX_FACTS {
         return Err(format!("{} ledger entries; at most {MAX_FACTS}", entries.len()));
     }
     let mut values = Vec::new();
+    let mut facts = Vec::with_capacity(entries.len());
     for e in entries {
-        match e {
-            Value::Number(n) => values.extend(n.as_f64().filter(|v| v.is_finite())),
-            Value::String(t) if t.len() <= MAX_FACT_BYTES => values.extend(figures(t, &[]).into_iter().map(|f| f.value)),
+        let fact = match e {
+            Value::Number(n) => {
+                let v: Vec<f64> = n.as_f64().filter(|v| v.is_finite()).into_iter().collect();
+                Fact { text: n.to_string(), values: v, sources: Vec::new() }
+            }
+            Value::String(t) if t.len() <= MAX_FACT_BYTES => {
+                Fact { text: t.clone(), values: figures(t, &[]).into_iter().map(|f| f.value).collect(), sources: Vec::new() }
+            }
             Value::Object(o) => match o.get("text") {
-                Some(Value::String(t)) if t.len() <= MAX_FACT_BYTES => values.extend(figures(t, &[]).into_iter().map(|f| f.value)),
+                Some(Value::String(t)) if t.len() <= MAX_FACT_BYTES => {
+                    Fact { text: t.clone(), values: figures(t, &[]).into_iter().map(|f| f.value).collect(), sources: sources_of(o)? }
+                }
                 _ => return Err("a ledger entry object needs a `text` of at most 4096 bytes".into()),
             },
-            _ => return Err(format!("a ledger entry is a text of at most {MAX_FACT_BYTES} bytes, a number or {{\"text\"}}")),
-        }
+            _ => return Err(format!("a ledger entry is a text of at most {MAX_FACT_BYTES} bytes, a number or {{\"text\", \"source\"?}}")),
+        };
+        values.extend(fact.values.iter().copied());
+        facts.push(fact);
     }
-    Ok(Ledger { from, entries: entries.len(), values })
+    Ok(Ledger { from, entries: entries.len(), values, facts })
 }
 
 /// The project's ledger file: `build/facts.json` beside the saved project.

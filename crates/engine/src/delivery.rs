@@ -24,7 +24,7 @@ pub fn commands() -> Vec<CommandSpec> {
         spec(
             CMD,
             "Delivery quality gate",
-            r#"{"short":bool=false,"privacy":bool=true,"narration":bool=true,"changedNarration":[clip id]?,"mix":bool=true,"motionEnergy":bool=true (qa.motionEnergy, warnings only),"craft":bool=true (sequence.checkCraft: textContrast under 3:1 is Floor, the rest craft),"motionCraft":bool=true (sequence.checkMotion: eases, entrance and exit timing, stagger, loops and pops; Reflex),"copy":bool=true (copy.lint of titles and captions: figures not in the ledger are Floor, the rest copy),"facts":[str|number]? (the fact ledger; default build/facts.json beside the project),"allow":[str]? (phrases copy.lint never flags),"decisions":path? (waivers; default build/decisions.json beside the project),"floorBlocks":bool=false (the new Floor checks block too),"holds":[{"start":ticks,"end":ticks,"reason":str}]?,"exemptions":[…audio continuity exemptions],"report":path?}"#,
+            r#"{"short":bool=false,"privacy":bool=true,"narration":bool=true,"changedNarration":[clip id]?,"mix":bool=true,"motionEnergy":bool=true (qa.motionEnergy, warnings only),"craft":bool=true (sequence.checkCraft: textContrast under 3:1 is Floor, the rest craft),"motionCraft":bool=true (sequence.checkMotion: eases, entrance and exit timing, stagger, loops and pops; Reflex),"copy":bool=true (copy.lint of titles and captions: figures not in the ledger are Floor, the rest copy),"facts":[str|number|{"text","source"?}]? (the fact ledger; default build/facts.json beside the project),"factSources":bool? (script.factLedger: the sources of the figures and claims on screen, Floor; default on once the ledger names a source),"allow":[str]? (phrases copy.lint never flags),"decisions":path? (waivers; default build/decisions.json beside the project),"floorBlocks":bool=false (the new Floor checks block too),"holds":[{"start":ticks,"end":ticks,"reason":str}]?,"exemptions":[…audio continuity exemptions],"report":path?}"#,
             preflight,
         ),
         spec(
@@ -94,6 +94,12 @@ fn preflight(s: &mut Session, p: &Value) -> Result<Value> {
     let craft_on = flag(p, "craft", true)?;
     let motion_craft_on = flag(p, "motionCraft", true)?;
     let copy_inputs = if flag(p, "copy", true)? { Some((crate::copy_lint::allowed(s, CMD, p)?, crate::copy_lint::ledger(s, CMD, p)?)) } else { None };
+    // script.factLedger's sources and claims (PX7.3): on once the ledger names a source
+    let fact_sources = match p.get("factSources") {
+        None | Some(Value::Null) => None,
+        Some(v) => Some(v.as_bool().ok_or_else(|| bad(CMD, "factSources must be boolean"))?),
+    };
+    let fact_ledger = if fact_sources == Some(false) { None } else { Some(crate::copy_lint::ledger(s, CMD, p)?) };
     let (decisions, named_decisions) = decisions_path(s, p)?;
     let (source_errors, sources) = crate::source_check::inspect(s, seq);
     // A final-delivery check must see current originals, even when editing used a
@@ -418,6 +424,32 @@ fn preflight(s: &mut Session, p: &Value) -> Result<Value> {
         push(&mut checks, "figures", "skipped", json!("disabled by explicit project policy"));
         push(&mut checks, "copy", "skipped", json!("disabled by explicit project policy"));
     }
+    // the sources of the figures and claims on screen (script.factLedger): Floor, a warning first
+    match (&fact_ledger, fact_sources) {
+        (None, _) => push(&mut checks, "factSources", "skipped", json!("disabled by explicit project policy")),
+        (Some(crate::copy_lint::LedgerState::Found(lg)), asked) if asked == Some(true) || lg.sourced() => {
+            let mut v = crate::fact_ledger::report(&crate::copy_lint::sequence_segments(&project, &q), lg, true);
+            // a figure not in the ledger at all is the `figures` check's
+            let found: Vec<Value> = take_findings(&mut v).into_iter().filter(|f| f["code"] != "unledgeredFigure").map(|f| tiered(f, FLOOR)).collect();
+            let state = new_floor(!found.is_empty());
+            push(&mut checks, "factSources", state, json!({"findings":found,"ledger":v["ledger"],"checked":v["checked"],"floorBlocks":floor_blocks}));
+        }
+        (Some(crate::copy_lint::LedgerState::Found(_)), _) => push(
+            &mut checks,
+            "factSources",
+            "skipped",
+            json!(
+                "the fact ledger names no sources: give its entries a `source` (or pass factSources: true) to check the figures and claims on screen against them"
+            ),
+        ),
+        (Some(crate::copy_lint::LedgerState::None(why)), Some(true)) => {
+            push(&mut checks, "factSources", new_floor(true), json!({"error":why,"floorBlocks":floor_blocks}))
+        }
+        (Some(crate::copy_lint::LedgerState::None(why)), _) => push(&mut checks, "factSources", "skipped", json!(why)),
+        (Some(crate::copy_lint::LedgerState::Broken(why)), _) => {
+            push(&mut checks, "factSources", new_floor(true), json!({"error":format!("the fact ledger could not be read: {why}"),"floorBlocks":floor_blocks}))
+        }
+    }
     // waivers of Reflex findings, then every check's tier
     let (state, detail) = waive(s, decisions, named_decisions, &mut checks, frame, floor_blocks);
     push(&mut checks, "waivers", state, detail);
@@ -468,7 +500,7 @@ const MAX_CRAFT_HOLDS: usize = 2000;
 pub fn tier_of(check: &str) -> &'static str {
     match check {
         "sources" | "audioContinuity" | "mix" | "privacyAtCuts" | "changedNarration" | "safeZones" | "screenProtection" | "textContrast" | "figures"
-        | "waivers" => FLOOR,
+        | "factSources" | "waivers" => FLOOR,
         "motion" | "colour" | "blackFrames" | "craft" | "motionCraft" | "copy" => REFLEX,
         _ => FINISH,
     }
@@ -1151,6 +1183,7 @@ mod tests {
             ("screenProtection", "floor"),
             ("textContrast", "floor"),
             ("figures", "floor"),
+            ("factSources", "floor"),
             ("waivers", "floor"),
             ("motion", "reflex"),
             ("colour", "reflex"),
