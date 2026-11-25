@@ -29,6 +29,8 @@ const SEEDS: &[(&str, &str, &str, &str)] = &[
     // x265 cannot encode tiles; kvazaar can, at 256 x 64 luma per tile at least (Main profile)
     ("hevc_fz_tiles_kvazaar", "libkvazaar", "-s 512x128 -kvazaar-params tiles=2x2,gop=0,period=6,qp=40", "yuv420p"),
     ("hevc_fz_422_10", "libx265", "-x265-params log-level=error:keyint=6:min-keyint=6", "yuv422p10le"),
+    ("hevc_fz_444_10", "libx265", "-x265-params log-level=error:bframes=2:keyint=6:min-keyint=6", "yuv444p10le"),
+    ("hevc_fz_400", "libx265", "-x265-params log-level=error:bframes=1:keyint=6:min-keyint=6", "gray"),
 ];
 
 fn make(ff: &std::path::Path, name: &str, enc: &str, args: &str, pix: &str) -> Option<Vec<u8>> {

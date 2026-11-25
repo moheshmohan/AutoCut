@@ -32,7 +32,10 @@ and fixture generators.
 | Draft mode (non-reference pictures skip deblocking / SAO; reduced-resolution playback only) | done |
 | Tiles / WPP | parsed and decoded sequentially within a picture (parallelism is across pictures) |
 | 4:2:2 (Main 4:2:2 10 / RExt profile without RExt tools, what cameras and libx265 write): chroma geometry from the SPS chroma format in the picture store, intra, inter, transform tree, deblocking and SAO; Table 8-3 intra mode mapping; stacked chroma transform blocks with their second cbf flags; chroma QP = Min(qPi, 51); chroma motion vectors per axis; 8-12-bit | done (bit-exact on the 8- and 10-bit libx265 fixtures; 12-bit 4:2:2 only through the synthetic PCM streams) |
-| 4:4:4 / monochrome, range-extension coding tools (RDPCM, cross-component prediction, extended precision, persistent Rice adaptation, bypass alignment, chroma QP offset lists, SAO offset scaling) | not yet (`Error::Unsupported`) |
+| 4:4:4 (Main 4:4:4 / Main 4:4:4 10, RExt profiles without RExt tools, what libx265 writes): chroma at full resolution through intra (chroma modes per prediction block, 4x4 chroma blocks, neighbour filtering and the mode-dependent scan of 8x8 chroma blocks), inter (4-tap chroma filter at the luma vector), 32x32 chroma transforms and scaling lists, the 4:4:4 chroma cbfs at every depth, deblocking on the 8x8 chroma grid and SAO; 8-12-bit | done (bit-exact on 33 8- and 10-bit libx265 fixtures; 12-bit through the synthetic PCM streams) |
+| Monochrome (Main 4:0:0 / 4:0:0 10, `chroma_format_idc` 0): luma only, no chroma syntax (modes, cbfs, residuals, PCM samples, SAO, weights) or planes; `Picture::chroma` is `C400` with empty `u` / `v` planes, and the chroma depth is the luma depth | done (bit-exact on 11 libx265 fixtures) |
+| Separate colour planes (`separate_colour_plane_flag`: three monochrome-coded planes with their own slices) | not supported (`Error::Unsupported`) |
+| Range-extension coding tools (RDPCM, cross-component prediction, extended precision, persistent Rice adaptation, bypass alignment, chroma QP offset lists, SAO offset scaling, transform-skip rotation / contexts / sizes, intra smoothing off, high-precision weighted prediction offsets) | not yet (`Error::Unsupported`) |
 | SCC, multilayer (SHVC / MV-HEVC), 3D extensions | not supported (layers > 0 are ignored) |
 
 ## API
@@ -43,8 +46,8 @@ use filmcraft_hevc::{Decoder, Plane};
 let mut dec = Decoder::new(); // or Decoder::with_threads(n), Decoder::from_hvcc(&hvcc)?
 for (pts, access_unit) in access_units {
     for pic in dec.decode(access_unit, pts)? {
-        // pic.width / pic.height (cropped), pic.bit_depth, pic.chroma (ChromaFormat::C420 / C422;
-        // pic.chroma_width / chroma_height: the u / v plane size),
+        // pic.width / pic.height (cropped), pic.bit_depth, pic.chroma (ChromaFormat::C400 / C420 /
+        // C422 / C444; pic.chroma_width / chroma_height: the u / v plane size, 0 for C400),
         // pic.y / pic.u / pic.v: Plane::U8(Vec<u8>) for 8-bit, Plane::U16(Vec<u16>) above,
         // pic.y_stride / pic.uv_stride, pic.pts, pic.poc, pic.key (IRAP), pic.color (VUI), pic.sar
     }
@@ -78,7 +81,9 @@ older format keep its rows alive. Each backing retains the full coded picture di
 
 Picture sizes are capped by the samples of all three planes (`params::MAX_PICTURE_SAMPLES`, those
 of a 4:2:0 picture of 2^26 luma samples): a 4:2:2 picture, whose chroma planes are twice as big,
-may have three quarters of the luma samples (8K fits).
+may have three quarters of the luma samples (8K fits), a 4:4:4 picture half of them (8192 x 4096
+and 8K UHD fit). Monochrome pictures are capped at the 4:2:0 luma limit (the per-block state
+follows the luma size).
 
 Draft mode (`Decoder::set_draft(true)`; FilmCraft enables it with Settings ▸ Playback ▸ Draft
 decoding while the Program monitor plays at 1/2 or 1/4): sub-layer non-reference pictures
@@ -109,10 +114,12 @@ with ffmpeg; tests print a message and skip when ffmpeg is absent).
   panics or deadlocks (single- and multi-threaded).
 - Conformance (`tests/conformance.rs`): every fixture is decoded with 1 thread, 3 threads and every
   core and compared sample-exactly, plane by plane, with `ffmpeg -f rawvideo -pix_fmt yuv420p /
-  yuv420p10le / yuv422p / yuv422p10le`; on mismatch
+  yuv420p10le / yuv422p / yuv422p10le / yuv444p / yuv444p10le / gray / gray10le` (monochrome
+  pictures must have empty chroma planes); on mismatch
   the first differing frame, plane, sample, CTB and 8x8 block are reported. Output pts/POC order is
-  checked too, and that no picture is flagged draft without draft mode. `compare_detects_mismatch`
-  guards the harness itself. Draft mode (`draft_mode_changes_only_flagged_non_reference_pictures`):
+  checked too, and that no picture is flagged draft without draft mode. `compare_detects_mismatch`,
+  `compare_detects_a_422_chroma_mismatch` and `compare_detects_444_and_monochrome_mismatches`
+  guard the harness itself. Draft mode (`draft_mode_changes_only_flagged_non_reference_pictures`):
   on B-pyramid / weighted fixtures, single- and frame-threaded, every unflagged picture is
   bit-exact and only flagged pictures differ.
 
@@ -152,7 +159,15 @@ libx265 unless noted (x265 enables WPP by default, so most streams carry entry p
 | ctu32_tu4_422_10 / ctu16_422_10 / scaling_list_422_10 / constrained_intra_422_10 / slices4_422_10 | 352x288 | 4:2:2 block structure, scaling lists, constrained intra, slices |
 | odd_202x118_422 / odd_330x117_422_10 / odd_98x61_422_10 / odd_1918x1078_422 / odd_1918x1078_422_10 | | 4:2:2 sizes that are not multiples of 8 or 16 (odd heights: 4:2:2 crops by lines) |
 | uhd_4k_422_10 | 3840x2160 | 4:2:2 10-bit ultrafast |
-| synthetic (7 + 4 streams) | 96x64 | tiles, PCM, slices, dependent segments, LTR, list modification; 4:2:2 PCM at 8-12 bits (mixed depths), deblocked, cropped by odd lines |
+| intra_444 / intra_444_10 / intra_444_nosao_nodbk / intra_444_10_nosao_nodbk / no_strong_intra_444 / constrained_intra_444 | 352x288 | 4:4:4 8 / 10-bit intra, with and without the in-loop filters, strong smoothing off, constrained intra |
+| medium_444 / medium_444_10 / slow_444 / p_only_444_10 / bframes_444 / bframes_444_10 | 352x288 | 4:4:4 presets, P only, B pyramid |
+| no_sao_444 / no_deblock_444_10 / deblock_m3_3_444 / rect_amp_444_10 / tskip_444 / tskip_444_10 / weightp_444 / weightp_444_10 | 352x288 | 4:4:4 tool toggles |
+| qp_444_10 / crf0_444 / crf51_444_10 / lossless_444 / lossless_444_10 / cu_lossless_444 | 352x288 / 176x144 | 4:4:4 adaptive QP with chroma QP offsets, quantizer extremes, lossless, per-CU bypass |
+| scaling_list_444_10 / ctu16_444 / ctu32_tu4_444_10 / slices4_444_10 | 352x288 | 4:4:4 scaling lists (32x32 chroma), block structure, slices |
+| odd_201x117_444 / odd_331x99_444_10 / odd_1918x1078_444_10 | | 4:4:4 at odd widths and heights |
+| intra_400 / intra_400_10 / intra_400_nosao_nodbk / medium_400 / slow_400_10 / bframes_400_10 | 352x288 | monochrome intra, presets, B pyramid |
+| tskip_400 / weightp_400 / lossless_400 / cu_lossless_400_10 / odd_201x117_400 | 352x288 / 176x144 / 201x117 | monochrome tool toggles, lossless, odd size |
+| synthetic (7 + 4 + 2 streams) | 96x64 | tiles, PCM, slices, dependent segments, LTR, list modification; 4:2:2, 4:4:4 and monochrome PCM at 8-12 bits (mixed depths), deblocked, cropped by odd lines |
 
 `cargo test -p filmcraft-hevc --test conformance coverage_report -- --ignored --nocapture` prints the
 decoder statistics per fixture.
@@ -167,6 +182,7 @@ average 50-100), so these are lower bounds:
 |---|---|---|
 | 1080p Main, x265 medium CRF 24, 60 frames | ~75 fps | ~225 fps |
 | 1080p Main 4:2:2 10, x265 medium CRF 24, 60 frames (2026-11-25, load average ~12) | ~94 fps | ~285 fps |
+| 1080p Main 4:4:4 10, x265 medium CRF 24, 30 frames (2026-11-25, load average ~10) | ~78 fps | ~150 fps |
 | 2160p Main 10, x265 fast CRF 26, 20 frames | ~20 fps | ~95 fps |
 
 No intrinsics: the hot loops are written to auto-vectorise. M4.8
@@ -220,11 +236,12 @@ streams that decode. CPU cycles per frame, one thread, release, alternating roun
 
 ## Known gaps
 
-- 4:4:4 and monochrome streams, and the range extension coding tools (implicit / explicit RDPCM,
-  cross-component prediction, extended precision, persistent Rice adaptation, bypass alignment,
-  chroma QP offset lists, SAO offset scaling) are rejected with `Error::Unsupported`. 4:2:2 streams
-  that use none of those tools (what cameras and libx265 write) decode.
-- 12-bit 4:2:2 is implemented, but only synthetic PCM streams cover it (no libx265 `yuv422p12le`
+- The range extension coding tools (implicit / explicit RDPCM, cross-component prediction,
+  extended precision, persistent Rice adaptation, bypass alignment, chroma QP offset lists, SAO
+  offset scaling) are rejected with `Error::Unsupported`, and so are separately coded colour planes.
+  4:2:2, 4:4:4 and monochrome streams that use none of those tools (what cameras and libx265 write)
+  decode.
+- 12-bit pictures are implemented, but only synthetic PCM streams cover them (no libx265 12-bit
   fixture compared with ffmpeg yet).
 - Tiles and WPP substreams are decoded sequentially (entry points are parsed but the decoder finds
   substream starts itself); parallelism is at the picture level.

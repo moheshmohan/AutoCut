@@ -13,7 +13,8 @@ pub const MAX_LUMA_SAMPLES: u64 = 1 << 26;
 
 /// The samples of all three planes of the largest picture ([`MAX_LUMA_SAMPLES`] in 4:2:0): a
 /// 4:2:2 picture, whose chroma planes are twice as big, may have three quarters of the luma
-/// samples (8K still fits).
+/// samples (8K still fits), a 4:4:4 picture half of them (8192 x 4096, 7680 x 4320). Monochrome
+/// pictures stay within [`MAX_LUMA_SAMPLES`] (the per-block state follows the luma size).
 pub const MAX_PICTURE_SAMPLES: u64 = MAX_LUMA_SAMPLES / 2 * 3;
 
 fn check_picture_size(width: u32, height: u32, chroma_format_idc: u32) -> Result<()> {
@@ -25,7 +26,7 @@ fn check_picture_size(width: u32, height: u32, chroma_format_idc: u32) -> Result
         2 => luma,
         _ => 2 * luma,
     };
-    ensure!(luma + chroma <= MAX_PICTURE_SAMPLES, "picture size {width}x{height} exceeds the decoded-frame budget");
+    ensure!(luma <= MAX_LUMA_SAMPLES && luma + chroma <= MAX_PICTURE_SAMPLES, "picture size {width}x{height} exceeds the decoded-frame budget");
     Ok(())
 }
 
@@ -660,15 +661,11 @@ impl Sps {
 
     /// Features this decoder does not handle yet.
     pub fn check_supported(&self) -> Result<()> {
-        let cat = self.chroma_array_type();
-        if cat != 1 && cat != 2 {
-            let what = match self.chroma_format_idc {
-                0 => "monochrome".to_string(),
-                3 if self.separate_colour_plane => "4:4:4 with separate colour planes".to_string(),
-                3 => "4:4:4".to_string(),
-                idc => format!("chroma_format_idc {idc}"),
-            };
-            return unsupported(format!("{what} (only 4:2:0 and 4:2:2)"));
+        if self.separate_colour_plane {
+            return unsupported("4:4:4 with separate colour planes");
+        }
+        if self.chroma_format_idc > 3 {
+            return unsupported(format!("chroma_format_idc {}", self.chroma_format_idc));
         }
         if self.bit_depth_luma > 12 || self.bit_depth_chroma > 12 {
             return unsupported(format!("bit depth {}/{}", self.bit_depth_luma, self.bit_depth_chroma));
@@ -993,6 +990,21 @@ mod tests {
         // the 4:2:0 limit is unchanged
         assert!(check_picture_size(8192, 8192, 1).is_ok() && check_picture_size(16384, 4096, 1).is_ok());
     }
+    /// 4:4:4 counts both chroma planes at full resolution (half the 4:2:0 luma limit: 8192 x 4096
+    /// and 8K UHD fit, 8192 x 4104 does not); monochrome counts luma only but stays within the
+    /// 4:2:0 luma limit (the per-block state follows the luma size).
+    #[test]
+    fn a_444_or_monochrome_picture_counts_every_plane() {
+        check_picture_size(8192, 4096, 3).unwrap();
+        check_picture_size(7680, 4320, 3).unwrap();
+        for (w, h) in [(8192, 4104), (8192, 8192), (16888, 16888), (16888, 2000)] {
+            let err = check_picture_size(w, h, 3).unwrap_err();
+            assert!(err.to_string().contains("decoded-frame budget"), "{w}x{h}: {err}");
+        }
+        check_picture_size(8192, 8192, 0).unwrap();
+        assert!(check_picture_size(8192, 8200, 0).is_err() && check_picture_size(16888, 8000, 0).is_err());
+    }
+
     fn pps_bits(num_ref_idx: u32, tiles: u32) -> Vec<u8> {
         pps_bits_qp(num_ref_idx, tiles, 0)
     }

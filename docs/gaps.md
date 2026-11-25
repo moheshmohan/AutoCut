@@ -1,6 +1,6 @@
 # Where FilmCraft falls short of Premiere Pro
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-11-25 · **Change:** minor (G3: H.264 High 10 / High 4:2:2 in software) · **Target:** Adobe Premiere Pro 2026 (26.5.2)
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-11-25 · **Change:** minor (G3: HEVC 4:4:4 and monochrome in software) · **Target:** Adobe Premiere Pro 2026 (26.5.2)
 
 Every known shortfall, one entry each, ranked by what most stops an editor using FilmCraft for real
 work. This is the work list: agents should prefer it over adding checklist items. Numbers are in
@@ -69,17 +69,20 @@ platforms** G4, G9, G17; **performance** G16; **ecosystem** G11; **measurement**
   CABAC and CAVLC: Sony XAVC S-I, Panasonic AVC-Intra, Canon XF-AVC and the mirrorless 10-bit
   modes) decode in software, bit-exact with ffmpeg on 61 libx264 fixtures, and import and play
   as 10-bit / 4:2:2 frames (AutoCut AV99–AV101, `crates/h264/README.md`). HEVC 4:2:2 8- and
-  10-bit (Sony XAVC HS, Fujifilm, Canon) decodes in software since AutoCut 0.14
+  10-bit (Sony XAVC HS, Fujifilm, Canon) decodes in software since AutoCut 0.14, and HEVC 4:4:4
+  and monochrome (Main 4:4:4 / 4:4:4 10, Main 4:0:0; screen recordings, graphics masters) since
+  AutoCut AV105, bit-exact on 44 more libx265 fixtures, as 4:4:4 and grey frames
   (`crates/hevc/README.md`).
 - **Missing:** H.264 4:4:4, lossless, monochrome and interlaced field / MBAFF coding (1080i
-  camera and broadcast H.264); HEVC 4:4:4 and the RExt coding tools.
+  camera and broadcast H.264); the HEVC RExt coding tools (RDPCM, cross-component prediction,
+  persistent Rice adaptation...) and separately coded colour planes.
 - **Evidence:** #626 (Panasonic Lumix 4K 10-bit 4:2:2 MOV). Windows Media Foundation and Linux
   decline 10-bit / 4:2:2 in hardware; the software decoders now take H.264 and HEVC 4:2:0 / 4:2:2
   up to 10 bits, so such clips no longer depend on the hardware (not yet checked with the
   reporter's file). Premiere decodes all of these everywhere (and in hardware on Apple silicon,
   Intel and NVIDIA Blackwell).
-- **Impact:** interlaced H.264 (1080i camera and broadcast footage) and 4:4:4 masters still need
-  hardware or fail.
+- **Impact:** interlaced H.264 (1080i camera and broadcast footage), H.264 4:4:4 masters and HEVC
+  streams that use RExt coding tools still need hardware or fail.
 - **Estimate:** H.264 interlaced (field pictures, PAFF, MBAFF) 15–25 h; H.264 4:4:4 / lossless
   5–10 h; HEVC RExt 5–10 h. Doc: [codec-parity.md](codec-parity.md).
 
@@ -370,3 +373,4 @@ platforms** G4, G9, G17; **performance** G16; **ecosystem** G11; **measurement**
 | 2026-10-12 | minor | G10: OpenEXR PXR24 import |
 | 2026-10-26 | minor | G10: 360° video (Insta360, Spherical Video V1 / V2, the 360 Reframe virtual camera, 360° export) |
 | 2026-11-25 | minor | G3: H.264 High 10 / High 4:2:2 (8- and 10-bit 4:2:0 / 4:2:2, Intra profiles) decode in software; left: 4:4:4, interlaced H.264, HEVC RExt |
+| 2026-11-25 | minor | G3: HEVC 4:4:4 and monochrome (8- and 10-bit) decode in software; left: H.264 4:4:4 / interlaced, HEVC RExt coding tools |

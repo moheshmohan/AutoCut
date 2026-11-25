@@ -45,7 +45,7 @@ fn to_hvcc(data: &[u8]) -> (Vec<u8>, Vec<Vec<u8>>) {
 
 #[test]
 fn hvcc_input_matches_reference() {
-    for name in ["medium", "intra_main10", "bframes_422_10"] {
+    for name in ["medium", "intra_main10", "bframes_422_10", "bframes_444_10", "medium_400"] {
         let f = common::fixture(name);
         let Some((hevc, yuv)) = common::ensure(f) else { return };
         let (hvcc, samples) = to_hvcc(&std::fs::read(hevc).unwrap());
@@ -64,7 +64,9 @@ fn hvcc_input_matches_reference() {
         let p0 = &pics[0];
         assert!(p0.key);
         assert_eq!(p0.bit_depth, f.bit_depth);
-        assert_eq!((p0.y_stride, p0.uv_stride), (f.width as usize, f.width as usize / 2));
+        let (sx, _) = common::chroma_shifts(f.chroma);
+        let uv_stride = if f.chroma == 0 { 0 } else { f.width as usize >> sx };
+        assert_eq!((p0.y_stride, p0.uv_stride), (f.width as usize, uv_stride));
     }
 }
 
@@ -78,7 +80,21 @@ fn xorshift(seed: &mut u64) -> u64 {
 /// Damaged streams must never panic or hang; errors are fine.
 #[test]
 fn corrupted_streams_do_not_panic() {
-    for name in ["medium", "bframes", "intra_main10", "rect_amp", "weightp", "bframes_422", "medium_422_10", "odd_330x117_422_10"] {
+    for name in [
+        "medium",
+        "bframes",
+        "intra_main10",
+        "rect_amp",
+        "weightp",
+        "bframes_422",
+        "medium_422_10",
+        "odd_330x117_422_10",
+        "bframes_444",
+        "medium_444_10",
+        "odd_201x117_444",
+        "bframes_400_10",
+        "weightp_400",
+    ] {
         let f = common::fixture(name);
         let Some((hevc, _)) = common::ensure(f) else { return };
         let data = std::fs::read(hevc).unwrap();

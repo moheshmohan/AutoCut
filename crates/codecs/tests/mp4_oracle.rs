@@ -340,6 +340,70 @@ fn hevc_422_in_mp4_and_mov_decodes_with_our_decoder() {
     }
 }
 
+/// HEVC 4:4:4 (Main 4:4:4 and Main 4:4:4 10, what screen recorders, graphics exports and some
+/// cinema cameras write) and monochrome (Main 4:0:0 10) in MP4 and MOV, at odd sizes (4:4:4 and
+/// monochrome allow any width and height), open and decode with our own decoder: as many frames as
+/// ffmpeg decodes, the first and last ones (asked for on a fresh source, the last one first)
+/// sample-exact in every plane, as 4:4:4 frames, and monochrome as grey 4:2:0 frames (the luma
+/// sample-exact, neutral chroma at the luma depth). The track's decoder is checked to be ours (no
+/// hardware decoder is registered in these tests). Before, the decoder refused them as unsupported
+/// ("HEVC: 4:4:4 (only 4:2:0 and 4:2:2)", "HEVC: monochrome (only 4:2:0 and 4:2:2)").
+#[test]
+fn hevc_444_and_monochrome_in_mp4_and_mov_decode_with_our_decoder() {
+    let ff = filmcraft_testkit::require_ffmpeg!();
+    let cases = [
+        ("hevc_444_10bit.mov", "yuv444p10le", 2, (331usize, 187usize)),
+        ("hevc_444_8bit.mp4", "yuv444p", 1, (318, 181)),
+        ("hevc_400_10bit.mp4", "gray10le", 2, (321, 179)),
+    ];
+    for (name, pix, bps, (w, h)) in cases {
+        let input = format!("testsrc2=size={w}x{h}:rate=30:duration=1,format={pix},noise=alls=10:allf=t");
+        let args = ["-f", "lavfi", "-i", &input, "-c:v", "libx265", "-x265-params", "log-level=error:bframes=3:keyint=12", "-tag:v", "hvc1", "-pix_fmt", pix];
+        let Some(path) = fixture(&ff, name, &args) else {
+            eprintln!("SKIPPED ({name}): ffmpeg without libx265");
+            continue;
+        };
+        let file = filmcraft_isobmff::open(std::fs::read(&path).unwrap()).unwrap();
+        let track = file.track_of_kind(filmcraft_isobmff::TrackKind::Video).unwrap();
+        let entry = &file.tracks[track].entries[0];
+        assert_eq!(filmcraft_codecs::make_video_decoder(entry).unwrap().name(), "FilmCraft HEVC", "{name}");
+        let open = || filmcraft_codecs::open_bytes(name, bytes(&path)).unwrap();
+        let v = open().info().video.clone().unwrap();
+        assert_eq!((v.width as usize, v.height as usize), (w, h), "{name}: reported size");
+        let mono = pix.starts_with("gray");
+        let raw = ffmpeg_frames(&ff, &path, pix);
+        let frame_bytes = if mono { w * h * bps } else { 3 * w * h * bps };
+        assert_eq!(raw.len() % frame_bytes, 0, "{name}: ffmpeg's frames are {w}x{h} {pix}");
+        let n = raw.len() / frame_bytes;
+        assert_eq!(n, 30, "{name}: ffmpeg's frame count");
+        assert_eq!(open().info().duration, v.frame_rate.tick_of(n as i64), "{name}: as many frames as ffmpeg decodes");
+        let bits = if bps == 2 { 10 } else { 8 };
+        let want_chroma = if mono { filmcraft_frame::Chroma::C420 } else { filmcraft_frame::Chroma::C444 };
+        for i in [n - 1, 0] {
+            let f =
+                open().video_frame(filmcraft_media::FrameRequest::full(v.frame_rate.tick_of(i as i64))).unwrap_or_else(|e| panic!("{name}: frame {i}: {e}"));
+            assert_eq!((f.width as usize, f.height as usize), (w, h), "{name}: frame {i} size");
+            match &f.data {
+                filmcraft_frame::PixelData::Yuv8 { chroma, .. } => assert_eq!((*chroma, bps), (want_chroma, 1), "{name}"),
+                filmcraft_frame::PixelData::Yuv16 { chroma, bits: b, .. } => assert_eq!((*chroma, *b, bps), (want_chroma, bits, 2), "{name}"),
+                _ => panic!("{name}: frame {i} is not planar YUV"),
+            }
+            let raw = &raw[i * frame_bytes..(i + 1) * frame_bytes];
+            let got = planes(&f);
+            if mono {
+                let (cw, ch) = (w.div_ceil(2), h.div_ceil(2));
+                let luma = raw_planes(raw, w, h, 0, 0, bps).swap_remove(0);
+                assert!(got[0] == luma, "{name}: frame {i} luma differs from ffmpeg's");
+                let neutral = vec![1u16 << (bits - 1); cw * ch];
+                assert!(got[1] == neutral && got[2] == neutral, "{name}: frame {i} chroma is not neutral grey");
+            } else {
+                let want = raw_planes(raw, w, h, w, h, bps);
+                assert!(got == want, "{name}: frame {i} differs from ffmpeg's (max difference {})", max_diff(&got, &want));
+            }
+        }
+    }
+}
+
 /// H.264 High 10 and High 4:2:2 camera footage (what mirrorless and cinema cameras record:
 /// 10-bit 4:2:0, 8- and 10-bit 4:2:2; B-frames, and all-intra like XAVC S-I and AVC-Intra) in MP4
 /// and MOV, at sizes that are not multiples of 16 (an odd height in 4:2:2), opens and decodes with

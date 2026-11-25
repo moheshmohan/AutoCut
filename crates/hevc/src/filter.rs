@@ -145,6 +145,7 @@ fn deblock_row<S: Sample>(pic: &mut PicState<S>, r: usize) {
     // chroma samples long, with bS taken from the luma segment at its first sample
     let (sx, sy) = pic.chroma.shifts();
     let is420 = pic.chroma == crate::ChromaFormat::C420;
+    let has_chroma = pic.chroma.has_chroma();
     // vertical edges
     let mut bs_v = vec![0i8; w4 * ((y1 - y0) / 4)];
     for by in y0 / 4..y1 / 4 {
@@ -168,10 +169,10 @@ fn deblock_row<S: Sample>(pic: &mut PicState<S>, r: usize) {
             filter_luma(&mut pic.planes[0], y * w + x, 1, w, tc, beta, nfp, nfq, bd);
         }
     }
-    // chroma vertical edges (8 chroma samples = 16 luma samples apart; a 4-line chroma segment
+    // chroma vertical edges (8 chroma samples = 8 << sx luma samples apart; a 4-line chroma segment
     // spans 4 << sy luma lines), bS == 2 only
     let cw = pic.cwidth;
-    for by in (y0 / 4..y1 / 4).step_by(1 << sy) {
+    for by in (y0 / 4..y1 / 4).step_by(1 << sy).filter(|_| has_chroma) {
         for bx in (2 << sx..w4).step_by(2 << sx) {
             if bs_v[(by - y0 / 4) * w4 + bx] != 2 {
                 continue;
@@ -215,7 +216,7 @@ fn deblock_row<S: Sample>(pic: &mut PicState<S>, r: usize) {
     }
     // chroma horizontal edges (8 chroma lines = 8 << sy luma lines apart; a 4-sample chroma
     // segment spans 4 << sx luma samples), bS == 2 only
-    for by in (y0 / 4..y1 / 4).filter(|b| b % (2 << sy) == 0 && *b > 0) {
+    for by in (y0 / 4..y1 / 4).filter(|b| has_chroma && b % (2 << sy) == 0 && *b > 0) {
         for bx in (0..w4).step_by(1 << sx) {
             if bs_h[(by - y0 / 4) * w4 + bx] != 2 {
                 continue;
@@ -368,7 +369,9 @@ fn sao_row<S: Sample>(pic: &PicState<S>, r: usize) -> [Vec<S>; 3] {
     let ctb = 1usize << pic.log2_ctb;
     let (sx, sy) = pic.chroma.shifts();
     let mut out: [Vec<S>; 3] = [Vec::new(), Vec::new(), Vec::new()];
-    for c in 0..3 {
+    // (monochrome: no chroma rows)
+    let ncomp = if pic.chroma.has_chroma() { 3 } else { 1 };
+    for c in 0..ncomp {
         // CTB size in this component's samples, horizontally and vertically
         let (w, h, csx, csy) = if c == 0 { (pic.width, pic.height, ctb, ctb) } else { (pic.cwidth, pic.cheight, ctb >> sx, ctb >> sy) };
         let y0 = r * csy;

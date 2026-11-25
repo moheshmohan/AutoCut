@@ -155,9 +155,11 @@ impl Frame {
             S::wrap_rows((0..n).map(|_| OnceLock::new()).collect())
         }
         let rows = if stores_u8(bit_depth, bit_depth_c) { cells::<u8>(n) } else { cells::<u16>(n) };
-        // (coded sizes are multiples of MinCbSizeY, so the chroma sizes are exact)
+        // (coded sizes are multiples of MinCbSizeY, so the chroma sizes are exact; monochrome
+        // frames have no chroma samples)
         let (sx, sy) = chroma.shifts();
-        Frame { id, poc, width, height, cwidth: width >> sx, cheight: height >> sy, chroma, log2_ctb, bit_depth, bit_depth_c, rows }
+        let (cwidth, cheight) = if chroma.has_chroma() { (width >> sx, height >> sy) } else { (0, 0) };
+        Frame { id, poc, width, height, cwidth, cheight, chroma, log2_ctb, bit_depth, bit_depth_c, rows }
     }
 
     /// log2 of the chroma lines per CTB row (log2(CtbSizeY / SubHeightC)).
@@ -352,6 +354,9 @@ impl Frame {
         for r in cy..cy.saturating_add(ch) {
             let Some(row) = self.row::<S>(r / ctb) else { break };
             put(&mut y, &row.y, (r % ctb) * self.width + cx, cw);
+        }
+        if !self.chroma.has_chroma() {
+            return (y, u, v);
         }
         let (sw, sh) = (self.chroma.sub_width(), self.chroma.sub_height());
         let (ccx, ccy, ccw, cch) = (cx / sw, cy / sh, cw.div_ceil(sw), ch.div_ceil(sh));

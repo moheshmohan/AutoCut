@@ -104,30 +104,54 @@ struct Planes {
     y: Vec<u8>,
     u: Vec<u8>,
     v: Vec<u8>,
-    /// SubHeightC: 2 for 4:2:0, 1 for 4:2:2 (chroma is always half the width).
+    /// SubWidthC: 2 for 4:2:0 and 4:2:2, 1 for 4:4:4, 0 for monochrome (no chroma planes).
+    sw: usize,
+    /// SubHeightC: 2 for 4:2:0, 1 for 4:2:2 and 4:4:4.
     sh: usize,
+}
+
+impl Planes {
+    /// Chroma plane width (0 for monochrome).
+    fn cw(&self) -> usize {
+        W.checked_div(self.sw).unwrap_or(0)
+    }
 }
 
 fn content(pic: u32) -> Planes {
     content_fmt(pic, 2)
 }
 
-/// [`content`] with chroma planes of `H / sh` lines.
+/// [`content`] with half-width chroma planes of `H / sh` lines.
 fn content_fmt(pic: u32, sh: usize) -> Planes {
-    let ch = H / sh;
-    let mut p = Planes { y: vec![0; W * H], u: vec![0; W / 2 * ch], v: vec![0; W / 2 * ch], sh };
+    content_sub(pic, 2, sh)
+}
+
+/// [`content`] with chroma planes of `W / sw` x `H / sh` samples (`sw` = 0: monochrome).
+fn content_sub(pic: u32, sw: usize, sh: usize) -> Planes {
+    let (cw, ch) = (W.checked_div(sw).unwrap_or(0), if sw == 0 { 0 } else { H / sh });
+    let mut p = Planes { y: vec![0; W * H], u: vec![0; cw * ch], v: vec![0; cw * ch], sw, sh };
     for y in 0..H {
         for x in 0..W {
             p.y[y * W + x] = pattern(pic, 0, x, y);
         }
     }
     for y in 0..ch {
-        for x in 0..W / 2 {
-            p.u[y * W / 2 + x] = pattern(pic, 1, x, y);
-            p.v[y * W / 2 + x] = pattern(pic, 2, x, y);
+        for x in 0..cw {
+            p.u[y * cw + x] = pattern(pic, 1, x, y);
+            p.v[y * cw + x] = pattern(pic, 2, x, y);
         }
     }
     p
+}
+
+/// (SubWidthC, SubHeightC) of `chroma_format_idc` as [`content_sub`] takes them.
+fn subsampling(idc: u32) -> (usize, usize) {
+    match idc {
+        0 => (0, 1),
+        2 => (2, 1),
+        3 => (1, 1),
+        _ => (2, 2),
+    }
 }
 
 fn nal(t: u8, rbsp: &[u8]) -> Vec<u8> {
@@ -391,11 +415,11 @@ fn encode_picture(d: &PicDesc, tiles: &Tiles, pcm_content: &Planes, out: &mut Ve
                             e.w.write_bits(pcm_content.y[(ry * CTB + y) * W + rx * CTB + x] as u32, 8);
                         }
                     }
-                    let sh = pcm_content.sh;
-                    for plane in [&pcm_content.u, &pcm_content.v] {
+                    let (sw, sh, cw) = (pcm_content.sw.max(1), pcm_content.sh, pcm_content.cw());
+                    for plane in [&pcm_content.u, &pcm_content.v].into_iter().filter(|_| cw > 0) {
                         for y in 0..CTB / sh {
-                            for x in 0..CTB / 2 {
-                                e.w.write_bits(plane[(ry * CTB / sh + y) * W / 2 + rx * CTB / 2 + x] as u32, 8);
+                            for x in 0..CTB / sw {
+                                e.w.write_bits(plane[(ry * CTB / sh + y) * cw + rx * CTB / sw + x] as u32, 8);
                             }
                         }
                     }
@@ -657,6 +681,12 @@ fn check_ffmpeg(name: &str, stream: &[u8], pics: &[crate::Picture]) {
 
 /// [`check_ffmpeg`] for 8-bit pictures of `pix_fmt` whose chroma has `H / sh` lines.
 fn check_ffmpeg_as(name: &str, stream: &[u8], pics: &[crate::Picture], pix_fmt: &str, sh: usize) {
+    check_ffmpeg_sub(name, stream, pics, pix_fmt, (2, sh));
+}
+
+/// [`check_ffmpeg`] for 8-bit pictures of `pix_fmt` with chroma subsampling `(sw, sh)` (`sw` = 0:
+/// monochrome).
+fn check_ffmpeg_sub(name: &str, stream: &[u8], pics: &[crate::Picture], pix_fmt: &str, (sw, sh): (usize, usize)) {
     let Some(ff) = filmcraft_testkit::ffmpeg_or_skip(name) else { return };
     let dir = filmcraft_testkit::fixtures_dir("hevc");
     let src = filmcraft_testkit::temp_path(&dir.join(format!("synth_{name}.hevc")));
@@ -671,7 +701,7 @@ fn check_ffmpeg_as(name: &str, stream: &[u8], pics: &[crate::Picture], pix_fmt: 
         .unwrap();
     assert!(st.success(), "ffmpeg failed on {name}");
     let r = std::fs::read(&yuv).unwrap();
-    let fs = W * H + 2 * (W / 2) * (H / sh);
+    let fs = W * H + 2 * W.checked_div(sw).unwrap_or(0) * (H / sh);
     assert_eq!(r.len(), fs * pics.len(), "{name}: ffmpeg decoded {} frames", r.len() / fs);
     for (i, p) in pics.iter().enumerate() {
         let f = &r[i * fs..(i + 1) * fs];
@@ -812,9 +842,9 @@ fn pcm_stream(d: &SpsDesc) -> (Vec<u8>, Vec<Planes>) {
 }
 
 /// [`pcm_stream`] with the PCM samples coded for a W x H picture in chroma format `coded_idc`
-/// (4:2:2 or else 4:2:0), whatever the SPS claims.
+/// (0..=3), whatever the SPS claims.
 fn pcm_stream_coded(d: &SpsDesc, coded_idc: u32) -> (Vec<u8>, Vec<Planes>) {
-    let sh = if coded_idc == 2 { 1 } else { 2 };
+    let (sw, sh) = subsampling(coded_idc);
     let mut stream = Vec::new();
     stream.extend(vps());
     stream.extend(sps_from(d));
@@ -822,10 +852,10 @@ fn pcm_stream_coded(d: &SpsDesc, coded_idc: u32) -> (Vec<u8>, Vec<Planes>) {
     let mut saved = None;
     let n = WC * HC;
     let idr = PicDesc { nal_type: 19, poc: 0, intra: true, cu: Cu::Pcm, pps_id: 0, st: vec![], lt: vec![], num_ref: 0, list_entry: None, segments: whole(n) };
-    encode_picture(&idr, &None, &content_fmt(0, sh), &mut stream, &mut saved);
+    encode_picture(&idr, &None, &content_sub(0, sw, sh), &mut stream, &mut saved);
     let trail = PicDesc { nal_type: 1, poc: 1, intra: true, cu: Cu::Pcm, pps_id: 0, st: vec![], lt: vec![], num_ref: 0, list_entry: None, segments: whole(n) };
-    encode_picture(&trail, &None, &content_fmt(1, sh), &mut stream, &mut saved);
-    (stream, vec![content_fmt(0, sh), content_fmt(1, sh)])
+    encode_picture(&trail, &None, &content_sub(1, sw, sh), &mut stream, &mut saved);
+    (stream, vec![content_sub(0, sw, sh), content_sub(1, sw, sh)])
 }
 
 /// PCM samples of 4:2:2 pictures land on every chroma line (the CU's chroma is half its width
@@ -934,6 +964,108 @@ fn hostile_422_sequence_headers_never_panic() {
                 });
                 let Ok((_, err)) = r else { panic!("{d:?} ({what}, threads {threads}): panicked") };
                 assert!(!err.as_deref().unwrap_or("").contains("internal error"), "{d:?} ({what}, threads {threads}): a decoding job panicked: {err:?}");
+            }
+        }
+    }
+}
+
+/// PCM samples of 4:4:4 pictures land on every chroma sample (the CU's chroma is its own size)
+/// and monochrome pictures have luma only (no chroma samples are coded or output), at any mix of
+/// luma and chroma depths up to 12 bits, single- and frame-threaded. Before, both formats were
+/// refused as unsupported.
+#[test]
+fn pcm_444_and_monochrome_pictures_keep_every_sample() {
+    let widen = |v: &[u8], depth: u32| v.iter().map(|&s| u16::from(s) << (depth - 8)).collect::<Vec<u16>>();
+    let plane = |pl: &crate::Plane| -> Vec<u16> { (0..pl.len()).map(|i| pl.get(i)).collect() };
+    for (idc, format) in [(3, ChromaFormat::C444), (0, ChromaFormat::C400)] {
+        for (luma, chroma) in [(8, 8), (10, 10), (12, 12), (8, 12), (12, 8), (10, 8)] {
+            let d = SpsDesc { luma, chroma, chroma_format_idc: idc, ..SpsDesc::new(true) };
+            let (stream, expect) = pcm_stream(&d);
+            for threads in [1, 4] {
+                let pics = decode_all(&stream, threads);
+                assert_eq!(pics.len(), 2, "{format:?} {luma}/{chroma}");
+                for (i, (p, e)) in pics.iter().zip(&expect).enumerate() {
+                    let what = format!("{format:?} {luma}/{chroma} threads {threads} picture {i}");
+                    assert_eq!(p.chroma, format, "{what}");
+                    assert_eq!(plane(&p.y), widen(&e.y, luma), "{what}: luma");
+                    if idc == 0 {
+                        // monochrome: no chroma planes, the chroma depth is the luma one, and an
+                        // 8-bit picture stays 8-bit whatever depth the SPS gives chroma
+                        assert_eq!((p.chroma_width, p.chroma_height, p.u.len(), p.v.len(), p.uv_stride), (0, 0, 0, 0, 0), "{what}");
+                        assert_eq!((p.bit_depth, p.bit_depth_chroma), (luma, luma), "{what}");
+                        assert_eq!(p.y.as_u8().is_some(), luma == 8, "{what}: storage");
+                        continue;
+                    }
+                    assert_eq!((p.width, p.height, p.chroma_width, p.chroma_height, p.uv_stride), (W as u32, H as u32, W as u32, H as u32, W), "{what}");
+                    assert_eq!(plane(&p.u), widen(&e.u, chroma), "{what}: Cb");
+                    assert_eq!(plane(&p.v), widen(&e.v, chroma), "{what}: Cr");
+                }
+            }
+        }
+    }
+}
+
+/// Deblocked 4:4:4 PCM pictures (every CU edge is an intra edge, bS 2: chroma is filtered on the
+/// 8x8 chroma grid, which is the luma grid in 4:4:4) and deblocked monochrome ones are ffmpeg's,
+/// single- and frame-threaded.
+#[test]
+fn deblocked_pcm_444_and_monochrome_match_ffmpeg() {
+    for (idc, name, pix) in [(3, "pcm_444_dbk", "yuv444p"), (0, "pcm_400_dbk", "gray")] {
+        let d = SpsDesc { chroma_format_idc: idc, ..SpsDesc::new(false) };
+        let (stream, expect) = pcm_stream(&d);
+        for threads in [1, 4] {
+            let pics = decode_all(&stream, threads);
+            assert_eq!(pics.len(), 2);
+            let changed = pics.iter().zip(&expect).filter(|(p, e)| as_u8(&p.y) != &e.y[..] && (idc == 0 || as_u8(&p.u) != &e.u[..])).count();
+            assert_eq!(changed, 2, "{name} threads {threads}: deblocked");
+            if threads == 1 {
+                check_ffmpeg_sub(name, &stream, &pics, pix, subsampling(idc));
+            }
+        }
+    }
+}
+
+/// Hostile 4:4:4 and monochrome sequence headers in front of real picture data never panic: the
+/// largest pictures the sample budget allows (every plane at full chroma resolution: 8192 x 4096
+/// in 4:4:4, the 4:2:0 luma limit in monochrome) and just over it, the size limit, extreme and
+/// mixed bit depths, odd sizes and windows past the picture, with slices coded for each chroma
+/// format. Each is refused with an error or decodes.
+#[test]
+fn hostile_444_and_monochrome_sequence_headers_never_panic() {
+    for idc in [3, 0] {
+        let base = SpsDesc { chroma_format_idc: idc, ..SpsDesc::new(false) };
+        let variants = [
+            SpsDesc { width: 8192, height: 4096, ..base },
+            SpsDesc { width: 8192, height: 4104, ..base },
+            SpsDesc { width: 16888, height: 16888, ..base },
+            SpsDesc { width: 8192, height: 8192, ..base },
+            SpsDesc { width: 98, height: 61, ..base },
+            SpsDesc { width: 16, height: 8, ..base },
+            SpsDesc { width: 192, height: 128, ..base },
+            SpsDesc { luma: 16, chroma: 16, ..base },
+            SpsDesc { luma: 13, chroma: 8, ..base },
+            SpsDesc { luma: 8, chroma: 16, ..base },
+            SpsDesc { luma: 12, chroma: 12, ..base },
+            SpsDesc { luma: 8, chroma: 12, ..base },
+            SpsDesc { conf_win: Some((95, 0, 0, 63)), ..base },
+            SpsDesc { conf_win: Some((1 << 20, 1 << 20, 1 << 20, 1 << 20)), ..base },
+        ];
+        for d in variants {
+            for coded in [3, 0, 1, 2] {
+                let (s, _) = pcm_stream_coded(&d, coded);
+                for threads in [1, 4] {
+                    let r = std::panic::catch_unwind(|| {
+                        let mut dec = Decoder::with_threads(threads);
+                        let mut n = dec.decode(&s, 0).map(|p| p.len()).unwrap_or(0);
+                        n += dec.flush().len();
+                        (n, dec.take_error().map(|e| e.to_string()))
+                    });
+                    let Ok((_, err)) = r else { panic!("{d:?} (slices coded as {coded}, threads {threads}): panicked") };
+                    assert!(
+                        !err.as_deref().unwrap_or("").contains("internal error"),
+                        "{d:?} (coded {coded}, threads {threads}): a decoding job panicked: {err:?}"
+                    );
+                }
             }
         }
     }

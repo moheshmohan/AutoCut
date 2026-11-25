@@ -465,7 +465,8 @@ impl Decoder {
         let Some(chroma) = ChromaFormat::from_idc(sps.chroma_array_type()) else {
             return unsupported(format!("chroma_format_idc {}", sps.chroma_format_idc));
         };
-        let template = Frame::new(0, 0, w, h, chroma, sps.log2_ctb, sps.bit_depth_luma, sps.bit_depth_chroma);
+        let bd_c = frame_chroma_depth(sps);
+        let template = Frame::new(0, 0, w, h, chroma, sps.log2_ctb, sps.bit_depth_luma, bd_c);
         let next_id = &mut self.next_id;
         let gray_reference = &mut self.gray_reference;
         let mut missing = 0u64;
@@ -494,7 +495,7 @@ impl Decoder {
         let _ = scaling;
         let id = self.next_id;
         self.next_id += 1;
-        let frame = Arc::new(Frame::new(id, poc, w, h, chroma, sps.log2_ctb, sps.bit_depth_luma, sps.bit_depth_chroma));
+        let frame = Arc::new(Frame::new(id, poc, w, h, chroma, sps.log2_ctb, sps.bit_depth_luma, bd_c));
         let output = sh.pic_output && !(hdr.is_rasl() && self.skip_rasl);
         // Draft mode: a sub-layer non-reference picture of the highest sub-layer is never used
         // for prediction, so its in-loop filters can be left out without changing anything else.
@@ -642,6 +643,13 @@ fn block_counts(blk: &[Blk]) -> [u64; 3] {
     [intra, skip, coded.saturating_sub(intra + skip)]
 }
 
+/// The chroma depth a frame is stored with: the SPS chroma depth, or the luma depth for
+/// monochrome pictures (whose `bit_depth_chroma_minus8` describes no samples, so it must not make
+/// an 8-bit picture use 16-bit storage).
+fn frame_chroma_depth(sps: &Sps) -> u32 {
+    if sps.chroma_array_type() == 0 { sps.bit_depth_luma } else { sps.bit_depth_chroma }
+}
+
 fn output_meta(sps: &Sps, pts: i64, key: bool, draft: bool) -> OutputMeta {
     let vui = sps.vui.clone().unwrap_or_default();
     OutputMeta {
@@ -662,7 +670,7 @@ fn make_picture(o: &Output<FrameRef>) -> Picture {
     let (cx, cy, cw, ch) = o.meta.crop;
     let (cx, cy, cw, ch) = (cx as usize, cy as usize, cw as usize, ch as usize);
     let chroma = o.frame.chroma;
-    let (ccw, cch) = (cw.div_ceil(chroma.sub_width()), ch.div_ceil(chroma.sub_height()));
+    let (ccw, cch) = if chroma.has_chroma() { (cw.div_ceil(chroma.sub_width()), ch.div_ceil(chroma.sub_height())) } else { (0, 0) };
     let (bd, bdc) = (o.meta.bit_depth, o.frame.bit_depth_c);
     // 8-bit planes only when both depths are 8: narrowing deeper chroma to bytes kept its low bits
     let (y, u, v) = o.frame.cropped_planes((cx, cy, cw, ch), stores_u8(bd, bdc));

@@ -90,6 +90,50 @@ fixture_tests!(
     odd_1918x1078_422,
     odd_1918x1078_422_10,
     uhd_4k_422_10,
+    intra_444,
+    intra_444_10,
+    intra_444_nosao_nodbk,
+    intra_444_10_nosao_nodbk,
+    medium_444,
+    medium_444_10,
+    slow_444,
+    p_only_444_10,
+    bframes_444,
+    bframes_444_10,
+    no_sao_444,
+    no_deblock_444_10,
+    deblock_m3_3_444,
+    rect_amp_444_10,
+    tskip_444,
+    tskip_444_10,
+    weightp_444,
+    weightp_444_10,
+    qp_444_10,
+    crf0_444,
+    crf51_444_10,
+    lossless_444,
+    lossless_444_10,
+    cu_lossless_444,
+    scaling_list_444_10,
+    ctu16_444,
+    ctu32_tu4_444_10,
+    constrained_intra_444,
+    slices4_444_10,
+    no_strong_intra_444,
+    odd_201x117_444,
+    odd_331x99_444_10,
+    odd_1918x1078_444_10,
+    intra_400,
+    intra_400_10,
+    intra_400_nosao_nodbk,
+    medium_400,
+    slow_400_10,
+    bframes_400_10,
+    tskip_400,
+    weightp_400,
+    lossless_400,
+    cu_lossless_400_10,
+    odd_201x117_400,
 );
 
 /// Draft mode: sub-layer non-reference pictures skip deblocking and SAO and are flagged; every
@@ -97,7 +141,7 @@ fixture_tests!(
 #[test]
 fn draft_mode_changes_only_flagged_non_reference_pictures() {
     let mut checked = 0;
-    for name in ["bframes", "medium", "slow", "weightp_main10", "bframes_422", "bframes_422_10"] {
+    for name in ["bframes", "medium", "slow", "weightp_main10", "bframes_422", "bframes_422_10", "bframes_444", "bframes_444_10", "bframes_400_10"] {
         let f = common::fixture(name);
         let Some((hevc, yuv)) = common::ensure(f) else {
             eprintln!("skipped {name}");
@@ -177,6 +221,30 @@ fn compare_detects_a_422_chroma_mismatch() {
     assert!(err.contains("frame 0") && err.contains("plane U") && err.contains(&format!("(3,{})", h - 1)), "{err}");
     // read as 4:2:0 the frames are the wrong size
     assert!(common::compare(&pics, &reference, w, h, f.bit_depth, 1).is_err());
+}
+
+/// The 4:4:4 comparison reads full-size chroma planes and the monochrome one luma only: a flipped
+/// sample in the last Cr sample of a 4:4:4 frame (past where a 4:2:0 reading would end) is reported
+/// in its plane, and a flipped grey sample in the luma plane; read with the wrong format, the frames
+/// are the wrong size.
+#[test]
+fn compare_detects_444_and_monochrome_mismatches() {
+    for (name, plane) in [("intra_444_10", "plane V"), ("intra_400_10", "plane Y")] {
+        let f = common::fixture(name);
+        let Some((hevc, yuv)) = common::ensure(f) else { return };
+        let pics = common::decode_file_threads(&hevc, 1).map_err(|e| e.1).unwrap();
+        let mut reference = std::fs::read(yuv).unwrap();
+        let (w, h) = (f.width as usize, f.height as usize);
+        common::compare(&pics, &reference, w, h, f.bit_depth, f.chroma).unwrap();
+        // the last sample of frame 0
+        let pos = common::frame_size(f) - 2;
+        reference[pos] ^= 1;
+        let err = common::compare(&pics, &reference, w, h, f.bit_depth, f.chroma).unwrap_err();
+        assert!(err.contains("frame 0") && err.contains(plane) && err.contains(&format!("({},{})", w - 1, h - 1)), "{name}: {err}");
+        for other in [1, 2] {
+            assert!(common::compare(&pics, &reference, w, h, f.bit_depth, other).is_err(), "{name} read as chroma_format_idc {other}");
+        }
+    }
 }
 
 /// Pre-generate every fixture and its reference decode (`cargo xtask fixtures`).

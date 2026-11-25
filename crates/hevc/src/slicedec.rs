@@ -146,7 +146,8 @@ impl<S: Sample> PicState<S> {
         let (w4, h4) = (width.div_ceil(4), height.div_ceil(4));
         let log2_ctb = sps.log2_ctb;
         let (wctb, hctb) = (sps.pic_width_in_ctbs() as usize, sps.pic_height_in_ctbs() as usize);
-        let (bd_y, bd_c) = (sps.bit_depth_luma, sps.bit_depth_chroma);
+        // (the frame's chroma depth: the luma depth for monochrome pictures)
+        let (bd_y, bd_c) = (sps.bit_depth_luma, frame.bit_depth_c);
         let gy = S::from_u16(1u16 << (bd_y - 1));
         let gc = S::from_u16(1u16 << (bd_c - 1));
         PicState {
@@ -266,7 +267,11 @@ pub struct SliceDecoder<'a, S> {
     // current CU
     pub cu_transquant_bypass: bool,
     pub cu_intra: bool,
-    pub intra_chroma_mode: u32,
+    /// log2 of the current CU's size.
+    pub cu_log2: u32,
+    /// IntraPredModeC of the CU: one mode in 4:2:0 / 4:2:2 (entry 0), one per prediction block
+    /// (in z-order) for an NxN CU in 4:4:4.
+    pub intra_chroma_modes: [u32; 4],
     pub max_trafo_depth: u32,
     pub intra_split: bool,
     pub cu_part: PartMode,
@@ -390,7 +395,8 @@ impl<'a, S: Sample> SliceDecoder<'a, S> {
             qp_cr: 0,
             cu_transquant_bypass: false,
             cu_intra: false,
-            intra_chroma_mode: 0,
+            cu_log2: 3,
+            intra_chroma_modes: [0; 4],
             max_trafo_depth: 0,
             intra_split: false,
             cu_part: PartMode::P2Nx2N,
@@ -649,6 +655,7 @@ impl<'a, S: Sample> SliceDecoder<'a, S> {
 
     fn coding_unit(&mut self, x0: i32, y0: i32, log2: u32, depth: u32) -> Result<()> {
         let n = 1i32 << log2;
+        self.cu_log2 = log2;
         // quantization group start
         let qg_mask = (1 << self.log2_min_cu_qp_delta) - 1;
         if (x0 & qg_mask) == 0 && (y0 & qg_mask) == 0 {
@@ -812,7 +819,8 @@ impl<'a, S: Sample> SliceDecoder<'a, S> {
         let (csx, csy) = self.pic.chroma.shifts();
         let (ncw, nch) = (n >> csx, n >> csy);
         let (bl, bc) = (self.sps.pcm_bit_depth_luma, self.sps.pcm_bit_depth_chroma);
-        let total_bits = n * n * bl as usize + 2 * ncw * nch * bc as usize;
+        let ncomp = if self.pic.chroma.has_chroma() { 3 } else { 1 };
+        let total_bits = n * n * bl as usize + (ncomp - 1) * ncw * nch * bc as usize;
         ensure!(start + total_bits.div_ceil(8) <= data.len(), "PCM samples truncated");
         let mut r = filmcraft_bitstream::BitReader::new(&data[start..]);
         let (sy, sc) = (self.pic.bd_y - bl, self.pic.bd_c - bc);
@@ -824,7 +832,7 @@ impl<'a, S: Sample> SliceDecoder<'a, S> {
             }
         }
         let cw = self.pic.cwidth;
-        for c in 1..3 {
+        for c in 1..ncomp {
             for y in 0..nch {
                 for x in 0..ncw {
                     let v = r.read_bits(bc)? as u16;
@@ -896,22 +904,44 @@ impl<'a, S: Sample> SliceDecoder<'a, S> {
                 self.fill_blk(xp, yp, pb, pb, |b| b.ipm = mode as u8);
             }
         }
-        // chroma mode (one per CU in 4:2:0 and 4:2:2, derived from the first PU's luma mode:
-        // Table 8-2, then the 4:2:2 mapping of Table 8-3)
-        let icpm = if self.dd(INTRA_CHROMA) == 0 { 4 } else { self.bypass_bits(2) };
-        let luma = self.pic.blk_at(x0, y0).ipm as u32;
-        let mode = match icpm {
-            4 => luma,
-            _ => {
-                let m = [0, 26, 10, 1][icpm as usize];
-                if m == luma { 34 } else { m }
+        // chroma modes (8.4.3): one per CU in 4:2:0 and 4:2:2, derived from the first PU's luma
+        // mode (Table 8-2, then the 4:2:2 mapping of Table 8-3); one per PU in 4:4:4, from that
+        // PU's luma mode
+        let chroma = self.pic.chroma;
+        if !chroma.has_chroma() {
+            return Ok(());
+        }
+        let per_pu = if chroma == ChromaFormat::C444 { nb } else { 1 };
+        for j in 0..per_pu {
+            for i in 0..per_pu {
+                let icpm = if self.dd(INTRA_CHROMA) == 0 { 4 } else { self.bypass_bits(2) };
+                let luma = self.pic.blk_at(x0 + i * pb, y0 + j * pb).ipm as u32;
+                let mode = match icpm {
+                    4 => luma,
+                    _ => {
+                        let m = [0, 26, 10, 1][icpm as usize];
+                        if m == luma { 34 } else { m }
+                    }
+                };
+                self.intra_chroma_modes[(j * per_pu + i) as usize] = match chroma {
+                    ChromaFormat::C422 => INTRA_CHROMA_MODE_422.get(mode as usize).copied().map_or(mode, u32::from),
+                    _ => mode,
+                };
             }
-        };
-        self.intra_chroma_mode = match self.pic.chroma {
-            ChromaFormat::C420 => mode,
-            ChromaFormat::C422 => INTRA_CHROMA_MODE_422.get(mode as usize).copied().map_or(mode, u32::from),
-        };
+        }
         Ok(())
+    }
+
+    /// IntraPredModeC of the chroma block at component position (x, y) of the current CU.
+    #[inline]
+    fn chroma_mode_at(&self, x: i32, y: i32) -> u32 {
+        if self.intra_split && self.pic.chroma == ChromaFormat::C444 {
+            // 4:4:4 chroma positions are luma positions; the PU is the quadrant of the CU
+            let h = self.cu_log2.saturating_sub(1);
+            self.intra_chroma_modes[((((y >> h) & 1) << 1) | ((x >> h) & 1)) as usize]
+        } else {
+            self.intra_chroma_modes[0]
+        }
     }
 
     /// `parent_cbf_c[c][t]`: cbf_cb / cbf_cr (c) of the parent node, for the upper (t = 0) and, in
@@ -925,11 +955,13 @@ impl<'a, S: Sample> SliceDecoder<'a, S> {
             log2 > self.sps.log2_max_tb || (self.intra_split && depth == 0) || inter_split
         };
         let mut cbf_c = [[false; 2]; 2];
-        if log2 > 2 {
+        // (monochrome: no chroma cbfs)
+        let chroma = self.pic.chroma;
+        if chroma.has_chroma() && (log2 > 2 || chroma == ChromaFormat::C444) {
             // the second cbf of each chroma component (the lower block of the 4:2:2 chroma
             // rectangle) is coded for a leaf, and at 8x8 (whose chroma is coded with the 4x4 luma
             // blocks) also when split
-            let second = self.pic.chroma == ChromaFormat::C422 && (!split || log2 == 3);
+            let second = chroma == ChromaFormat::C422 && (!split || log2 == 3);
             for (c, cbf) in cbf_c.iter_mut().enumerate() {
                 if depth == 0 || parent_cbf_c[c][0] {
                     cbf[0] = self.dd(CBF_CHROMA + depth as usize) == 1;
@@ -938,8 +970,8 @@ impl<'a, S: Sample> SliceDecoder<'a, S> {
                     }
                 }
             }
-        } else {
-            // 4x4 luma blocks: chroma cbfs are those of the parent (coded at blkIdx 3)
+        } else if chroma.has_chroma() {
+            // 4x4 luma blocks outside 4:4:4: chroma cbfs are those of the parent (coded at blkIdx 3)
             cbf_c = parent_cbf_c;
             if depth == 0 {
                 cbf_c = [[false; 2]; 2];
@@ -964,7 +996,9 @@ impl<'a, S: Sample> SliceDecoder<'a, S> {
 
     fn transform_unit(&mut self, x0: i32, y0: i32, xb: i32, yb: i32, log2: u32, blk_idx: u32, cbf_luma: bool, cbf_c: [[bool; 2]; 2]) -> Result<()> {
         let n = 1i32 << log2;
-        let chroma_here = log2 > 2 || blk_idx == 3;
+        let chroma = self.pic.chroma;
+        // chroma blocks of this unit: at every unit in 4:4:4, else with the 8x8 parent's last 4x4
+        let chroma_here = chroma.has_chroma() && (log2 > 2 || blk_idx == 3 || chroma == ChromaFormat::C444);
         let cbf_chroma = cbf_c.iter().flatten().any(|&b| b);
         if (cbf_luma || cbf_chroma) && self.pps.cu_qp_delta_enabled && !self.is_cu_qp_delta_coded {
             // cu_qp_delta_abs: prefix TU(5) with ctx 0,1,1,1,1, suffix EG0
@@ -1005,17 +1039,17 @@ impl<'a, S: Sample> SliceDecoder<'a, S> {
             return Ok(());
         }
         // Chroma blocks of this transform unit (7.3.8.10): square blocks of (luma size) /
-        // SubWidthC at the chroma position of the unit (of the 8x8 parent for 4x4 luma blocks);
-        // in 4:2:2 the chroma rectangle is twice as tall and coded as two stacked square blocks,
-        // the lower one predicted from the reconstructed upper one (8.4.4.1).
-        let (sx, sy) = self.pic.chroma.shifts();
-        let (xc, yc, log2c) = if log2 > 2 { (x0 >> sx, y0 >> sy, log2 - 1) } else { (xb >> sx, yb >> sy, 2) };
-        let blocks = if self.pic.chroma == ChromaFormat::C422 { 2 } else { 1 };
+        // SubWidthC at the chroma position of the unit (of the 8x8 parent for 4x4 luma blocks
+        // outside 4:4:4); in 4:2:2 the chroma rectangle is twice as tall and coded as two stacked
+        // square blocks, the lower one predicted from the reconstructed upper one (8.4.4.1).
+        let (sx, sy) = chroma.shifts();
+        let (xc, yc, log2c) = if log2 > 2 || chroma == ChromaFormat::C444 { (x0 >> sx, y0 >> sy, log2 - sx) } else { (xb >> sx, yb >> sy, 2) };
+        let blocks = if chroma == ChromaFormat::C422 { 2 } else { 1 };
         for c in 1..3 {
             for (t, &cbf) in cbf_c[c - 1].iter().enumerate().take(blocks) {
                 let yt = yc + ((t as i32) << log2c);
                 if self.cu_intra {
-                    let mode = self.intra_chroma_mode;
+                    let mode = self.chroma_mode_at(xc, yc);
                     self.intra_predict(xc, yt, log2c, c, mode);
                 }
                 if cbf {
@@ -1079,8 +1113,9 @@ impl<'a, S: Sample> SliceDecoder<'a, S> {
         }
         let bd = if c == 0 { self.pic.bd_y } else { self.pic.bd_c };
         intra::substitute(r, &al, &at, n, bd);
-        if c == 0 {
-            intra::filter(r, mode, n, self.sps.strong_intra_smoothing, true, bd);
+        // neighbour filtering (8.4.4.2.3): luma, and chroma in 4:4:4 (strong smoothing: luma only)
+        if c == 0 || self.pic.chroma == ChromaFormat::C444 {
+            intra::filter(r, mode, n, self.sps.strong_intra_smoothing, c == 0, bd);
         }
         let off = y0 as usize * stride + x0 as usize;
         intra::predict(r, mode, n, c == 0, bd, &mut self.pic.planes[c][off..], stride);
@@ -1113,8 +1148,8 @@ impl<'a, S: Sample> SliceDecoder<'a, S> {
             ly = (1 << nb) * (2 + (py & 1)) + self.bypass_bits(nb);
         }
         // scanIdx (7.4.9.11)
-        let scan_idx = if self.cu_intra && (log2 == 2 || (log2 == 3 && c == 0)) {
-            let m = if c == 0 { self.pic.blk_at(x0, y0).ipm as u32 } else { self.intra_chroma_mode };
+        let scan_idx = if self.cu_intra && (log2 == 2 || (log2 == 3 && (c == 0 || self.pic.chroma == ChromaFormat::C444))) {
+            let m = if c == 0 { self.pic.blk_at(x0, y0).ipm as u32 } else { self.chroma_mode_at(x0, y0) };
             if (6..=14).contains(&m) {
                 2
             } else if (22..=30).contains(&m) {
@@ -1481,7 +1516,8 @@ impl<'a, S: Sample> SliceDecoder<'a, S> {
         let bi = f.pred(0) && f.pred(1);
         let pwt = self.sh.pwt.as_ref().filter(|_| weighted);
         let (sx, sy) = self.pic.chroma.shifts();
-        for c in 0..3 {
+        let ncomp = if self.pic.chroma.has_chroma() { 3 } else { 1 };
+        for c in 0..ncomp {
             let (x, y, bw, bh, bd) = if c == 0 { (xp, yp, w, h, self.pic.bd_y) } else { (xp >> sx, yp >> sy, w >> sx, h >> sy, self.pic.bd_c) };
             // Explicit weights equal to the default ones (weight 2^denom and offset 0 for every
             // list used, as signalled for most slices of a weighted-prediction stream) give exactly

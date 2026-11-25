@@ -1,8 +1,8 @@
 //! Clean-room pure-Rust H.265 / HEVC decoder, implemented from ITU-T Rec. H.265 (ISO/IEC 23008-2).
 //!
-//! Supported: Main, Main 10 and Main 4:2:2 10 profiles (4:2:0 and 4:2:2, 8/10-bit; up to 12-bit
-//! without range-extension tools), all coding tools of those profiles: CABAC, coding / transform
-//! quadtrees, AMP, PCM,
+//! Supported: Main, Main 10, Main 4:2:2 10, Main 4:4:4 (10) and monochrome profiles (4:2:0,
+//! 4:2:2, 4:4:4 and 4:0:0, 8/10-bit; up to 12-bit without range-extension tools), all coding
+//! tools of those profiles: CABAC, coding / transform quadtrees, AMP, PCM,
 //! transform skip, scaling lists, sign data hiding, 35 intra modes with strong intra smoothing,
 //! merge / AMVP / TMVP, weighted prediction, deblocking, SAO, tiles, wavefront parallel processing
 //! (parsing), dependent slice segments, short- and long-term reference picture sets.
@@ -55,31 +55,40 @@ pub struct ColorInfo {
     pub matrix: u8,
 }
 
-/// Chroma sampling of a decoded picture (`chroma_format_idc`; 4:4:4 and monochrome are not
-/// decoded).
+/// Chroma sampling of a decoded picture (`ChromaArrayType`; three separately coded colour planes
+/// are not decoded).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ChromaFormat {
+    /// Monochrome (4:0:0): luma only, the `u` / `v` planes are empty.
+    C400,
     /// 4:2:0: chroma planes are half the luma width and height.
     C420,
     /// 4:2:2: chroma planes are half the luma width and the full luma height.
     C422,
+    /// 4:4:4: chroma planes are the size of the luma plane.
+    C444,
 }
 
 impl ChromaFormat {
     /// The decoded format for `ChromaArrayType`, if this decoder handles it.
     pub fn from_idc(idc: u32) -> Option<ChromaFormat> {
         match idc {
+            0 => Some(ChromaFormat::C400),
             1 => Some(ChromaFormat::C420),
             2 => Some(ChromaFormat::C422),
+            3 => Some(ChromaFormat::C444),
             _ => None,
         }
     }
-    /// log2(SubWidthC), log2(SubHeightC): the shifts from luma to chroma sample positions.
+    /// log2(SubWidthC), log2(SubHeightC): the shifts from luma to chroma sample positions
+    /// (monochrome has no chroma samples; it reports the 4:2:0 shifts so that the chroma geometry
+    /// stays well defined, with no samples in it).
     #[inline(always)]
     pub fn shifts(self) -> (u32, u32) {
         match self {
-            ChromaFormat::C420 => (1, 1),
+            ChromaFormat::C400 | ChromaFormat::C420 => (1, 1),
             ChromaFormat::C422 => (1, 0),
+            ChromaFormat::C444 => (0, 0),
         }
     }
     /// SubWidthC.
@@ -91,6 +100,11 @@ impl ChromaFormat {
     #[inline(always)]
     pub fn sub_height(self) -> usize {
         1 << self.shifts().1
+    }
+    /// Whether pictures have chroma planes (all but monochrome).
+    #[inline(always)]
+    pub fn has_chroma(self) -> bool {
+        self != ChromaFormat::C400
     }
 }
 
@@ -140,14 +154,15 @@ impl Plane {
     }
 }
 
-/// A decoded, cropped picture in planar 4:2:0 or 4:2:2 ([`Picture::chroma`]).
+/// A decoded, cropped picture in planar 4:2:0, 4:2:2 or 4:4:4, or monochrome ([`Picture::chroma`]).
 #[derive(Clone, Debug)]
 pub struct Picture {
     /// Cropped luma width.
     pub width: u32,
     /// Cropped luma height.
     pub height: u32,
-    /// Size of the `u` / `v` planes: the luma size divided by SubWidthC / SubHeightC, rounded up.
+    /// Size of the `u` / `v` planes: the luma size divided by SubWidthC / SubHeightC, rounded up
+    /// (0 x 0 for monochrome pictures, whose `u` / `v` planes are empty).
     pub chroma_width: u32,
     pub chroma_height: u32,
     /// Chroma sampling of the `u` / `v` planes.
@@ -155,7 +170,7 @@ pub struct Picture {
     /// Luma bit depth. The three planes share one storage type: 8-bit only when both depths are 8.
     pub bit_depth: u32,
     /// Chroma bit depth; a stream may code it apart from the luma depth (a legal Main 10 stream
-    /// can have 8-bit luma and 10-bit chroma).
+    /// can have 8-bit luma and 10-bit chroma). Monochrome pictures report the luma depth.
     pub bit_depth_chroma: u32,
     pub y: Plane,
     pub u: Plane,

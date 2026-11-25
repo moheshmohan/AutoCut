@@ -16,9 +16,9 @@ pub struct Fixture {
     pub frames: u32,
     /// Extra video filter appended after the source (e.g. noise, fade).
     pub filter: &'static str,
-    /// 10 (yuv420p10le / yuv422p10le) or 8.
+    /// 8, 10 or 12.
     pub bit_depth: u32,
-    /// `chroma_format_idc`: 1 (4:2:0) or 2 (4:2:2).
+    /// `chroma_format_idc`: 0 (monochrome), 1 (4:2:0), 2 (4:2:2) or 3 (4:4:4).
     pub chroma: u32,
     /// Encoder arguments (libx265 unless `-c:v` is given).
     pub args: &'static [&'static str],
@@ -32,6 +32,12 @@ macro_rules! fx {
     };
     ($name:expr, $src:expr, $w:expr, $h:expr, $n:expr, $filter:expr, $bd:expr, 422, [$($a:expr),* $(,)?]) => {
         Fixture { name: $name, source: $src, width: $w, height: $h, frames: $n, filter: $filter, bit_depth: $bd, chroma: 2, args: &[$($a),*] }
+    };
+    ($name:expr, $src:expr, $w:expr, $h:expr, $n:expr, $filter:expr, $bd:expr, 444, [$($a:expr),* $(,)?]) => {
+        Fixture { name: $name, source: $src, width: $w, height: $h, frames: $n, filter: $filter, bit_depth: $bd, chroma: 3, args: &[$($a),*] }
+    };
+    ($name:expr, $src:expr, $w:expr, $h:expr, $n:expr, $filter:expr, $bd:expr, 400, [$($a:expr),* $(,)?]) => {
+        Fixture { name: $name, source: $src, width: $w, height: $h, frames: $n, filter: $filter, bit_depth: $bd, chroma: 0, args: &[$($a),*] }
     };
 }
 
@@ -121,6 +127,64 @@ pub const FIXTURES: &[Fixture] = &[
     fx!("odd_1918x1078_422", "testsrc2", 1918, 1078, 3, NOISE, 8, 422, ["-preset", "veryfast", "-x265-params", "log-level=error"]),
     fx!("odd_1918x1078_422_10", "testsrc2", 1918, 1078, 3, NOISE, 10, 422, ["-preset", "veryfast", "-x265-params", "log-level=error"]),
     fx!("uhd_4k_422_10", "testsrc2", 3840, 2160, 2, "", 10, 422, ["-preset", "ultrafast", "-x265-params", "log-level=error"]),
+    // 4:4:4 (Main 4:4:4 / Main 4:4:4 10, RExt profile without range-extension tools: libx265 with
+    // yuv444p / yuv444p10le): chroma at full resolution, 4x4 chroma blocks, chroma modes per PU
+    fx!("intra_444", "testsrc2", 352, 288, 3, NOISE, 8, 444, ["-x265-params", "keyint=1:log-level=error"]),
+    fx!("intra_444_10", "testsrc2", 352, 288, 3, NOISE, 10, 444, ["-x265-params", "keyint=1:log-level=error"]),
+    fx!("intra_444_nosao_nodbk", "testsrc2", 352, 288, 2, NOISE, 8, 444, ["-x265-params", "keyint=1:no-sao=1:no-deblock=1:log-level=error"]),
+    fx!("intra_444_10_nosao_nodbk", "mandelbrot", 352, 288, 2, NOISE, 10, 444, ["-x265-params", "keyint=1:no-sao=1:no-deblock=1:log-level=error"]),
+    fx!("medium_444", "testsrc2", 352, 288, 16, NOISE, 8, 444, ["-preset", "medium", "-x265-params", "log-level=error"]),
+    fx!("medium_444_10", "testsrc2", 352, 288, 16, NOISE, 10, 444, ["-preset", "medium", "-x265-params", "log-level=error"]),
+    fx!("slow_444", "mandelbrot", 352, 288, 12, NOISE, 8, 444, ["-preset", "slow", "-x265-params", "log-level=error"]),
+    fx!("p_only_444_10", "testsrc2", 352, 288, 16, NOISE, 10, 444, ["-x265-params", "bframes=0:log-level=error"]),
+    fx!("bframes_444", "testsrc2", 352, 288, 24, NOISE, 8, 444, ["-x265-params", "bframes=8:b-pyramid=1:ref=4:log-level=error"]),
+    fx!("bframes_444_10", "testsrc2", 352, 288, 24, NOISE, 10, 444, ["-x265-params", "bframes=8:b-pyramid=1:ref=4:log-level=error"]),
+    fx!("no_sao_444", "testsrc2", 352, 288, 12, NOISE, 8, 444, ["-x265-params", "no-sao=1:log-level=error"]),
+    fx!("no_deblock_444_10", "testsrc2", 352, 288, 12, NOISE, 10, 444, ["-x265-params", "no-deblock=1:log-level=error"]),
+    fx!("deblock_m3_3_444", "testsrc2", 352, 288, 12, NOISE, 8, 444, ["-x265-params", "deblock=-3,3:log-level=error"]),
+    fx!("rect_amp_444_10", "mandelbrot", 352, 288, 12, NOISE, 10, 444, ["-x265-params", "rect=1:amp=1:log-level=error"]),
+    fx!("tskip_444", "testsrc2", 352, 288, 12, NOISE, 8, 444, ["-x265-params", "tskip=1:log-level=error"]),
+    fx!("tskip_444_10", "testsrc2", 352, 288, 12, NOISE, 10, 444, ["-x265-params", "tskip=1:keyint=1:log-level=error"]),
+    fx!("weightp_444", "testsrc2", 352, 288, 20, "fade=in:0:18", 8, 444, ["-x265-params", "weightp=1:weightb=1:bframes=3:log-level=error"]),
+    fx!("weightp_444_10", "testsrc2", 352, 288, 20, "fade=in:0:18", 10, 444, ["-x265-params", "weightp=1:weightb=1:log-level=error"]),
+    fx!("qp_444_10", "mandelbrot", 352, 288, 8, NOISE, 10, 444, ["-x265-params", "aq-mode=3:cutree=1:cbqpoffs=-4:crqpoffs=3:log-level=error"]),
+    fx!("crf0_444", "mandelbrot", 176, 144, 4, NOISE, 8, 444, ["-crf", "0", "-x265-params", "log-level=error"]),
+    fx!("crf51_444_10", "testsrc2", 352, 288, 8, NOISE, 10, 444, ["-crf", "51", "-x265-params", "log-level=error"]),
+    fx!("lossless_444", "testsrc2", 176, 144, 4, NOISE, 8, 444, ["-x265-params", "lossless=1:log-level=error"]),
+    fx!("lossless_444_10", "testsrc2", 176, 144, 4, NOISE, 10, 444, ["-x265-params", "lossless=1:log-level=error"]),
+    fx!("cu_lossless_444", "testsrc2", 176, 144, 6, NOISE, 8, 444, ["-x265-params", "cu-lossless=1:log-level=error"]),
+    fx!("scaling_list_444_10", "testsrc2", 352, 288, 8, NOISE, 10, 444, ["-x265-params", "scaling-list=default:log-level=error"]),
+    fx!("ctu16_444", "testsrc2", 352, 288, 8, NOISE, 8, 444, ["-x265-params", "ctu=16:log-level=error"]),
+    fx!(
+        "ctu32_tu4_444_10",
+        "testsrc2",
+        352,
+        288,
+        8,
+        NOISE,
+        10,
+        444,
+        ["-x265-params", "ctu=32:tu-intra-depth=4:tu-inter-depth=4:max-tu-size=16:log-level=error"]
+    ),
+    fx!("constrained_intra_444", "testsrc2", 352, 288, 8, NOISE, 8, 444, ["-x265-params", "constrained-intra=1:log-level=error"]),
+    fx!("slices4_444_10", "testsrc2", 352, 288, 8, NOISE, 10, 444, ["-x265-params", "slices=4:log-level=error"]),
+    fx!("no_strong_intra_444", "testsrc2", 352, 288, 4, NOISE, 8, 444, ["-x265-params", "no-strong-intra-smoothing=1:keyint=1:log-level=error"]),
+    // 4:4:4 allows any width and height (SubWidthC = SubHeightC = 1)
+    fx!("odd_201x117_444", "testsrc2", 201, 117, 10, NOISE, 8, 444, ["-x265-params", "bframes=3:log-level=error"]),
+    fx!("odd_331x99_444_10", "mandelbrot", 331, 99, 8, NOISE, 10, 444, ["-x265-params", "bframes=3:log-level=error"]),
+    fx!("odd_1918x1078_444_10", "testsrc2", 1918, 1078, 2, NOISE, 10, 444, ["-preset", "veryfast", "-x265-params", "log-level=error"]),
+    // monochrome (Main 4:0:0 RExt profiles: libx265 with gray / gray10le)
+    fx!("intra_400", "testsrc2", 352, 288, 3, NOISE, 8, 400, ["-x265-params", "keyint=1:log-level=error"]),
+    fx!("intra_400_10", "testsrc2", 352, 288, 3, NOISE, 10, 400, ["-x265-params", "keyint=1:log-level=error"]),
+    fx!("intra_400_nosao_nodbk", "testsrc2", 352, 288, 2, NOISE, 8, 400, ["-x265-params", "keyint=1:no-sao=1:no-deblock=1:log-level=error"]),
+    fx!("medium_400", "testsrc2", 352, 288, 16, NOISE, 8, 400, ["-preset", "medium", "-x265-params", "log-level=error"]),
+    fx!("slow_400_10", "mandelbrot", 352, 288, 12, NOISE, 10, 400, ["-preset", "slow", "-x265-params", "log-level=error"]),
+    fx!("bframes_400_10", "testsrc2", 352, 288, 24, NOISE, 10, 400, ["-x265-params", "bframes=8:b-pyramid=1:ref=4:log-level=error"]),
+    fx!("tskip_400", "testsrc2", 352, 288, 8, NOISE, 8, 400, ["-x265-params", "tskip=1:log-level=error"]),
+    fx!("weightp_400", "testsrc2", 352, 288, 20, "fade=in:0:18", 8, 400, ["-x265-params", "weightp=1:weightb=1:bframes=3:log-level=error"]),
+    fx!("lossless_400", "testsrc2", 176, 144, 4, NOISE, 8, 400, ["-x265-params", "lossless=1:log-level=error"]),
+    fx!("cu_lossless_400_10", "testsrc2", 176, 144, 6, NOISE, 10, 400, ["-x265-params", "cu-lossless=1:log-level=error"]),
+    fx!("odd_201x117_400", "testsrc2", 201, 117, 8, NOISE, 8, 400, ["-x265-params", "bframes=3:log-level=error"]),
     // performance reference streams (tests/perf.rs)
     fx!("bench_1080p", "testsrc2", 1920, 1080, 60, "noise=alls=3:allf=t", 8, ["-preset", "medium", "-crf", "24", "-x265-params", "log-level=error"]),
     fx!("bench_4k", "testsrc2", 3840, 2160, 20, "noise=alls=3:allf=t", 10, ["-preset", "fast", "-crf", "26", "-x265-params", "log-level=error"]),
@@ -133,6 +197,17 @@ pub const FIXTURES: &[Fixture] = &[
         "noise=alls=3:allf=t",
         10,
         422,
+        ["-preset", "medium", "-crf", "24", "-x265-params", "log-level=error"]
+    ),
+    fx!(
+        "bench_1080p_444_10",
+        "testsrc2",
+        1920,
+        1080,
+        30,
+        "noise=alls=3:allf=t",
+        10,
+        444,
         ["-preset", "medium", "-crf", "24", "-x265-params", "log-level=error"]
     ),
     // Apple VideoToolbox (hardware encoder, macOS only)
@@ -167,19 +242,37 @@ fn run(cmd: &mut Command) -> bool {
     }
 }
 
-/// The raw planar format of a fixture's samples (`chroma_format_idc` 1 or 2).
+/// The raw planar format of a fixture's samples (`chroma_format_idc` 0..=3, 8 / 10 / 12 bits).
 pub fn pix_fmt(bd: u32, chroma: u32) -> &'static str {
-    match (chroma, bd > 8) {
-        (2, false) => "yuv422p",
-        (2, true) => "yuv422p10le",
-        (_, false) => "yuv420p",
-        (_, true) => "yuv420p10le",
+    match (chroma, bd) {
+        (0, 8) => "gray",
+        (0, 10) => "gray10le",
+        (0, _) => "gray12le",
+        (2, 8) => "yuv422p",
+        (2, 10) => "yuv422p10le",
+        (2, _) => "yuv422p12le",
+        (3, 8) => "yuv444p",
+        (3, 10) => "yuv444p10le",
+        (3, _) => "yuv444p12le",
+        (_, 8) => "yuv420p",
+        (_, 10) => "yuv420p10le",
+        (_, _) => "yuv420p12le",
     }
 }
 
-/// log2 of (SubWidthC, SubHeightC) for `chroma_format_idc` 1 or 2.
+/// log2 of (SubWidthC, SubHeightC) for `chroma_format_idc` 1..=3 (monochrome: see
+/// [`chroma_planes`]).
 pub fn chroma_shifts(chroma: u32) -> (u32, u32) {
-    if chroma == 2 { (1, 0) } else { (1, 1) }
+    match chroma {
+        2 => (1, 0),
+        3 => (0, 0),
+        _ => (1, 1),
+    }
+}
+
+/// Number of chroma planes in the raw frames (none for monochrome).
+pub fn chroma_planes(chroma: u32) -> usize {
+    if chroma == 0 { 0 } else { 2 }
 }
 
 /// Bytes of one raw frame of the fixture as ffmpeg writes it.
@@ -187,7 +280,7 @@ pub fn frame_size(f: &Fixture) -> usize {
     let (w, h) = (f.width as usize, f.height as usize);
     let bps = if f.bit_depth > 8 { 2 } else { 1 };
     let (sx, sy) = chroma_shifts(f.chroma);
-    (w * h + 2 * w.div_ceil(1 << sx) * h.div_ceil(1 << sy)) * bps
+    (w * h + chroma_planes(f.chroma) * w.div_ceil(1 << sx) * h.div_ceil(1 << sy)) * bps
 }
 
 /// The pixel format ffprobe reports for the video stream in `path`.
@@ -228,9 +321,9 @@ pub fn ensure(f: &Fixture) -> Option<(PathBuf, PathBuf)> {
             eprintln!("SKIPPED ({}): encoder unavailable", f.name);
             return None;
         }
-        // A libx265 built without 4:2:2 or a high bit depth encodes something else: the reference
-        // decode would then convert it, and no sample would match.
-        if f.chroma == 2
+        // A libx265 built without 4:2:2 / 4:4:4 / monochrome or a high bit depth encodes
+        // something else: the reference decode would then convert it, and no sample would match.
+        if (f.chroma != 1 || f.bit_depth > 10)
             && let Some(got) = stream_pix_fmt(&tmp)
             && got != pix
         {
@@ -321,13 +414,14 @@ pub fn decode_file_opts(path: &Path, threads: usize, draft: bool) -> Result<Vec<
     Ok(out)
 }
 
-/// Compare decoded pictures with a raw planar reference (yuv420p / yuv420p10le / yuv422p /
-/// yuv422p10le; `chroma` = `chroma_format_idc`) plane by plane; returns a diagnostic on the first
-/// mismatch (frame, plane, sample position, CTB (64x64) and 8x8 block).
+/// Compare decoded pictures with a raw planar reference ([`pix_fmt`]: 4:2:0, 4:2:2, 4:4:4 or
+/// grey at 8 to 12 bits; `chroma` = `chroma_format_idc`) plane by plane; returns a diagnostic on
+/// the first mismatch (frame, plane, sample position, CTB (64x64) and 8x8 block). Monochrome
+/// pictures must have empty chroma planes.
 pub fn compare(pics: &[Picture], reference: &[u8], w: usize, h: usize, bd: u32, chroma: u32) -> Result<(), String> {
     let bps = if bd > 8 { 2 } else { 1 };
     let (sx, sy) = chroma_shifts(chroma);
-    let (cw, ch) = (w.div_ceil(1 << sx), h.div_ceil(1 << sy));
+    let (cw, ch) = if chroma == 0 { (0, 0) } else { (w.div_ceil(1 << sx), h.div_ceil(1 << sy)) };
     let fsize = (w * h + 2 * cw * ch) * bps;
     let nref = reference.len() / fsize;
     for (i, p) in pics.iter().enumerate() {

@@ -484,22 +484,37 @@ impl HevcDecoder {
 /// frame pixels: 8-bit when all three planes are, else 16-bit at one depth for the frame. A stream
 /// may code luma and chroma at different depths (8-bit luma with 10-bit chroma is a legal Main 10
 /// stream), so the shallower planes are scaled up to the deeper one; before, the chroma was read
-/// at the luma's depth. 4:2:2 pictures (half-width, full-height chroma) become 4:2:2 frames.
+/// at the luma's depth. 4:2:2 pictures (half-width, full-height chroma) become 4:2:2 frames and
+/// 4:4:4 pictures 4:4:4 frames. Monochrome pictures (no chroma planes) become grey 4:2:0 frames:
+/// neutral chroma (half the code range) at the luma depth.
 pub(crate) fn hevc_pixel_data(
     planes: [filmcraft_hevc::Plane; 3],
     depths: (u32, u32),
     sampling: filmcraft_hevc::ChromaFormat,
     size: [usize; 6],
 ) -> filmcraft_frame::PixelData {
-    let sampling = match sampling {
-        filmcraft_hevc::ChromaFormat::C420 => filmcraft_frame::Chroma::C420,
-        filmcraft_hevc::ChromaFormat::C422 => filmcraft_frame::Chroma::C422,
-    };
-    let planes = planes.map(|p| match p {
+    let [y, u, v] = planes.map(|p| match p {
         filmcraft_hevc::Plane::U8(v) => Samples::U8(v),
         filmcraft_hevc::Plane::U16(v) => Samples::U16(v),
     });
-    yuv_pixel_data(planes, depths, sampling, size)
+    let sampling = match sampling {
+        filmcraft_hevc::ChromaFormat::C420 => filmcraft_frame::Chroma::C420,
+        filmcraft_hevc::ChromaFormat::C422 => filmcraft_frame::Chroma::C422,
+        filmcraft_hevc::ChromaFormat::C444 => filmcraft_frame::Chroma::C444,
+        filmcraft_hevc::ChromaFormat::C400 => {
+            let [w, h, _, _, ys, _] = size;
+            let (cw, ch) = (w.div_ceil(2), h.div_ceil(2));
+            let depth = depths.0.clamp(1, 16);
+            let n = cw.saturating_mul(ch);
+            let neutral = || match &y {
+                Samples::U8(_) => Samples::U8(vec![1u8 << (depth.min(8) - 1); n]),
+                Samples::U16(_) => Samples::U16(vec![1u16 << (depth - 1); n]),
+            };
+            let (u, v) = (neutral(), neutral());
+            return yuv_pixel_data([y, u, v], (depths.0, depths.0), filmcraft_frame::Chroma::C420, [w, h, cw, ch, ys, cw]);
+        }
+    };
+    yuv_pixel_data([y, u, v], depths, sampling, size)
 }
 
 /// An HEVC decoder error as a [`CodecError`] (see [`h264_error`]).
@@ -1352,6 +1367,57 @@ mod hevc_depth_tests {
             filmcraft_frame::PixelData::Yuv8 { planes, chroma, .. } => {
                 assert_eq!(chroma, filmcraft_frame::Chroma::C422);
                 assert_eq!(planes[1].len(), 6);
+            }
+            _ => panic!("8-bit planes expected"),
+        }
+    }
+
+    /// 4:4:4 pictures become 4:4:4 frames (full-size chroma planes, labelled so), at either depth.
+    #[test]
+    fn a_444_picture_becomes_a_444_frame() {
+        // 3 x 2 picture, strides with padding
+        let size = [3, 2, 3, 2, 4, 4];
+        let y: Vec<u16> = (0..8).collect();
+        let c: Vec<u16> = (500..508).collect();
+        match hevc_pixel_data([Plane::U16(y), Plane::U16(c.clone()), Plane::U16(c)], (10, 10), ChromaFormat::C444, size) {
+            filmcraft_frame::PixelData::Yuv16 { planes, chroma, bits, .. } => {
+                assert_eq!((chroma, bits), (filmcraft_frame::Chroma::C444, 10));
+                assert_eq!(planes[0].as_slice(), [0, 1, 2, 4, 5, 6]);
+                assert_eq!(planes[1].as_slice(), [500, 501, 502, 504, 505, 506]);
+            }
+            _ => panic!("16-bit planes expected"),
+        }
+        let p8 = |n: u8| Plane::U8((0..8).map(|i| i + n).collect());
+        match hevc_pixel_data([p8(0), p8(50), p8(90)], (8, 8), ChromaFormat::C444, size) {
+            filmcraft_frame::PixelData::Yuv8 { planes, chroma, .. } => {
+                assert_eq!(chroma, filmcraft_frame::Chroma::C444);
+                assert_eq!(planes[2].as_slice(), [90, 91, 92, 94, 95, 96]);
+            }
+            _ => panic!("8-bit planes expected"),
+        }
+    }
+
+    /// Monochrome pictures (empty chroma planes) become grey frames: 4:2:0 with neutral chroma at
+    /// the luma depth (128 at 8 bits, 512 at 10, 2048 at 12), whatever depth the SPS gave chroma.
+    #[test]
+    fn a_monochrome_picture_becomes_a_grey_frame() {
+        // 5 x 3 luma (odd sizes round the chroma up), stride 6
+        let size = [5, 3, 0, 0, 6, 0];
+        let luma: Vec<u16> = (0..18).collect();
+        for (depth, neutral) in [(10u32, 512u16), (12, 2048)] {
+            match hevc_pixel_data([Plane::U16(luma.clone()), Plane::U16(vec![]), Plane::U16(vec![])], (depth, 8), ChromaFormat::C400, size) {
+                filmcraft_frame::PixelData::Yuv16 { planes, chroma, bits, .. } => {
+                    assert_eq!((chroma, bits), (filmcraft_frame::Chroma::C420, depth));
+                    assert_eq!(planes[0].as_slice(), [0, 1, 2, 3, 4, 6, 7, 8, 9, 10, 12, 13, 14, 15, 16]);
+                    assert_eq!((planes[1].as_slice(), planes[2].as_slice()), (&[neutral; 6][..], &[neutral; 6][..]));
+                }
+                _ => panic!("16-bit planes expected"),
+            }
+        }
+        match hevc_pixel_data([Plane::U8(vec![7; 18]), Plane::U8(vec![]), Plane::U8(vec![])], (8, 8), ChromaFormat::C400, size) {
+            filmcraft_frame::PixelData::Yuv8 { planes, chroma, .. } => {
+                assert_eq!(chroma, filmcraft_frame::Chroma::C420);
+                assert_eq!((planes[0].len(), planes[1].as_slice(), planes[2].as_slice()), (15, &[128u8; 6][..], &[128u8; 6][..]));
             }
             _ => panic!("8-bit planes expected"),
         }
