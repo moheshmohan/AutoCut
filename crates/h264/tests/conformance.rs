@@ -56,8 +56,8 @@ fixture_tests!(
     vt_high_1080p,
 );
 
-// High 10 and High 10 Intra, compared per plane with ffmpeg's yuv420p10le decode
-// (`common::HIGH_FIXTURES`).
+// High 10, High 4:2:2 (8 and 10 bits) and their intra profiles, compared per plane with
+// ffmpeg's yuv420p10le / yuv422p / yuv422p10le decode (`common::HIGH_FIXTURES`).
 fixture_tests!(
     hi10_intra_cavlc,
     hi10_intra,
@@ -81,6 +81,45 @@ fixture_tests!(
     hi10_weightp_cavlc,
     hi10_crop_202x118,
     hi10_720p,
+    h422_intra_cavlc,
+    h422_intra,
+    h422_cabac_b,
+    h422_cavlc_b,
+    h422_pyramid_open_gop,
+    h422_direct_temporal,
+    h422_no_deblock,
+    h422_deblock_m3_3,
+    h422_no8x8dct,
+    h422_cqm,
+    h422_slices4_cavlc,
+    h422_constrained_intra,
+    h422_qp1,
+    h422_qp50,
+    h422_weightp,
+    h422_crop_202x117,
+    h422_10_intra_cavlc,
+    h422_10_intra,
+    h422_10_intra_no8x8dct,
+    h422_10_cabac_b,
+    h422_10_cavlc_b,
+    h422_10_pyramid_open_gop,
+    h422_10_direct_temporal,
+    h422_10_no_deblock,
+    h422_10_deblock_m3_3,
+    h422_10_no8x8dct,
+    h422_10_cqm,
+    h422_10_cqm_cavlc,
+    h422_10_slices4,
+    h422_10_constrained_intra,
+    h422_10_qp1,
+    h422_10_qp1_cavlc,
+    h422_10_qp62,
+    h422_10_chroma_offset,
+    h422_10_weightp,
+    h422_10_weightp_cavlc,
+    h422_10_crop_330x187,
+    h422_10_crop_98x61,
+    xavc_1080p_422_10_intra,
 );
 
 /// Draft mode (reduced-resolution playback) skips deblocking of non-reference pictures only:

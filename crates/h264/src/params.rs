@@ -8,8 +8,9 @@ use filmcraft_bitstream::BitReader;
 
 /// Maximum supported reconstructed picture size in bytes, every plane counted: the bytes of an
 /// 8-bit 4:2:0 picture of 2^25 luma samples (8K UHD fits comfortably), so hostile SPS dimensions
-/// cannot allocate full pictures and decoder work state. Deeper pictures get the same memory:
-/// 10-bit 4:2:0 up to 2^24 luma samples (5.7K; 8K is refused).
+/// cannot allocate full pictures and decoder work state. Deeper or 4:2:2 pictures get the same
+/// memory: 10-bit 4:2:0 up to 2^24 luma samples (5.7K), 10-bit 4:2:2 up to 3 * 2^22 (beyond any
+/// level 5.2 picture; 6K and 8K are refused).
 pub const MAX_PICTURE_BYTES: u64 = (1 << 25) * 3 / 2;
 
 /// Scaling matrices after applying fall-back rules, stored in raster order (weightScale).
@@ -530,15 +531,15 @@ impl Sps {
         self.max_dpb_frames()
     }
 
-    /// The sample format of the pictures, when this decoder handles it: 4:2:0 at 8 to 10 bits
-    /// (luma and chroma depths may differ).
+    /// The sample format of the pictures, when this decoder handles it: 4:2:0 or 4:2:2 at 8 to
+    /// 10 bits (luma and chroma depths may differ).
     pub fn format(&self) -> Result<Format> {
         let chroma = match (self.chroma_format_idc, self.separate_colour_plane) {
             (1, _) => ChromaFormat::C420,
-            (2, _) => return unsupported("chroma_format_idc 2 (4:2:2; 4:2:0 is implemented)"),
+            (2, _) => ChromaFormat::C422,
             (0, _) => return unsupported("monochrome (chroma_format_idc 0)"),
             (_, true) => return unsupported("4:4:4 with separate colour planes"),
-            _ => return unsupported(format!("chroma_format_idc {} (4:4:4; 4:2:0 is implemented)", self.chroma_format_idc)),
+            _ => return unsupported(format!("chroma_format_idc {} (4:4:4; 4:2:0 and 4:2:2 are implemented)", self.chroma_format_idc)),
         };
         if !(8..=10).contains(&self.bit_depth_luma) || !(8..=10).contains(&self.bit_depth_chroma) {
             return unsupported(format!("bit depth luma {} chroma {} (8 to 10 bits are implemented)", self.bit_depth_luma, self.bit_depth_chroma));

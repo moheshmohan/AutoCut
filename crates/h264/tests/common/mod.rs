@@ -66,6 +66,15 @@ impl PixFmt {
 macro_rules! hi10 {
     ($($a:expr),* $(,)?) => { &["-profile:v", "high10", "-pix_fmt", "yuv420p10le", $($a),*] };
 }
+/// The same for High 4:2:2 at 8 bits.
+macro_rules! h422 {
+    ($($a:expr),* $(,)?) => { &["-profile:v", "high422", "-pix_fmt", "yuv422p", $($a),*] };
+}
+/// The same for High 4:2:2 at 10 bits.
+macro_rules! h422_10 {
+    ($($a:expr),* $(,)?) => { &["-profile:v", "high422", "-pix_fmt", "yuv422p10le", $($a),*] };
+}
+
 /// A 352x288 noisy testsrc2 fixture of `frames` pictures.
 const fn cif(name: &'static str, frames: u32, args: &'static [&'static str]) -> Fixture {
     Fixture { name, source: "testsrc2", width: 352, height: 288, frames, filter: NOISE, args }
@@ -76,9 +85,10 @@ const fn cif_fade(name: &'static str, args: &'static [&'static str]) -> Fixture 
     Fixture { name, source: "testsrc2", width: 352, height: 288, frames: 30, filter: "fade=in:0:25", args }
 }
 
-/// High 10 and High 10 Intra, CAVLC and CABAC, every tool the 8-bit matrix covers that matters
-/// to the bit depth.
+/// High 10, High 4:2:2 (8 and 10 bits) and their intra profiles, CAVLC and CABAC, every tool
+/// the 8-bit matrix covers that matters to the bit depth or chroma format.
 pub const HIGH_FIXTURES: &[Fixture] = &[
+    // High 10 (4:2:0, 10-bit)
     cif("hi10_intra_cavlc", 3, hi10!["-x264-params", "keyint=1:cabac=0"]),
     cif("hi10_intra", 3, hi10!["-x264-params", "keyint=1"]),
     cif("hi10_intra_no8x8dct", 3, hi10!["-x264-params", "keyint=1:8x8dct=0:no-deblock=1"]),
@@ -102,6 +112,74 @@ pub const HIGH_FIXTURES: &[Fixture] = &[
     cif_fade("hi10_weightp_cavlc", hi10!["-x264-params", "cabac=0:weightp=2:bframes=2:weightb=1"]),
     Fixture { name: "hi10_crop_202x118", source: "testsrc2", width: 202, height: 118, frames: 12, filter: NOISE, args: hi10!["-x264-params", "bframes=2"] },
     Fixture { name: "hi10_720p", source: "smptehdbars", width: 1280, height: 720, frames: 6, filter: NOISE, args: hi10![] },
+    // High 4:2:2 at 8 bits
+    cif("h422_intra_cavlc", 3, h422!["-x264-params", "keyint=1:cabac=0"]),
+    cif("h422_intra", 3, h422!["-x264-params", "keyint=1"]),
+    cif("h422_cabac_b", 30, h422!["-x264-params", "bframes=3"]),
+    cif("h422_cavlc_b", 30, h422!["-x264-params", "cabac=0:bframes=3"]),
+    cif("h422_pyramid_open_gop", 30, h422!["-x264-params", "bframes=5:b-pyramid=strict:ref=6:keyint=15:open-gop=1"]),
+    cif("h422_direct_temporal", 30, h422!["-x264-params", "direct=temporal:bframes=3"]),
+    cif("h422_no_deblock", 20, h422!["-x264-params", "no-deblock=1"]),
+    cif("h422_deblock_m3_3", 20, h422!["-x264-params", "deblock=-3,3"]),
+    cif("h422_no8x8dct", 20, h422!["-x264-params", "8x8dct=0"]),
+    cif("h422_cqm", 20, h422!["-x264-params", "cqm=jvt"]),
+    cif("h422_slices4_cavlc", 20, h422!["-x264-params", "slices=4:cabac=0"]),
+    cif("h422_constrained_intra", 20, h422!["-x264-params", "constrained-intra=1"]),
+    cif("h422_qp1", 10, h422!["-qp", "1"]),
+    cif("h422_qp50", 10, h422!["-qp", "50"]),
+    cif_fade("h422_weightp", h422!["-x264-params", "weightp=2:bframes=2:weightb=1"]),
+    Fixture { name: "h422_crop_202x117", source: "testsrc2", width: 202, height: 117, frames: 12, filter: NOISE, args: h422!["-x264-params", "bframes=2"] },
+    // High 4:2:2 at 10 bits
+    cif("h422_10_intra_cavlc", 3, h422_10!["-x264-params", "keyint=1:cabac=0"]),
+    cif("h422_10_intra", 3, h422_10!["-x264-params", "keyint=1"]),
+    cif("h422_10_intra_no8x8dct", 3, h422_10!["-x264-params", "keyint=1:8x8dct=0"]),
+    cif("h422_10_cabac_b", 30, h422_10!["-x264-params", "bframes=3"]),
+    cif("h422_10_cavlc_b", 30, h422_10!["-x264-params", "cabac=0:bframes=3"]),
+    cif("h422_10_pyramid_open_gop", 30, h422_10!["-x264-params", "bframes=5:b-pyramid=strict:ref=6:keyint=15:open-gop=1"]),
+    cif("h422_10_direct_temporal", 30, h422_10!["-x264-params", "direct=temporal:bframes=3"]),
+    cif("h422_10_no_deblock", 20, h422_10!["-x264-params", "no-deblock=1"]),
+    cif("h422_10_deblock_m3_3", 20, h422_10!["-x264-params", "deblock=-3,3"]),
+    cif("h422_10_no8x8dct", 20, h422_10!["-x264-params", "8x8dct=0"]),
+    cif("h422_10_cqm", 20, h422_10!["-x264-params", "cqm=jvt"]),
+    cif("h422_10_cqm_cavlc", 20, h422_10!["-x264-params", "cqm=jvt:cabac=0"]),
+    cif("h422_10_slices4", 20, h422_10!["-x264-params", "slices=4"]),
+    cif("h422_10_constrained_intra", 20, h422_10!["-x264-params", "constrained-intra=1"]),
+    cif("h422_10_qp1", 10, h422_10!["-qp", "1"]),
+    cif("h422_10_qp1_cavlc", 10, h422_10!["-qp", "1", "-x264-params", "cabac=0"]),
+    cif("h422_10_qp62", 10, h422_10!["-qp", "62"]),
+    cif("h422_10_chroma_offset", 10, h422_10!["-qp", "8", "-x264-params", "chroma-qp-offset=-12:psy=0"]),
+    cif_fade("h422_10_weightp", h422_10!["-x264-params", "weightp=2:bframes=2:weightb=1"]),
+    cif_fade("h422_10_weightp_cavlc", h422_10!["-x264-params", "cabac=0:weightp=2:bframes=2:weightb=1"]),
+    Fixture {
+        name: "h422_10_crop_330x187",
+        source: "testsrc2",
+        width: 330,
+        height: 187,
+        frames: 12,
+        filter: NOISE,
+        args: h422_10!["-x264-params", "bframes=2"],
+    },
+    Fixture { name: "h422_10_crop_98x61", source: "mandelbrot", width: 98, height: 61, frames: 8, filter: NOISE, args: h422_10!["-x264-params", "keyint=4"] },
+    // XAVC S-I / AVC-Intra-like: 1080p 10-bit 4:2:2, every picture intra, high bit rate
+    Fixture {
+        name: "xavc_1080p_422_10_intra",
+        source: "testsrc2",
+        width: 1920,
+        height: 1080,
+        frames: 6,
+        filter: "noise=alls=6:allf=t",
+        args: h422_10!["-b:v", "200M", "-x264-params", "keyint=1"],
+    },
+    // performance stream for the 10-bit 4:2:2 path (tests/perf.rs)
+    Fixture {
+        name: "bench_1080p_422_10",
+        source: "testsrc2",
+        width: 1920,
+        height: 1080,
+        frames: 60,
+        filter: "noise=alls=3:allf=t",
+        args: h422_10!["-preset", "medium", "-crf", "20"],
+    },
 ];
 
 pub const FIXTURES: &[Fixture] = &[

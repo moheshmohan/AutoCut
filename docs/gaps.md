@@ -1,6 +1,6 @@
 # Where FilmCraft falls short of Premiere Pro
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-26 · **Change:** minor (G10: 360° video) · **Target:** Adobe Premiere Pro 2026 (26.5.2)
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-11-25 · **Change:** minor (G3: H.264 High 10 / High 4:2:2 in software) · **Target:** Adobe Premiere Pro 2026 (26.5.2)
 
 Every known shortfall, one entry each, ranked by what most stops an editor using FilmCraft for real
 work. This is the work list: agents should prefer it over adding checklist items. Numbers are in
@@ -16,7 +16,7 @@ platforms** G4, G9, G17; **performance** G16; **ecosystem** G11; **measurement**
 |---|---|---|---|---|
 | G1 | Nothing compares our output with Premiere's | measurement | no, but every ready number depends on it | 40–70 h |
 | G2 | Premiere's `.prproj` cannot be opened | file format | **yes** | 60–120 h |
-| G3 | 10-bit and 4:2:2 camera media needs hardware | codec | yes | 30–50 h |
+| G3 | 10-bit and 4:2:2 camera media needs hardware | codec | partly (4:4:4, interlaced H.264 left) | 25–45 h |
 | G4 | Crashes at start-up, and no test CI on pull requests | stability | yes | 40–80 h |
 | G5 | Hardware acceleration is partial | hardware | partly | 120–200 h |
 | G6 | No real-world media corpus or workflow acceptance tests | measurement | yes | 40–70 h |
@@ -65,18 +65,23 @@ platforms** G4, G9, G17; **performance** G16; **ecosystem** G11; **measurement**
 
 ## G3. 10-bit and 4:2:2 camera media needs hardware
 
-- **Missing:** our H.264 decoder is 8-bit 4:2:0 only (`crates/h264/README.md`: no High 10, High
-  4:2:2, 4:4:4, lossless, interlaced field / MBAFF). Most mirrorless and cinema cameras record
-  exactly these (Sony XAVC S-I, Panasonic, Canon XF-AVC). HEVC 4:2:2 8- and 10-bit (Sony XAVC HS,
-  Fujifilm, Canon) decodes in software since AutoCut 0.14 (`crates/hevc/README.md`); HEVC 4:4:4
-  and the RExt coding tools do not.
-- **Evidence:** #626 (Panasonic Lumix 4K 10-bit 4:2:2 MOV). On macOS VideoToolbox decodes 10-bit
-  4:2:2 H.264 / HEVC on chips that support it; Windows Media Foundation and Linux decline them, and
-  there is no software fallback, so the clip fails. Premiere decodes them everywhere (and in
-  hardware on Apple silicon, Intel and NVIDIA Blackwell).
-- **Impact:** camera originals from most current cameras do not open on Windows or Linux.
-- **Estimate:** H.264 High 10 + High 4:2:2 (chroma geometry, deblocking, transforms) 15–25 h
-  (HEVC Main 4:2:2 10 is done). Doc: [codec-parity.md](codec-parity.md).
+- **Done:** H.264 High 10, High 4:2:2 and their Intra profiles (8- and 10-bit 4:2:0 and 4:2:2,
+  CABAC and CAVLC: Sony XAVC S-I, Panasonic AVC-Intra, Canon XF-AVC and the mirrorless 10-bit
+  modes) decode in software, bit-exact with ffmpeg on 61 libx264 fixtures, and import and play
+  as 10-bit / 4:2:2 frames (AutoCut AV99–AV101, `crates/h264/README.md`). HEVC 4:2:2 8- and
+  10-bit (Sony XAVC HS, Fujifilm, Canon) decodes in software since AutoCut 0.14
+  (`crates/hevc/README.md`).
+- **Missing:** H.264 4:4:4, lossless, monochrome and interlaced field / MBAFF coding (1080i
+  camera and broadcast H.264); HEVC 4:4:4 and the RExt coding tools.
+- **Evidence:** #626 (Panasonic Lumix 4K 10-bit 4:2:2 MOV). Windows Media Foundation and Linux
+  decline 10-bit / 4:2:2 in hardware; the software decoders now take H.264 and HEVC 4:2:0 / 4:2:2
+  up to 10 bits, so such clips no longer depend on the hardware (not yet checked with the
+  reporter's file). Premiere decodes all of these everywhere (and in hardware on Apple silicon,
+  Intel and NVIDIA Blackwell).
+- **Impact:** interlaced H.264 (1080i camera and broadcast footage) and 4:4:4 masters still need
+  hardware or fail.
+- **Estimate:** H.264 interlaced (field pictures, PAFF, MBAFF) 15–25 h; H.264 4:4:4 / lossless
+  5–10 h; HEVC RExt 5–10 h. Doc: [codec-parity.md](codec-parity.md).
 
 ## G4. Crashes at start-up, and no test CI on pull requests
 
@@ -364,3 +369,4 @@ platforms** G4, G9, G17; **performance** G16; **ecosystem** G11; **measurement**
 | 2026-10-12 | minor | G10: MP1 (`A_MPEG/L1`) in Matroska imports (#1402) |
 | 2026-10-12 | minor | G10: OpenEXR PXR24 import |
 | 2026-10-26 | minor | G10: 360° video (Insta360, Spherical Video V1 / V2, the 360 Reframe virtual camera, 360° export) |
+| 2026-11-25 | minor | G3: H.264 High 10 / High 4:2:2 (8- and 10-bit 4:2:0 / 4:2:2, Intra profiles) decode in software; left: 4:4:4, interlaced H.264, HEVC RExt |

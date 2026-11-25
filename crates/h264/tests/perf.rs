@@ -1,4 +1,4 @@
-//! Decode speed on a 1080p High-profile stream (ignored by default; run with
+//! Decode speed on 1080p High and High 4:2:2 10-bit streams (ignored by default; run with
 //! `cargo test --release -p filmcraft-h264 --test perf -- --ignored --nocapture`).
 
 mod common;
@@ -37,5 +37,24 @@ fn perf_1080p() {
     for threads in [1, cores.min(16)] {
         let (frames, secs) = bench(&data, threads, 5);
         println!("1080p High CRF20 ({} KB): {threads} thread(s): {frames} frames in {secs:.3}s = {:.1} fps", data.len() / 1024, frames as f64 / secs);
+    }
+}
+
+/// The same for 1080p High 4:2:2 at 10 bits (CABAC, B-frames, CRF 20; the 16-bit sample path).
+#[test]
+#[ignore]
+fn perf_1080p_422_10() {
+    let f = common::fixture("bench_1080p_422_10");
+    let Some((h264, _)) = common::ensure(f) else { return };
+    common::check_fixture("bench_1080p_422_10").unwrap();
+    let data = std::fs::read(h264).unwrap();
+    let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+    for threads in [1, cores.min(16)] {
+        let (frames, secs) = bench(&data, threads, 5);
+        println!(
+            "1080p High 4:2:2 10-bit CRF20 ({} KB): {threads} thread(s): {frames} frames in {secs:.3}s = {:.1} fps",
+            data.len() / 1024,
+            frames as f64 / secs
+        );
     }
 }

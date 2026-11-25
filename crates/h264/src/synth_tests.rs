@@ -678,8 +678,9 @@ fn a_slice_overlapping_decoded_macroblocks_is_refused() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// High 10 sample formats: I_PCM at every supported bit depth (luma and chroma apart, which
-// libx264 cannot produce), P_Skip copies, cropping, and hostile sequence headers.
+// High 10 / High 4:2:2 sample formats: I_PCM at every supported bit depth (luma and chroma apart,
+// which libx264 cannot produce) in 4:2:0 and 4:2:2, P_Skip copies, cropping by single lines, and
+// hostile sequence headers.
 // ---------------------------------------------------------------------------------------------
 
 /// Chroma sampling and bit depths of a synthetic stream.
@@ -840,14 +841,13 @@ fn check_format(f: Fmt, cabac: bool, threads: usize, crop_bottom: u32) {
     }
 }
 
-/// I_PCM pictures and P_Skip copies decode exactly at every supported combination of luma /
-/// chroma bit depth (8, 9, 10, mixed), CAVLC and CABAC (whose engine restarts after the PCM
-/// bytes), single- and multi-threaded, and cropped. Before, every one but 8/8 was refused as
-/// unsupported (only 8-bit).
+/// I_PCM pictures and P_Skip copies decode exactly at every supported combination of chroma
+/// format and luma / chroma bit depth (8, 9, 10, mixed), CAVLC and CABAC (whose engine restarts
+/// after the PCM bytes), single- and multi-threaded, cropped by one line where 4:2:2 allows it.
+/// Before AV99 and AV100 every one but 8-bit 4:2:0 was refused as unsupported.
 #[test]
-#[allow(clippy::single_element_loop)] // 4:2:2 follows
 fn pcm_pictures_at_every_depth_and_chroma_format() {
-    for c422 in [false] {
+    for c422 in [false, true] {
         for (bd_y, bd_c) in [(8, 8), (10, 10), (9, 9), (8, 10), (10, 8), (9, 10)] {
             let f = Fmt { c422, bd_y, bd_c };
             for cabac in [false, true] {
@@ -860,12 +860,11 @@ fn pcm_pictures_at_every_depth_and_chroma_format() {
     }
 }
 
-/// The synthetic 10-bit PCM stream matches ffmpeg's decode too.
+/// The synthetic 4:2:0 / 4:2:2 PCM streams at one bit depth match ffmpeg's decode too.
 #[test]
-#[allow(clippy::single_element_loop)] // 4:2:2 follows
 fn pcm_formats_match_ffmpeg() {
     let Some(ff) = filmcraft_testkit::ffmpeg_or_skip("pcm formats") else { return };
-    for (c422, bd) in [(false, 10)] {
+    for (c422, bd) in [(false, 10), (true, 8), (true, 10), (true, 9)] {
         let f = Fmt { c422, bd_y: bd, bd_c: bd };
         let (stream, expected) = format_stream(f, true, if c422 { 1 } else { 0 });
         let pix = format!("yuv{}p{}", if c422 { "422" } else { "420" }, if bd == 8 { String::new() } else { format!("{bd}le") });
@@ -893,8 +892,8 @@ fn pcm_formats_match_ffmpeg() {
 
 /// Sequence headers of every chroma format and bit depth a stream can code, at odd and huge
 /// sizes, with crops up to the picture: no panic in the parser or a decoding job; what this
-/// decoder does not implement (4:2:2, 4:4:4, monochrome, more than 10 bits) is `Unsupported`,
-/// the rest decode or fail with an ordinary error.
+/// decoder does not implement (4:4:4, monochrome, more than 10 bits) is `Unsupported`, the
+/// rest decode or fail with an ordinary error.
 #[test]
 fn hostile_high_sequence_headers_never_panic() {
     let slice = slice_nal(&Pic { idr: true, frame_num: 0, ref_idc: 3, mbs: vec![Some(vec![0x5a; 640]); NMB], ..Default::default() }, false);
@@ -926,7 +925,7 @@ fn hostile_high_sequence_headers_never_panic() {
                         if crate::params::Sps::parse(&filmcraft_bitstream::unescape_rbsp(&sps_fmt(chroma, depths, mbs, crop)[5..])).is_err() {
                             continue;
                         }
-                        let unsupported_format = chroma != 1 || depths.0 > 2 || depths.1 > 2;
+                        let unsupported_format = chroma == 0 || chroma == 3 || depths.0 > 2 || depths.1 > 2;
                         if unsupported_format {
                             assert!(matches!(&err, Some(crate::Error::Unsupported(_))), "{label}: {err:?}");
                         } else if mbs == (256, 196) && chroma == 2 && depths != (0, 0) {
@@ -942,7 +941,7 @@ fn hostile_high_sequence_headers_never_panic() {
 
 /// The picture-size limit counts the bytes of every plane and per sample: the largest 8-bit 4:2:0
 /// picture's memory (2^25 luma samples) is the budget, so 10-bit 4:2:0 fits up to 2^24 luma
-/// samples; one macroblock row more is refused.
+/// samples and 10-bit 4:2:2 up to 3 * 2^22; one macroblock row more is refused.
 #[test]
 fn the_picture_budget_counts_bytes_per_sample_and_every_plane() {
     let parse = |chroma: u32, depth: u32, mbs: (u32, u32)| {
@@ -959,16 +958,23 @@ fn the_picture_budget_counts_bytes_per_sample_and_every_plane() {
     // 8-bit luma with 10-bit chroma is stored in 16 bits too
     let s = sps_fmt(1, (0, 2), (256, 257), None);
     assert!(limit(crate::params::Sps::parse(&filmcraft_bitstream::unescape_rbsp(&s[5..])).unwrap().check_supported()));
+    // 8-bit 4:2:2: 3 * 2^23 (6144 x 4096)
+    assert!(parse(2, 0, (384, 256)).is_ok());
+    assert!(limit(parse(2, 0, (384, 257))));
+    // 10-bit 4:2:2: 3 * 2^22 (4096 x 3072; DCI 4K and 1080p fit)
+    assert!(parse(2, 2, (256, 192)).is_ok());
+    assert!(limit(parse(2, 2, (256, 193))));
+    assert!(parse(2, 2, (240, 135)).is_ok());
 }
 
-/// A sequence that switches sample format mid-stream (8-bit, then 10-bit on a non-IDR picture,
-/// then a 10-bit IDR) flushes its references: the inter picture after the switch has none (an
-/// error, not a read of the old 8-bit frames as 16-bit; the picture it started is output
-/// undecoded, in the new format), the IDR decodes.
+/// A sequence that switches sample format mid-stream (8-bit 4:2:0, then 10-bit 4:2:2 on a
+/// non-IDR picture, then a 10-bit IDR) flushes its references: the inter picture after the
+/// switch has none (an error, not a read of the old 8-bit frames as 16-bit; the picture it
+/// started is output undecoded, in the new format), the IDR decodes.
 #[test]
 fn a_format_switch_mid_stream_drops_the_old_references() {
     let f8 = Fmt { c422: false, bd_y: 8, bd_c: 8 };
-    let f10 = Fmt { c422: false, bd_y: 10, bd_c: 10 };
+    let f10 = Fmt { c422: true, bd_y: 10, bd_c: 10 };
     let mut seed = 3u32;
     let idr = |f: Fmt, seed: &mut u32| Pic {
         idr: true,
@@ -980,7 +986,7 @@ fn a_format_switch_mid_stream_drops_the_old_references() {
     let mut stream = sps_fmt(1, (0, 0), (MB_W as u32, MB_H as u32), None);
     stream.extend(pps(true, false));
     stream.extend(slice_nal(&idr(f8, &mut seed), true));
-    let mut switch = sps_fmt(1, (2, 2), (MB_W as u32, MB_H as u32), None);
+    let mut switch = sps_fmt(2, (2, 2), (MB_W as u32, MB_H as u32), None);
     switch.extend(pps(true, false));
     switch.extend(slice_nal(&Pic { frame_num: 1, ref_idc: 2, mbs: vec![None; NMB], ..Default::default() }, true));
     let idr10 = slice_nal(&idr(f10, &mut seed), true);
@@ -995,7 +1001,7 @@ fn a_format_switch_mid_stream_drops_the_old_references() {
         assert_eq!(out.len(), 3);
         assert!(out[0].y.as_u8().is_some() && out[0].chroma == crate::ChromaFormat::C420);
         for p in &out[1..] {
-            assert!(p.y.as_u16().is_some() && p.chroma == crate::ChromaFormat::C420 && p.bit_depth == 10);
+            assert!(p.y.as_u16().is_some() && p.chroma == crate::ChromaFormat::C422 && p.chroma_height == (MB_H * 16) as u32);
         }
     }
 }

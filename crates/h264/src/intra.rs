@@ -289,14 +289,15 @@ pub fn pred16x16<S: Sample>(plane: &mut [S], stride: usize, x: usize, y: usize, 
     }
 }
 
-/// Chroma intra prediction for a 4:2:0 macroblock (8x8 block at chroma (x, y)), 8.3.4.
-/// Modes: 0 DC, 1 horizontal, 2 vertical, 3 plane.
-pub fn pred_chroma<S: Sample>(plane: &mut [S], stride: usize, x: usize, y: usize, mode: u8, a: Avail, bd: u32) {
+/// Chroma intra prediction (8.3.4) for the 8 x `h` chroma block of a macroblock at chroma
+/// (x, y): `h` = MbHeightC, 8 for 4:2:0 and 16 for 4:2:2. Modes: 0 DC, 1 horizontal,
+/// 2 vertical, 3 plane.
+pub fn pred_chroma<S: Sample>(plane: &mut [S], stride: usize, x: usize, y: usize, mode: u8, a: Avail, h: usize, bd: u32) {
     const W: usize = 8;
-    let h = 8;
+    let h = if h > 8 { 16 } else { 8 };
     let half = S::half(bd);
     let mut top = [0i32; W];
-    let mut left = [0i32; 8];
+    let mut left = [0i32; 16];
     if a.top {
         for i in 0..W {
             top[i] = plane[(y - 1) * stride + x + i].to_i32();
@@ -310,6 +311,9 @@ pub fn pred_chroma<S: Sample>(plane: &mut [S], stride: usize, x: usize, y: usize
     let base = y * stride + x;
     match mode {
         0 => {
+            // per 4x4 chroma block (8.3.4.1-3): the top-left block and blocks off both edges
+            // use both neighbours, the rest of the top row prefers the top, the rest of the left
+            // column the left
             for by in 0..h / 4 {
                 for bx in 0..W / 4 {
                     let st: i32 = top[bx * 4..bx * 4 + 4].iter().sum();
@@ -356,22 +360,26 @@ pub fn pred_chroma<S: Sample>(plane: &mut [S], stride: usize, x: usize, y: usize
             }
         }
         _ => {
+            // 8.3.4.4 with xCF = 0 and yCF = 4 * (chroma_format_idc != 1)
             let tl = if a.top_left { plane[(y - 1) * stride + x - 1].to_i32() } else { half };
             let t = |i: i32| if i < 0 { tl } else { top[i as usize] };
             let l = |i: i32| if i < 0 { tl } else { left[i as usize] };
+            let ycf = if h == 16 { 4 } else { 0 };
             let mut hh = 0;
             let mut v = 0;
             for k in 0..4 {
                 hh += (k + 1) * (t(4 + k) - t(2 - k));
-                v += (k + 1) * (l(4 + k) - l(2 - k));
+            }
+            for k in 0..4 + ycf {
+                v += (k + 1) * (l(4 + ycf + k) - l(2 + ycf - k));
             }
             let aa = 16 * (left[h - 1] + top[W - 1]);
             let b = (34 * hh + 32) >> 6;
-            let c = (34 * v + 32) >> 6;
+            let c = ((if ycf == 4 { 5 } else { 34 }) * v + 32) >> 6;
             let max = S::max_value(bd);
             for r in 0..h {
                 for cc in 0..W {
-                    plane[base + r * stride + cc] = S::clip((aa + b * (cc as i32 - 3) + c * (r as i32 - 3) + 16) >> 5, max);
+                    plane[base + r * stride + cc] = S::clip((aa + b * (cc as i32 - 3) + c * (r as i32 - 3 - ycf) + 16) >> 5, max);
                 }
             }
         }
@@ -457,7 +465,7 @@ mod tests {
             p[3 * s + 4 + i] = if i < 4 { 40 } else { 80 };
             p[(4 + i) * s + 3] = if i < 4 { 8 } else { 16 };
         }
-        pred_chroma(&mut p, s, 4, 4, 0, ALL, 8);
+        pred_chroma(&mut p, s, 4, 4, 0, ALL, 8, 8);
         assert_eq!(p[4 * s + 4], (160 + 32 + 4) >> 3); // top-left block: both
         assert_eq!(p[4 * s + 8], 80); // top-right block: top only
         assert_eq!(p[8 * s + 4], 16); // bottom-left: left only

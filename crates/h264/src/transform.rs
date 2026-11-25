@@ -84,6 +84,38 @@ pub fn chroma_dc_dequant_420(c: &mut [i32; 4], qp: i32, ls00: i32) {
     }
 }
 
+/// 4:2:2 chroma DC (8.5.11): `c` holds the 8 levels in the chroma DC scan, which fills the 4x2
+/// matrix [[c0, c2], [c1, c5], [c3, c6], [c4, c7]] (8-330); f = A4 * c * A2 with the 4x4 and 2x2
+/// Hadamard-like matrices, then scaling with qP,DC = QP'C + 3 (8.5.11.2). Returns dcC per
+/// chroma4x4BlkIdx (raster order, 2 blocks wide and 4 tall).
+pub fn chroma_dc_dequant_422(c: &[i32; 8], qp_dc: i32, ls00: i32) -> [i32; 8] {
+    const SCAN: [usize; 8] = [0, 2, 1, 5, 3, 6, 4, 7];
+    // m[row][col]
+    let m: [[i32; 2]; 4] = std::array::from_fn(|i| [c[SCAN[i * 2]], c[SCAN[i * 2 + 1]]]);
+    // rows of A4 = [1 1 1 1; 1 1 -1 -1; 1 -1 -1 1; 1 -1 1 -1]
+    let mut f = [[0i32; 2]; 4];
+    for j in 0..2 {
+        let (a, b, cc, d) = (m[0][j], m[1][j], m[2][j], m[3][j]);
+        let s01 = a.wrapping_add(b);
+        let d01 = a.wrapping_sub(b);
+        let s23 = cc.wrapping_add(d);
+        let d23 = cc.wrapping_sub(d);
+        f[0][j] = s01.wrapping_add(s23);
+        f[1][j] = s01.wrapping_sub(s23);
+        f[2][j] = d01.wrapping_sub(d23);
+        f[3][j] = d01.wrapping_add(d23);
+    }
+    let mut out = [0i32; 8];
+    for i in 0..4 {
+        let (a, b) = (f[i][0], f[i][1]);
+        for (j, v) in [a.wrapping_add(b), a.wrapping_sub(b)].into_iter().enumerate() {
+            let scaled = v.wrapping_mul(ls00);
+            out[i * 2 + j] = if qp_dc >= 36 { scaled << (qp_dc / 6 - 6) } else { scaled.wrapping_add(1 << (5 - qp_dc / 6)) >> (6 - qp_dc / 6) };
+        }
+    }
+    out
+}
+
 /// A dequantised coefficient the inverse transforms are defined for: the dequantisation wraps
 /// by design (see `huge_levels_dequantise_without_overflow_panics`), so their butterflies
 /// clamp an r outside −2^(7 + bitDepth)..2^(7 + bitDepth)−1 (`limit`, the storage type's

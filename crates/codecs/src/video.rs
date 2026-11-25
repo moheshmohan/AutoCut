@@ -264,7 +264,8 @@ pub fn mjpeg_factory(e: &SampleEntry) -> Option<Result<Box<dyn VideoDecoder>>> {
     matches!(e.codec, CodecConfig::Jpeg { .. }).then(|| Ok(Box::new(MjpegDecoder) as Box<dyn VideoDecoder>))
 }
 
-/// Our pure-Rust H.264 decoder (Baseline to High, High 10 and High 10 Intra; frame-threaded).
+/// Our pure-Rust H.264 decoder (Baseline to High, High 10, High 4:2:2 and their Intra
+/// profiles; frame-threaded).
 pub struct H264Decoder {
     avcc: Vec<u8>,
     dec: filmcraft_h264::Decoder,
@@ -315,8 +316,9 @@ impl H264Decoder {
 }
 
 /// The planes of a decoded H.264 picture as frame pixels, as [`hevc_pixel_data`] does for HEVC:
-/// 8-bit frames for 8-bit pictures, 16-bit frames at the deeper of the two depths for High 10
-/// ones, labelled with their chroma sampling. Before, every H.264 frame was 8-bit 4:2:0.
+/// 8-bit 4:2:0 / 4:2:2 frames for 8-bit pictures, 16-bit frames at the deeper of the two depths
+/// for High 10 / High 4:2:2 (10-bit) ones, labelled with their chroma sampling. Before, every
+/// H.264 frame was 8-bit 4:2:0.
 pub(crate) fn h264_pixel_data(
     planes: [filmcraft_h264::Plane; 3],
     depths: (u32, u32),
@@ -376,7 +378,7 @@ fn yuv_pixel_data(planes: [Samples; 3], (luma, chroma): (u32, u32), sampling: fi
 }
 
 /// An H.264 decoder error as a [`CodecError`]: a feature the decoder does not implement (High
-/// 4:2:2, field pictures...) is [`CodecError::Unsupported`], so the media pool shows the
+/// 4:4:4, field pictures...) is [`CodecError::Unsupported`], so the media pool shows the
 /// unreadable slate instead of a black picture (#626); anything else is a decode error.
 fn h264_error(e: filmcraft_h264::Error) -> CodecError {
     match e {
@@ -1361,9 +1363,8 @@ mod h264_depth_tests {
     use super::*;
     use filmcraft_h264::{ChromaFormat, Plane};
 
-    /// High 10 pictures become 10-bit frames, and a 4:2:2 picture a 4:2:2 frame (they were all
-    /// labelled 8-bit 4:2:0); 8-bit 4:2:0 stays an 8-bit 4:2:0 frame, and mixed depths share the
-    /// deeper.
+    /// High 10 and High 4:2:2 pictures become 10-bit and 4:2:2 frames (they were all labelled
+    /// 8-bit 4:2:0); 8-bit 4:2:0 stays an 8-bit 4:2:0 frame, and mixed depths share the deeper.
     #[test]
     fn high10_and_422_pictures_keep_their_depth_and_sampling() {
         // 4 x 3 luma, 2 x 3 chroma (4:2:2), strides with padding

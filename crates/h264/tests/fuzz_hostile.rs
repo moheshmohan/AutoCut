@@ -28,6 +28,7 @@ const SEEDS: &[(&str, &str, &str)] = &[
     ("h264_fz_interlaced", "-profile:v high -flags +ildct+ilme -bf 1 -g 6 -x264-params tff=1:interlaced=1", "yuv420p"),
     ("h264_fz_10bit_422", "-profile:v high422 -bf 1 -g 6", "yuv422p10le"),
     ("h264_fz_10bit_cavlc", "-profile:v high10 -bf 2 -g 6 -x264-params cabac=0:weightp=2", "yuv420p10le"),
+    ("h264_fz_422_cabac", "-profile:v high422 -bf 2 -g 4 -x264-params weightp=2:8x8dct=1", "yuv422p"),
     ("h264_fz_multislice", "-profile:v main -g 6 -x264-params slices=3:cabac=1", "yuv420p"),
 ];
 

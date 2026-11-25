@@ -1,9 +1,9 @@
 //! Clean-room pure-Rust H.264 / AVC decoder, implemented from ITU-T Rec. H.264 (ISO/IEC 14496-10).
 //!
-//! Supported: progressive (frame) coding, 4:2:0 at 8 to 10 bits: Baseline / Main / High, High 10
-//! and High 10 Intra profiles — CAVLC and CABAC, I/P/B slices, 8x8 transform, custom scaling
-//! matrices, weighted prediction, spatial/temporal direct, multiple slices, long-term references
-//! and all MMCOs, deblocking.
+//! Supported: progressive (frame) coding, 4:2:0 and 4:2:2 at 8 to 10 bits: Baseline / Main / High,
+//! High 10, High 4:2:2 and their Intra profiles — CAVLC and CABAC, I/P/B slices, 8x8 transform,
+//! custom scaling matrices, weighted prediction, spatial/temporal direct, multiple slices,
+//! long-term references and all MMCOs, deblocking.
 //!
 //! ```no_run
 //! let mut dec = filmcraft_h264::Decoder::new();
@@ -145,7 +145,7 @@ impl PartialEq<Vec<u8>> for Plane {
     }
 }
 
-/// A decoded, cropped picture in planar 4:2:0 ([`Picture::chroma`]), 8 to 10 bits.
+/// A decoded, cropped picture in planar 4:2:0 or 4:2:2 ([`Picture::chroma`]), 8 to 10 bits.
 #[derive(Clone, Debug)]
 pub struct Picture {
     /// Cropped luma width.

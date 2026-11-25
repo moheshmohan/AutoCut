@@ -1,6 +1,6 @@
 # Hardware parity
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-24 · **Change:** minor (VA-API read-back through vaDeriveImage) · **Target:** Adobe Premiere Pro 2026 (26.5.2)
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-11-25 · **Change:** minor (H.264 10-bit / 4:2:2 falls back to software) · **Target:** Adobe Premiere Pro 2026 (26.5.2)
 
 Each hardware feature Premiere uses, per platform, against ours. Implementation detail lives in
 [`crates/platform/README.md`](../crates/platform/README.md) (decode / encode backends, the one
@@ -17,7 +17,7 @@ release notes (Premiere does not run on Linux).
 | Codec / profile | Premiere macOS | **Ours macOS** (VideoToolbox) | Premiere Windows | **Ours Windows** (Media Foundation / D3D11) | **Ours Linux** (NVDEC, VA-API) |
 |---|---|---|---|---|---|
 | H.264 8-bit 4:2:0 | yes | **yes** | Intel, NVIDIA, AMD | **yes** (Baseline / Main / High) | **yes** (NVDEC; VA-API Intel / AMD / Mesa) |
-| H.264 10-bit / 4:2:2 | Apple silicon | **yes** where the chip decodes it | Intel; NVIDIA Blackwell (MXF too) | no (declined; no software fallback, [G3](gaps.md#g3-10-bit-and-422-camera-media-needs-hardware)) | no |
+| H.264 10-bit / 4:2:2 | Apple silicon | **yes** where the chip decodes it | Intel; NVIDIA Blackwell (MXF too) | no (declined; our software decoder takes them, [G3](gaps.md#g3-10-bit-and-422-camera-media-needs-hardware)) | no (software) |
 | HEVC Main / Main 10 4:2:0 | yes | **yes** | yes | **yes** | **yes** (NVDEC 8/10; VA-API Main / Main 10) |
 | HEVC 4:2:2 10-bit | Apple silicon | **yes** where supported | Intel; NVIDIA Blackwell | no | no |
 | VP9 profile 0 / 2 | — | software | — | **yes** | software (VA-API VP9 not yet) |
@@ -90,3 +90,4 @@ one encoder ~4–8 h ([target-app-parity.md](target-app-parity.md#calibration)).
 | 2026-10-21 | minor | GPU export rendering on by default (and the CLI's missing wgpu backend), masks on the GPU, the on-device models' devices ([gpu.md](gpu.md)) |
 | 2026-10-10 | major | Created from ROADMAP.md's performance-and-hardware row and `crates/platform/README.md`; added Linux NVDEC (#549), GPU export and Lumetri on the GPU (#421), Premiere's per-platform hardware list, devices and I/O |
 | 2026-10-24 | minor | VA-API read-back through vaDeriveImage |
+| 2026-11-25 | minor | H.264 10-bit / 4:2:2 the hardware declines decodes with our software decoder |

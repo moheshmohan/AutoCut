@@ -264,7 +264,10 @@ fn filter_horizontal<const N: usize, S: Sample>(pix: &mut [S], stride: usize, x:
 /// Deblock one macroblock (macroblocks must be processed in raster order).
 ///
 /// Above 8 bits, alpha, beta and tC0 scale by 1 << (BitDepth − 8) (8-460, 8-461, 8-462); QPs may
-/// be negative there (indexA / indexB clip to 0).
+/// be negative there (indexA / indexB clip to 0). 4:2:2 chroma is 8x16 per macroblock: its
+/// vertical edges at chroma x 0 and 4 take the bS of luma edges 0 and 8 line by line, its four
+/// horizontal edges at chroma y 0, 4, 8 and 12 the bS of the luma edges at the same y, also
+/// where the luma edge itself is not filtered (an 8x8 transform's edges 4 and 12).
 #[allow(clippy::needless_range_loop)]
 pub fn deblock_mb<S: Sample>(pic: &mut PicState<S>, addr: usize, mb_w: usize) {
     let q = &pic.mbs[addr];
@@ -290,15 +293,19 @@ pub fn deblock_mb<S: Sample>(pic: &mut PicState<S>, addr: usize, mb_w: usize) {
     let beta_off = sq.beta_offset;
     let t8 = q.transform_8x8;
     let fmt = pic.planes.fmt;
+    let c422 = fmt.chroma == crate::ChromaFormat::C422;
+    // the horizontal luma edges whose bS 4:2:2 chroma needs although luma skips them
+    let chroma_edges_h: u8 = if c422 { 0b1111 } else { 0b0101 };
     // bS[dir][edge][segment]; dir 0 = vertical edges (x), 1 = horizontal edges (y)
     let mut bs = [[[0u8; 4]; 4]; 2];
+    let needed = |dir: usize, e: usize| !(t8 && e % 2 == 1) || (dir == 1 && chroma_edges_h & (1 << e) != 0);
     if q.kind.is_intra() {
         for dir in 0..2 {
             if (if dir == 0 { left } else { top }).is_some() {
                 bs[dir][0] = [4; 4];
             }
             for e in 1..4 {
-                if !(t8 && e % 2 == 1) {
+                if needed(dir, e) {
                     bs[dir][e] = [3; 4];
                 }
             }
@@ -330,7 +337,7 @@ pub fn deblock_mb<S: Sample>(pic: &mut PicState<S>, addr: usize, mb_w: usize) {
                 continue;
             }
             for e in 1..4 {
-                if t8 && e % 2 == 1 {
+                if !needed(dir, e) {
                     continue;
                 }
                 for k in 0..4 {
@@ -358,7 +365,7 @@ pub fn deblock_mb<S: Sample>(pic: &mut PicState<S>, addr: usize, mb_w: usize) {
     // luma
     for dir in 0..2 {
         for e in 0..4 {
-            if bs[dir][e] == [0; 4] {
+            if bs[dir][e] == [0; 4] || (t8 && e % 2 == 1) {
                 continue;
             }
             let qpp = if e == 0 { p_qp[dir].map(|p| p.0).unwrap_or(q_qp) } else { q_qp };
@@ -375,11 +382,15 @@ pub fn deblock_mb<S: Sample>(pic: &mut PicState<S>, addr: usize, mb_w: usize) {
             }
         }
     }
-    // chroma (4:2:0): edges at chroma samples 0 and 4 use the bS of luma edges 0 and 2
+    // chroma: vertical edges at chroma x 0 and 4 use the bS of luma edges 0 and 2; horizontal
+    // edges at chroma y 0 and 4 those of luma edges 0 and 2 (4:2:0), or chroma y 0, 4, 8, 12
+    // those of luma edges 0..4 (4:2:2)
+    let mbh = fmt.mb_height_c();
     for c in 0..2 {
         for dir in 0..2 {
-            for ce in 0..2 {
-                let e = ce * 2;
+            let edges = if dir == 1 && c422 { 4 } else { 2 };
+            for ce in 0..edges {
+                let e = if edges == 4 { ce } else { ce * 2 };
                 if bs[dir][e] == [0; 4] {
                     continue;
                 }
@@ -389,10 +400,13 @@ pub fn deblock_mb<S: Sample>(pic: &mut PicState<S>, addr: usize, mb_w: usize) {
                     continue;
                 }
                 let plane = if c == 0 { &mut pic.planes.cb } else { &mut pic.planes.cr };
-                if dir == 0 {
-                    filter_vertical::<8, S>(plane, cwidth, mx * 8 + ce * 4, my * 8, &ep, true, max_c);
+                if dir == 1 {
+                    filter_horizontal::<8, S>(plane, cwidth, mx * 8, my * mbh + ce * 4, &ep, true, max_c);
+                } else if c422 {
+                    // 16 lines, four per luma segment
+                    filter_vertical::<16, S>(plane, cwidth, mx * 8 + ce * 4, my * 16, &ep, true, max_c);
                 } else {
-                    filter_horizontal::<8, S>(plane, cwidth, mx * 8, my * 8 + ce * 4, &ep, true, max_c);
+                    filter_vertical::<8, S>(plane, cwidth, mx * 8 + ce * 4, my * 8, &ep, true, max_c);
                 }
             }
         }

@@ -340,18 +340,23 @@ fn hevc_422_in_mp4_and_mov_decodes_with_our_decoder() {
     }
 }
 
-/// H.264 High 10 camera footage (what mirrorless cameras record in their 10-bit modes; B-frames,
-/// weighted prediction) in MP4, at a size that is not a multiple of 16, opens and decodes with
+/// H.264 High 10 and High 4:2:2 camera footage (what mirrorless and cinema cameras record:
+/// 10-bit 4:2:0, 8- and 10-bit 4:2:2; B-frames, and all-intra like XAVC S-I and AVC-Intra) in MP4
+/// and MOV, at sizes that are not multiples of 16 (an odd height in 4:2:2), opens and decodes with
 /// our own decoder: as many frames as ffmpeg decodes, the first and last ones (asked for on a fresh
-/// source, the last one first) sample-exact in every plane, as 10-bit frames. No hardware
+/// source, the last one first) sample-exact in every plane, as 10-bit or 4:2:2 frames. No hardware
 /// decoder is registered in these tests (`filmcraft_platform` registers them in the app), and the
-/// track's decoder is checked to be ours. Before, the decoder refused it as unsupported
-/// ("H.264: bit depth luma 10 chroma 10 (only 8-bit is implemented)").
+/// track's decoder is checked to be ours. Before, the decoder refused them as unsupported
+/// ("H.264: chroma_format_idc 2 (only 4:2:0 is implemented)", "bit depth luma 10 chroma 10").
 #[test]
-#[allow(clippy::single_element_loop)] // 4:2:2 follows
 fn h264_camera_footage_decodes_with_our_decoder() {
     let ff = filmcraft_testkit::require_ffmpeg!();
-    let cases = [("h264_high10.mp4", "yuv420p10le", "high10", "bframes=3:keyint=12:weightp=2", (322usize, 180usize))];
+    let cases = [
+        ("h264_422_10bit.mov", "yuv422p10le", "high422", "bframes=3:keyint=12", (330usize, 187usize)),
+        ("h264_422_10bit_intra.mov", "yuv422p10le", "high422", "keyint=1", (320, 180)),
+        ("h264_422_8bit.mp4", "yuv422p", "high422", "bframes=2:keyint=12:cabac=0", (318, 182)),
+        ("h264_high10.mp4", "yuv420p10le", "high10", "bframes=3:keyint=12:weightp=2", (322, 180)),
+    ];
     for (name, pix, profile, params, (w, h)) in cases {
         // (the format first: testsrc2 drops an odd last line in its own 4:2:0 output)
         let input = format!("testsrc2=size={w}x{h}:rate=30:duration=1,format={pix},noise=alls=10:allf=t");
