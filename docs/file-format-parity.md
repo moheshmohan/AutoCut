@@ -80,7 +80,7 @@ only). "Tested" names the evidence.
 | SRT, WebVTT, SCC | read + write | yes | yes | frame-exact, property-tested | 95% |
 | MCC (608 + 708), EBU STL, TTML / IMSC1, DFXP | read + write | yes | yes | frame-exact | 90% |
 | ASS / SSA (Advanced SubStation Alpha) | no | yes (styles, placement, `\b` `\i` `\u` `\an` `\pos`) | yes (ASS) | frame-exact at 25 fps, property-tested, hostile input | ahead |
-| 608 / 708 embedded in the video stream | write (MXF, H.264 SEI) | no | **no** | — | 0% |
+| 608 / 708 embedded in the video stream | write (MXF, H.264 SEI) | no (the library decodes them; import does not use it yet) | H.264 / H.265 SEI (`embedCaptions` on export, CEA-608 CC1 and CEA-708 service 1); not MXF | read back frame-exact by our own decoder | 50% |
 | Burn-in | yes | — | yes | golden tests | 95% |
 
 ## Summary
