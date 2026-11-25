@@ -133,9 +133,13 @@ pub struct PictureInfo {
     pub frame_layout: u8,
     /// Display aspect ratio of the whole image.
     pub aspect_ratio: Rational,
+    /// Bits of a colour component: ComponentDepth of a CDCI descriptor, the R, G and B depth of an
+    /// RGBA descriptor's PixelLayout (0 when they differ or the layout is malformed).
     pub component_depth: u32,
     pub horizontal_subsampling: u32,
     pub vertical_subsampling: u32,
+    /// Black and white codes: BlackRefLevel / WhiteRefLevel of a CDCI descriptor,
+    /// ComponentMinRef / ComponentMaxRef of an RGBA descriptor.
     pub black_ref_level: Option<u32>,
     pub white_ref_level: Option<u32>,
     pub alpha_depth: u32,

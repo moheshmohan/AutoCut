@@ -516,8 +516,38 @@ fn descriptor_kind(s: &Set) -> Option<TrackKind> {
     }
 }
 
+/// The one depth of the colour components of an RGBA descriptor's PixelLayout (ST 377-1 G.2.40:
+/// eight code / depth byte pairs, a code of 0 ending the list), or 0 when the layout is malformed
+/// or R, G and B differ in depth: [`PictureInfo`] has one depth for all colour components, and
+/// none is invented.
+fn rgba_component_depth(layout: &[u8]) -> u32 {
+    if layout.len() != 16 {
+        return 0;
+    }
+    let mut depths = [0u8; 3];
+    for &[code, depth] in layout.as_chunks::<2>().0 {
+        let slot = match code {
+            b'R' => 0,
+            b'G' => 1,
+            b'B' => 2,
+            0 => break,
+            _ => continue,
+        };
+        let Some(d) = depths.get_mut(slot) else { return 0 };
+        if *d != 0 || depth == 0 {
+            return 0;
+        }
+        *d = depth;
+    }
+    if depths[0] != 0 && depths.iter().all(|&d| d == depths[0]) { u32::from(depths[0]) } else { 0 }
+}
+
 fn picture_info(d: &Set) -> PictureInfo {
     let u = |t| d.u(t).unwrap_or(0) as u32;
+    // an RGBA descriptor states its depth in the pixel layout and its reference levels as the
+    // component minimum and maximum; the CDCI properties are for Y'CbCr
+    let rgba = d.kind() == Some(st::RGBA_DESCRIPTOR);
+    let (black, white) = if rgba { (tag::COMPONENT_MIN_REF, tag::COMPONENT_MAX_REF) } else { (tag::BLACK_REF_LEVEL, tag::WHITE_REF_LEVEL) };
     PictureInfo {
         stored_width: u(tag::STORED_WIDTH),
         stored_height: u(tag::STORED_HEIGHT),
@@ -525,13 +555,13 @@ fn picture_info(d: &Set) -> PictureInfo {
         display_height: u(tag::DISPLAY_HEIGHT),
         frame_layout: u(tag::FRAME_LAYOUT) as u8,
         aspect_ratio: d.rational(tag::ASPECT_RATIO).unwrap_or_default(),
-        component_depth: u(tag::COMPONENT_DEPTH),
+        component_depth: if rgba { d.get(tag::PIXEL_LAYOUT).map_or(0, rgba_component_depth) } else { u(tag::COMPONENT_DEPTH) },
         horizontal_subsampling: u(tag::HORIZONTAL_SUBSAMPLING),
         vertical_subsampling: u(tag::VERTICAL_SUBSAMPLING),
-        black_ref_level: d.u(tag::BLACK_REF_LEVEL).map(|v| v as u32),
-        white_ref_level: d.u(tag::WHITE_REF_LEVEL).map(|v| v as u32),
+        black_ref_level: d.u(black).map(|v| v as u32),
+        white_ref_level: d.u(white).map(|v| v as u32),
         alpha_depth: u(tag::ALPHA_SAMPLE_DEPTH),
-        rgba: d.kind() == Some(st::RGBA_DESCRIPTOR),
+        rgba,
         picture_coding: d.ul(tag::PICTURE_ESSENCE_CODING),
         transfer_characteristic: d.ul(tag::TRANSFER_CHARACTERISTIC),
         coding_equations: d.ul(tag::CODING_EQUATIONS),

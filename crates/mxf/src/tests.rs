@@ -110,6 +110,18 @@ fn source_clip(uid: u8, def: [u8; 16], dur: i64, pkg: [u8; 32], track: u32) -> V
 /// 16-bit stereo sound element of 1920 frames (sample k of the file = k, -k on the channels);
 /// a footer index with temporal offsets `to` and flags `flags`.
 fn build(n: usize, pic: impl Fn(usize) -> Vec<u8>, to: &[i8], flags: &[u8]) -> Vec<u8> {
+    let mut cdci = LocalSet::new(41);
+    cdci.p(0x3006, &2u32.to_be_bytes())
+        .p(0x3203, &64u32.to_be_bytes())
+        .p(0x3202, &32u32.to_be_bytes())
+        .p(0x320E, &[0, 0, 0, 2, 0, 0, 0, 1])
+        .p(0x3301, &8u32.to_be_bytes())
+        .p(0x3201, &ul(&[0x06, 0x0E, 0x2B, 0x34, 0x04, 0x01, 0x01, 0x0A, 0x04, 0x01, 0x02, 0x02, 0x03, 0x06, 0x03, 0x00]));
+    build_with(n, pic, to, flags, 0x28, &cdci.0)
+}
+
+/// [`build`] with a picture descriptor of set type `kind` (instance 41, linked to track 2).
+fn build_with(n: usize, pic: impl Fn(usize) -> Vec<u8>, to: &[i8], flags: &[u8], kind: u8, descriptor: &[u8]) -> Vec<u8> {
     let mut md = Vec::new();
     // primer: no dynamic tags
     klv(&mut md, ul(&[0x06, 0x0E, 0x2B, 0x34, 0x02, 0x05, 0x01, 0x01, 0x0D, 0x01, 0x02, 0x01, 0x01, 0x05, 0x01, 0x00]), &batch(&[]));
@@ -148,14 +160,7 @@ fn build(n: usize, pic: impl Fn(usize) -> Vec<u8>, to: &[i8], flags: &[u8]) -> V
     let mut mdesc = LocalSet::new(40);
     mdesc.p(0x3001, &[0, 0, 0, 25, 0, 0, 0, 1]).p(0x3F01, &batch(&[&uuid(41), &uuid(42)]));
     klv(&mut md, set_key(0x44), &mdesc.0);
-    let mut cdci = LocalSet::new(41);
-    cdci.p(0x3006, &2u32.to_be_bytes())
-        .p(0x3203, &64u32.to_be_bytes())
-        .p(0x3202, &32u32.to_be_bytes())
-        .p(0x320E, &[0, 0, 0, 2, 0, 0, 0, 1])
-        .p(0x3301, &8u32.to_be_bytes())
-        .p(0x3201, &ul(&[0x06, 0x0E, 0x2B, 0x34, 0x04, 0x01, 0x01, 0x0A, 0x04, 0x01, 0x02, 0x02, 0x03, 0x06, 0x03, 0x00]));
-    klv(&mut md, set_key(0x28), &cdci.0);
+    klv(&mut md, set_key(kind), descriptor);
     let mut wave = LocalSet::new(42);
     wave.p(0x3006, &3u32.to_be_bytes())
         .p(0x3D03, &[0, 0, 0xBB, 0x80, 0, 0, 0, 1])
@@ -264,6 +269,69 @@ fn opens_synthetic_op1a() {
     // past the end: zeros
     let tail = m.read_pcm(&f, a, 7 * 1920 - 2, 4).unwrap();
     assert_eq!(tail[0][2..], [0.0, 0.0]);
+}
+
+/// An RGBA descriptor (ST 377-1 G.2.40), as CinemaDNG in MXF has (§7.2.2): `layout` as the pixel
+/// layout, ComponentMaxRef `max` and ComponentMinRef 0, and CDCI properties that do not belong to
+/// it (a Y'CbCr depth and video-range levels) which must not be read for it.
+fn rgba_descriptor(layout: &[u8], max: u32) -> Vec<u8> {
+    let mut d = LocalSet::new(41);
+    d.p(0x3006, &2u32.to_be_bytes())
+        .p(0x3203, &64u32.to_be_bytes())
+        .p(0x3202, &36u32.to_be_bytes())
+        .p(0x320E, &[0, 0, 0, 16, 0, 0, 0, 9])
+        .p(0x3401, layout)
+        .p(0x3406, &max.to_be_bytes())
+        .p(0x3407, &0u32.to_be_bytes())
+        .p(0x3301, &10u32.to_be_bytes())
+        .p(0x3304, &64u32.to_be_bytes())
+        .p(0x3305, &940u32.to_be_bytes());
+    d.0
+}
+
+fn layout(pairs: &[(u8, u8)]) -> Vec<u8> {
+    let mut v: Vec<u8> = pairs.iter().flat_map(|&(c, d)| [c, d]).collect();
+    v.resize(16, 0);
+    v
+}
+
+#[test]
+fn rgba_descriptors_give_their_layout_depth_and_component_levels() {
+    let pic = |p: &[u8]| {
+        let f = build_with(2, |i| vec![i as u8; 64], &[], &[0x80, 0x80], 0x29, p);
+        let m = open(&f).unwrap();
+        let v = m.track_of_kind(TrackKind::Picture).unwrap();
+        m.tracks[v].picture.clone().unwrap()
+    };
+    // CinemaDNG: R, G and B of 16 bits, levels 0 to 65535
+    let p = pic(&rgba_descriptor(&layout(&[(b'R', 16), (b'G', 16), (b'B', 16)]), 65_535));
+    assert!(p.rgba);
+    assert_eq!((p.component_depth, p.black_ref_level, p.white_ref_level), (16, Some(0), Some(65_535)));
+    assert!(p.full_range());
+    assert_eq!((p.frame_width(), p.frame_height()), (64, 36));
+    // alpha and fill entries do not change the colour depth; 10-bit RGBA, full range
+    let p = pic(&rgba_descriptor(&layout(&[(b'B', 10), (b'G', 10), (b'R', 10), (b'A', 8), (b'F', 2)]), 1023));
+    assert_eq!((p.component_depth, p.white_ref_level), (10, Some(1023)));
+    assert!(p.full_range());
+    // unequal depths, a repeated or zero-depth component, a missing colour, a short layout: no depth
+    for bad in [
+        layout(&[(b'R', 16), (b'G', 8), (b'B', 16)]),
+        layout(&[(b'R', 16), (b'R', 16), (b'G', 16), (b'B', 16)]),
+        layout(&[(b'R', 0), (b'G', 16), (b'B', 16)]),
+        layout(&[(b'A', 16)]),
+        layout(&[(b'R', 16), (0, 0), (b'G', 16), (b'B', 16)]),
+        vec![b'R', 16, b'G', 16, b'B', 16],
+    ] {
+        let p = pic(&rgba_descriptor(&bad, 65_535));
+        assert_eq!(p.component_depth, 0, "{bad:?}");
+        assert!(!p.full_range(), "{bad:?}");
+    }
+    // a CDCI descriptor still reads its own properties
+    let f = build(2, |i| vec![i as u8; 64], &[], &[0x80, 0x80]);
+    let m = open(&f).unwrap();
+    let p = m.tracks[m.track_of_kind(TrackKind::Picture).unwrap()].picture.clone().unwrap();
+    assert!(!p.rgba);
+    assert_eq!(p.component_depth, 8);
 }
 
 #[test]

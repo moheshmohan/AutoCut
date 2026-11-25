@@ -927,3 +927,6 @@ Still-image improvements from upstream craft-libs, ported into AutoCut's own cra
   the TIFF defaults instead of being refused, and greys stay grey when a file's luma weights do not
   sum to 1 (libtiff's reading, which other tools show); a small file claiming a huge picture is
   refused before memory is set aside for it.
+- **AV117**: MXF files with an RGBA picture descriptor (CinemaDNG in MXF) report their real
+  component depth and reference levels (16-bit, 0–65535) instead of the Y'CbCr fields they do
+  not have.

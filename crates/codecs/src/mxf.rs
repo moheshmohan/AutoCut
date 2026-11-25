@@ -305,7 +305,9 @@ impl MxfSource {
                 mpeg2_header = header.clone();
             }
             let mut color = filmcraft_color::ColorInfo { matrix: filmcraft_frame::default_matrix(w, h), ..filmcraft_color::ColorInfo::REC709 };
-            if p.full_range() {
+            // the levels of a CDCI descriptor are the Y'CbCr range; an RGBA descriptor's are its RGB
+            // codes, which say nothing about how a Y'CbCr codec inside codes its samples
+            if p.full_range() && !p.rgba {
                 color.range = filmcraft_color::Range::Full;
                 explicit_color = Some(color);
             }

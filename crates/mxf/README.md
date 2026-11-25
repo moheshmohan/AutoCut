@@ -52,7 +52,10 @@ let pcm = mxf.read_pcm(&file, a, 48_000, 1920)?;       // planar f32, sample-exa
   number, edit rate, origin) → descriptor (a multiple descriptor's sub-descriptor by
   `LinkedTrackID`). Without a usable material package the file packages' tracks are used directly.
   Elements are matched by track number, or — when the number is 0 or does not match (some OP-Atom
-  writers) — the only unclaimed element stream of the right kind.
+  writers) — the only unclaimed element stream of the right kind. A CDCI descriptor gives the
+  component depth and black / white levels of its Y'CbCr; an RGBA descriptor (CinemaDNG §7.2.2)
+  gives its R, G and B depth from the pixel layout (none when they differ) and its component
+  minimum and maximum codes.
 - **Pictures.** One `Sample` per edit unit in stored order: frame wrapping (one element each) or
   clip wrapping (one element split by the index: constant `EditUnitByteCount` or VBR entries).
   Random access from index flag bit 7 (intra-only codings: every picture); without an index the

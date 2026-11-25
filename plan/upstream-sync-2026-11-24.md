@@ -391,3 +391,4 @@ craft-libs crate and no new dependency.
 | Commit | Port | craft-libs |
 |---|---|---|
 | AV116 | YCbCr TIFF: unusable YCbCrCoefficients / ReferenceBlackWhite fall back to their defaults (they were refused), libtiff's green (greys stay neutral when the weights do not sum to 1), a file too small for its picture refused before the data units are allocated, fallible allocations, overlapping strips refused. JPEG-compressed YCbCr stays the image crate's | `603d43da85` |
+| AV117 | MXF RGBA descriptors (CinemaDNG): depth from the PixelLayout (R, G, B equal, else 0), levels from ComponentMinRef / ComponentMaxRef. The MXF video source keeps reading the levels as a Y'CbCr range only from CDCI descriptors, so a ProRes 4444 track with an RGBA descriptor and full-range RGB codes is not forced to full-range Y'CbCr (no change from today) | `fc54b56b65` |
