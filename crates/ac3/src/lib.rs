@@ -136,23 +136,43 @@ impl<'a> Bits<'a> {
     fn new(d: &'a [u8]) -> Self {
         Self { d, pos: 0 }
     }
+    /// The next `n` bits, MSB first, from one 8-byte load (the bytes past the end read as zero).
+    /// It read one bit at a time; a read longer than 32 bits still keeps its last 32.
+    #[inline]
     fn read(&mut self, n: u32) -> u32 {
-        let mut v = 0u32;
-        for _ in 0..n {
-            let byte = self.d.get(self.pos >> 3).copied().unwrap_or(0);
-            v = (v << 1) | ((byte >> (7 - (self.pos & 7))) & 1) as u32;
-            self.pos += 1;
+        if n > 32 {
+            self.skip((n - 32) as usize);
+            return self.read(32);
         }
-        v
+        if n == 0 {
+            return 0;
+        }
+        let (byte, off) = (self.pos >> 3, (self.pos & 7) as u32);
+        let window = match self.d.get(byte..byte.saturating_add(8)).and_then(|b| <[u8; 8]>::try_from(b).ok()) {
+            Some(b) => u64::from_be_bytes(b),
+            None => {
+                // near the end: the bytes that are there, then zeros
+                let mut b = [0u8; 8];
+                for (i, v) in b.iter_mut().enumerate() {
+                    *v = byte.checked_add(i).and_then(|j| self.d.get(j)).copied().unwrap_or(0);
+                }
+                u64::from_be_bytes(b)
+            }
+        };
+        // at most 7 bits are skipped in the window, so 57 or more remain for the 32 read
+        self.pos = self.pos.saturating_add(n as usize);
+        ((window << off) >> (64 - n)) as u32
     }
+    #[inline]
     fn bit(&mut self) -> bool {
         self.read(1) == 1
     }
+    #[inline]
     fn skip(&mut self, n: usize) {
-        self.pos += n;
+        self.pos = self.pos.saturating_add(n);
     }
     fn overrun(&self) -> bool {
-        self.pos > self.d.len() * 8
+        self.pos > self.d.len().saturating_mul(8)
     }
 }
 

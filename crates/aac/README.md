@@ -86,9 +86,12 @@ Bandwidth: automatic from bitrate per full-bandwidth channel (e.g. 64 kbps/ch �
 Delay: 1024 priming samples (`priming_samples()`); after `flush()` the decoded stream minus the priming
 covers every input sample (`ceil(n / 1024) + 1` access units).
 
-Performance (Apple Silicon, release, single thread): 10 s of 44.1 kHz stereo encodes at ~85× realtime
-and decodes at ~1000× realtime. With the `rayon` feature channels are quantised in parallel inside the
-rate loop.
+Performance (Apple M3 Max, release, single thread, 48 kHz): 30 s of stereo at 128 kbit/s encodes in
+about 0.18 s (~170× realtime) and 2 min of 192 kbit/s stereo decodes in about 0.13 s (~900× realtime).
+The table-driven Huffman decoder, the fused FFT stages, reused work buffers and the encoder's per-band
+cache across rate-loop iterations (from upstream FilmCraft) made decoding about 1.4× and encoding
+about 2.3× faster with byte-identical output. With the `rayon` feature channels are quantised in
+parallel inside the rate loop.
 
 ## Decoder
 

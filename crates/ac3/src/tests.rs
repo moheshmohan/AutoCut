@@ -269,3 +269,65 @@ fn eac3_garbage_never_panics() {
         }
     }
 }
+
+/// The reader that took one bit at a time, verbatim: the reference for [`Bits`].
+struct OldBits<'a> {
+    d: &'a [u8],
+    pos: usize,
+}
+
+impl OldBits<'_> {
+    fn read(&mut self, n: u32) -> u32 {
+        let mut v = 0u32;
+        for _ in 0..n {
+            let byte = self.d.get(self.pos >> 3).copied().unwrap_or(0);
+            v = (v << 1) | ((byte >> (7 - (self.pos & 7))) & 1) as u32;
+            self.pos += 1;
+        }
+        v
+    }
+    fn skip(&mut self, n: usize) {
+        self.pos += n;
+    }
+    fn overrun(&self) -> bool {
+        self.pos > self.d.len() * 8
+    }
+}
+
+/// The word reader gives every read, skip and overrun the bit-at-a-time reader gave: all read
+/// lengths 0..=40 (past 32 the last 32 bits), at every bit offset, over the end of short and
+/// empty data, after skips past the end.
+#[test]
+fn bits_match_the_bit_at_a_time_reader() {
+    let mut x = 0x9E37_79B9u32;
+    let mut rnd = move || {
+        x ^= x << 13;
+        x ^= x >> 17;
+        x ^= x << 5;
+        x
+    };
+    for len in [0usize, 1, 2, 3, 5, 7, 8, 9, 13, 64, 257] {
+        let data: Vec<u8> = (0..len).map(|_| rnd() as u8).collect();
+        for _ in 0..40 {
+            let (mut new, mut old) = (Bits::new(&data), OldBits { d: &data, pos: 0 });
+            for _ in 0..200 {
+                let op = rnd();
+                if op % 7 == 0 {
+                    let n = (op >> 8) as usize % 23;
+                    new.skip(n);
+                    old.skip(n);
+                } else {
+                    let n = (op >> 8) % 41;
+                    assert_eq!(new.read(n), old.read(n), "len {len} pos {} n {n}", old.pos);
+                }
+                assert_eq!((new.pos, new.overrun()), (old.pos, old.overrun()));
+            }
+        }
+    }
+    // a skip near the end of the address space saturates rather than wrapping or panicking
+    let mut far = Bits::new(&[0xff]);
+    far.skip(usize::MAX);
+    far.skip(5);
+    assert_eq!((far.read(32), far.read(40)), (0, 0));
+    assert!(far.overrun());
+}
