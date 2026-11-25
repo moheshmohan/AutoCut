@@ -185,6 +185,36 @@ pub const FIXTURES: &[Fixture] = &[
     fx!("lossless_400", "testsrc2", 176, 144, 4, NOISE, 8, 400, ["-x265-params", "lossless=1:log-level=error"]),
     fx!("cu_lossless_400_10", "testsrc2", 176, 144, 6, NOISE, 10, 400, ["-x265-params", "cu-lossless=1:log-level=error"]),
     fx!("odd_201x117_400", "testsrc2", 201, 117, 8, NOISE, 8, 400, ["-x265-params", "bframes=3:log-level=error"]),
+    // 12-bit (Main 12, Main 4:2:2 12, Main 4:4:4 12, Monochrome 12: libx265 with yuv420p12le /
+    // yuv422p12le / yuv444p12le / gray12le): QpBdOffset 24, shift1 4 / shift3 2 in the
+    // interpolation, deblocking tc / beta and SAO band shifts at 12 bits, SAO offsets unscaled
+    fx!("intra_420_12", "testsrc2", 352, 288, 3, NOISE, 12, ["-x265-params", "keyint=1:log-level=error"]),
+    fx!("intra_420_12_nosao_nodbk", "testsrc2", 352, 288, 2, NOISE, 12, ["-x265-params", "keyint=1:no-sao=1:no-deblock=1:log-level=error"]),
+    fx!("medium_420_12", "testsrc2", 352, 288, 16, NOISE, 12, ["-preset", "medium", "-x265-params", "log-level=error"]),
+    fx!("slow_420_12", "mandelbrot", 352, 288, 12, NOISE, 12, ["-preset", "slow", "-x265-params", "log-level=error"]),
+    fx!("bframes_420_12", "testsrc2", 352, 288, 24, NOISE, 12, ["-x265-params", "bframes=8:b-pyramid=1:ref=4:log-level=error"]),
+    fx!("weightp_420_12", "testsrc2", 352, 288, 20, "fade=in:0:18", 12, ["-x265-params", "weightp=1:weightb=1:log-level=error"]),
+    fx!("tskip_420_12", "testsrc2", 352, 288, 8, NOISE, 12, ["-x265-params", "tskip=1:log-level=error"]),
+    fx!("qp1_420_12", "mandelbrot", 176, 144, 4, NOISE, 12, ["-x265-params", "qp=1:log-level=error"]),
+    fx!("lossless_420_12", "testsrc2", 176, 144, 4, NOISE, 12, ["-x265-params", "lossless=1:log-level=error"]),
+    fx!("scaling_list_420_12", "testsrc2", 352, 288, 8, NOISE, 12, ["-x265-params", "scaling-list=default:log-level=error"]),
+    fx!("odd_1918x1078_420_12", "testsrc2", 1918, 1078, 2, NOISE, 12, ["-preset", "veryfast", "-x265-params", "log-level=error"]),
+    fx!("intra_422_12", "testsrc2", 352, 288, 3, NOISE, 12, 422, ["-x265-params", "keyint=1:log-level=error"]),
+    fx!("medium_422_12", "testsrc2", 352, 288, 16, NOISE, 12, 422, ["-preset", "medium", "-x265-params", "log-level=error"]),
+    fx!("bframes_422_12", "testsrc2", 352, 288, 24, NOISE, 12, 422, ["-x265-params", "bframes=8:b-pyramid=1:ref=4:log-level=error"]),
+    fx!("lossless_422_12", "testsrc2", 176, 144, 4, NOISE, 12, 422, ["-x265-params", "lossless=1:log-level=error"]),
+    fx!("odd_330x117_422_12", "mandelbrot", 330, 117, 8, NOISE, 12, 422, ["-x265-params", "bframes=3:log-level=error"]),
+    fx!("intra_444_12", "testsrc2", 352, 288, 3, NOISE, 12, 444, ["-x265-params", "keyint=1:log-level=error"]),
+    fx!("medium_444_12", "testsrc2", 352, 288, 16, NOISE, 12, 444, ["-preset", "medium", "-x265-params", "log-level=error"]),
+    fx!("bframes_444_12", "testsrc2", 352, 288, 24, NOISE, 12, 444, ["-x265-params", "bframes=8:b-pyramid=1:ref=4:log-level=error"]),
+    fx!("weightp_444_12", "testsrc2", 352, 288, 20, "fade=in:0:18", 12, 444, ["-x265-params", "weightp=1:weightb=1:log-level=error"]),
+    fx!("tskip_444_12", "testsrc2", 352, 288, 8, NOISE, 12, 444, ["-x265-params", "tskip=1:keyint=1:log-level=error"]),
+    fx!("lossless_444_12", "testsrc2", 176, 144, 4, NOISE, 12, 444, ["-x265-params", "lossless=1:log-level=error"]),
+    fx!("qp_444_12", "mandelbrot", 352, 288, 8, NOISE, 12, 444, ["-x265-params", "aq-mode=3:cbqpoffs=5:crqpoffs=-6:log-level=error"]),
+    fx!("odd_201x117_444_12", "testsrc2", 201, 117, 8, NOISE, 12, 444, ["-x265-params", "bframes=3:log-level=error"]),
+    fx!("intra_400_12", "testsrc2", 352, 288, 3, NOISE, 12, 400, ["-x265-params", "keyint=1:log-level=error"]),
+    fx!("medium_400_12", "testsrc2", 352, 288, 16, NOISE, 12, 400, ["-preset", "medium", "-x265-params", "log-level=error"]),
+    fx!("lossless_400_12", "testsrc2", 176, 144, 4, NOISE, 12, 400, ["-x265-params", "lossless=1:log-level=error"]),
     // performance reference streams (tests/perf.rs)
     fx!("bench_1080p", "testsrc2", 1920, 1080, 60, "noise=alls=3:allf=t", 8, ["-preset", "medium", "-crf", "24", "-x265-params", "log-level=error"]),
     fx!("bench_4k", "testsrc2", 3840, 2160, 20, "noise=alls=3:allf=t", 10, ["-preset", "fast", "-crf", "26", "-x265-params", "log-level=error"]),
@@ -343,6 +373,75 @@ pub fn ensure(f: &Fixture) -> Option<(PathBuf, PathBuf)> {
     }
     Some((hevc, yuv))
 }
+
+/// The x265 command-line encoder (a fixture generator whose own reconstruction is an oracle).
+pub fn x265() -> Option<PathBuf> {
+    filmcraft_testkit::oracle::find_tool("x265")
+}
+
+/// A stream written by the x265 command-line encoder with `args` from the fixture's source, and
+/// the encoder's own reconstruction of it (`--recon`, the pictures every conforming decoder must
+/// output) as raw planar frames: the oracle for streams ffmpeg's decoder gets wrong. None (with
+/// a message) without ffmpeg or x265.
+pub fn ensure_x265_recon(f: &Fixture) -> Option<(PathBuf, PathBuf)> {
+    let ff = filmcraft_testkit::ffmpeg_or_skip(f.name)?;
+    let Some(x265) = x265() else {
+        filmcraft_testkit::skip(f.name, "the x265 command-line encoder is not installed");
+        return None;
+    };
+    let dir = fixtures_dir();
+    let (hevc, yuv) = (dir.join(format!("{}.hevc", f.name)), dir.join(format!("{}.yuv", f.name)));
+    if hevc.exists() && yuv.exists() {
+        return Some((hevc, yuv));
+    }
+    let pix = pix_fmt(f.bit_depth, f.chroma);
+    let input = filmcraft_testkit::temp_path(&dir.join(format!("{}.y4m", f.name)));
+    let recon = filmcraft_testkit::temp_path(&dir.join(format!("{}.recon.y4m", f.name)));
+    let tmp = filmcraft_testkit::temp_path(&hevc);
+    let mut vf = format!("{}=size={}x{}:rate=25,format={pix}", f.source, f.width, f.height);
+    if !f.filter.is_empty() {
+        vf.push(',');
+        vf.push_str(f.filter);
+    }
+    let mut c = Command::new(&ff);
+    c.args(["-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", &vf, "-frames:v", &f.frames.to_string(), "-pix_fmt", pix, "-strict", "-1"])
+        .arg(&input);
+    assert!(run(&mut c), "y4m source for {}", f.name);
+    let mut c = Command::new(&x265);
+    c.arg("--input").arg(&input).arg("--output").arg(&tmp).arg("--recon").arg(&recon);
+    c.args(["--output-depth", &f.bit_depth.to_string(), "--log-level", "error"]).args(f.args);
+    assert!(run(&mut c), "x265 encode of {}", f.name);
+    // the reconstruction: a y4m header line, then "FRAME..." lines each followed by one frame
+    let data = std::fs::read(&recon).unwrap();
+    let mut raw = Vec::new();
+    let mut pos = data.iter().position(|&b| b == b'\n').unwrap() + 1;
+    let size = frame_size(f);
+    while pos < data.len() {
+        let line = data[pos..].iter().position(|&b| b == b'\n').unwrap();
+        assert!(data[pos..].starts_with(b"FRAME"), "{}: y4m frame header", f.name);
+        pos += line + 1;
+        raw.extend_from_slice(&data[pos..pos + size]);
+        pos += size;
+    }
+    assert_eq!(raw.len(), size * f.frames as usize, "{}: reconstructed frames", f.name);
+    let tmp_yuv = filmcraft_testkit::temp_path(&yuv);
+    std::fs::write(&tmp_yuv, raw).unwrap();
+    std::fs::rename(&tmp_yuv, &yuv).unwrap();
+    std::fs::rename(&tmp, &hevc).unwrap();
+    let _ = (std::fs::remove_file(&input), std::fs::remove_file(&recon));
+    Some((hevc, yuv))
+}
+
+/// Streams written by the x265 command-line encoder and checked against its reconstruction
+/// (`ensure_x265_recon`): 12-bit pictures at the coarsest quantizers with cu_qp_delta, which
+/// ffmpeg 9 decodes to other pictures than the encoder's (some of them flat mid-grey), without an
+/// error.
+pub const X265_RECON_FIXTURES: &[Fixture] = &[
+    fx!("recon_crf51_420_12", "testsrc2", 352, 288, 8, NOISE, 12, ["--crf", "51", "--bframes", "3"]),
+    fx!("recon_crf45_422_12", "testsrc2", 352, 288, 6, NOISE, 12, 422, ["--crf", "45", "--input-csp", "i422"]),
+    fx!("recon_crf51_444_12", "mandelbrot", 352, 288, 6, NOISE, 12, 444, ["--crf", "51", "--input-csp", "i444"]),
+    fx!("recon_crf48_400_12", "testsrc2", 352, 288, 6, NOISE, 12, 400, ["--crf", "48", "--input-csp", "i400"]),
+];
 
 fn is_vcl(t: u8) -> bool {
     t < 32

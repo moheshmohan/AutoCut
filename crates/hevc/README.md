@@ -31,9 +31,10 @@ and fixture generators.
 | Frame-level multithreading (CTB-row granularity dependencies) | done |
 | Draft mode (non-reference pictures skip deblocking / SAO; reduced-resolution playback only) | done |
 | Tiles / WPP | parsed and decoded sequentially within a picture (parallelism is across pictures) |
-| 4:2:2 (Main 4:2:2 10 / RExt profile without RExt tools, what cameras and libx265 write): chroma geometry from the SPS chroma format in the picture store, intra, inter, transform tree, deblocking and SAO; Table 8-3 intra mode mapping; stacked chroma transform blocks with their second cbf flags; chroma QP = Min(qPi, 51); chroma motion vectors per axis; 8-12-bit | done (bit-exact on the 8- and 10-bit libx265 fixtures; 12-bit 4:2:2 only through the synthetic PCM streams) |
-| 4:4:4 (Main 4:4:4 / Main 4:4:4 10, RExt profiles without RExt tools, what libx265 writes): chroma at full resolution through intra (chroma modes per prediction block, 4x4 chroma blocks, neighbour filtering and the mode-dependent scan of 8x8 chroma blocks), inter (4-tap chroma filter at the luma vector), 32x32 chroma transforms and scaling lists, the 4:4:4 chroma cbfs at every depth, deblocking on the 8x8 chroma grid and SAO; 8-12-bit | done (bit-exact on 33 8- and 10-bit libx265 fixtures; 12-bit through the synthetic PCM streams) |
-| Monochrome (Main 4:0:0 / 4:0:0 10, `chroma_format_idc` 0): luma only, no chroma syntax (modes, cbfs, residuals, PCM samples, SAO, weights) or planes; `Picture::chroma` is `C400` with empty `u` / `v` planes, and the chroma depth is the luma depth | done (bit-exact on 11 libx265 fixtures) |
+| 4:2:2 (Main 4:2:2 10 / RExt profile without RExt tools, what cameras and libx265 write): chroma geometry from the SPS chroma format in the picture store, intra, inter, transform tree, deblocking and SAO; Table 8-3 intra mode mapping; stacked chroma transform blocks with their second cbf flags; chroma QP = Min(qPi, 51); chroma motion vectors per axis; 8-12-bit | done (bit-exact on the 8-, 10- and 12-bit libx265 fixtures) |
+| 4:4:4 (Main 4:4:4 / Main 4:4:4 10, RExt profiles without RExt tools, what libx265 writes): chroma at full resolution through intra (chroma modes per prediction block, 4x4 chroma blocks, neighbour filtering and the mode-dependent scan of 8x8 chroma blocks), inter (4-tap chroma filter at the luma vector), 32x32 chroma transforms and scaling lists, the 4:4:4 chroma cbfs at every depth, deblocking on the 8x8 chroma grid and SAO; 8-12-bit | done (bit-exact on 41 8-, 10- and 12-bit libx265 fixtures) |
+| Monochrome (Main 4:0:0 / 4:0:0 10 / 4:0:0 12, `chroma_format_idc` 0): luma only, no chroma syntax (modes, cbfs, residuals, PCM samples, SAO, weights) or planes; `Picture::chroma` is `C400` with empty `u` / `v` planes, and the chroma depth is the luma depth | done (bit-exact on 14 libx265 fixtures) |
+| 12-bit (Main 12, Main 4:2:2 12, Main 4:4:4 12, Monochrome 12, RExt profiles without RExt tools): QpBdOffset 24, interpolation shifts 4 / 2, weighted prediction offsets << 4, deblocking tc / beta << 4, SAO band shift 7 with unscaled offsets (`log2_sao_offset_scale` 0) | done (bit-exact on 27 libx265 fixtures, and on 4 coarse x265 streams against the encoder's own reconstruction) |
 | Separate colour planes (`separate_colour_plane_flag`: three monochrome-coded planes with their own slices) | not supported (`Error::Unsupported`) |
 | Range-extension coding tools (RDPCM, cross-component prediction, extended precision, persistent Rice adaptation, bypass alignment, chroma QP offset lists, SAO offset scaling, transform-skip rotation / contexts / sizes, intra smoothing off, high-precision weighted prediction offsets) | not yet (`Error::Unsupported`) |
 | SCC, multilayer (SHVC / MV-HEVC), 3D extensions | not supported (layers > 0 are ignored) |
@@ -114,12 +115,14 @@ with ffmpeg; tests print a message and skip when ffmpeg is absent).
   panics or deadlocks (single- and multi-threaded).
 - Conformance (`tests/conformance.rs`): every fixture is decoded with 1 thread, 3 threads and every
   core and compared sample-exactly, plane by plane, with `ffmpeg -f rawvideo -pix_fmt yuv420p /
-  yuv420p10le / yuv422p / yuv422p10le / yuv444p / yuv444p10le / gray / gray10le` (monochrome
-  pictures must have empty chroma planes); on mismatch
+  yuv422p / yuv444p / gray` at 8 bits and their `10le` / `12le` forms (monochrome pictures must have
+  empty chroma planes); on mismatch
   the first differing frame, plane, sample, CTB and 8x8 block are reported. Output pts/POC order is
   checked too, and that no picture is flagged draft without draft mode. `compare_detects_mismatch`,
   `compare_detects_a_422_chroma_mismatch` and `compare_detects_444_and_monochrome_mismatches`
-  guard the harness itself. Draft mode (`draft_mode_changes_only_flagged_non_reference_pictures`):
+  guard the harness itself. Where ffmpeg is wrong (12-bit streams at the coarsest quantizers with
+  cu_qp_delta), the x265 command-line encoder writes the stream and its reconstruction (`--recon`)
+  is the reference (`coarse_12_bit_streams_match_the_encoders_reconstruction`). Draft mode (`draft_mode_changes_only_flagged_non_reference_pictures`):
   on B-pyramid / weighted fixtures, single- and frame-threaded, every unflagged picture is
   bit-exact and only flagged pictures differ.
 
@@ -159,6 +162,11 @@ libx265 unless noted (x265 enables WPP by default, so most streams carry entry p
 | ctu32_tu4_422_10 / ctu16_422_10 / scaling_list_422_10 / constrained_intra_422_10 / slices4_422_10 | 352x288 | 4:2:2 block structure, scaling lists, constrained intra, slices |
 | odd_202x118_422 / odd_330x117_422_10 / odd_98x61_422_10 / odd_1918x1078_422 / odd_1918x1078_422_10 | | 4:2:2 sizes that are not multiples of 8 or 16 (odd heights: 4:2:2 crops by lines) |
 | uhd_4k_422_10 | 3840x2160 | 4:2:2 10-bit ultrafast |
+| intra_420_12 / intra_420_12_nosao_nodbk / medium_420_12 / slow_420_12 / bframes_420_12 / weightp_420_12 / tskip_420_12 / qp1_420_12 / lossless_420_12 / scaling_list_420_12 / odd_1918x1078_420_12 | 352x288 / 176x144 / 1918x1078 | Main 12: intra with and without the in-loop filters, presets, B pyramid, weighted prediction, transform skip, the finest quantizer (QP 1, Qp' 25), lossless, scaling lists, cropping |
+| intra_422_12 / medium_422_12 / bframes_422_12 / lossless_422_12 / odd_330x117_422_12 | | Main 4:2:2 12 |
+| intra_444_12 / medium_444_12 / bframes_444_12 / weightp_444_12 / tskip_444_12 / lossless_444_12 / qp_444_12 / odd_201x117_444_12 | | Main 4:4:4 12 (qp_444_12: adaptive QP with chroma QP offsets 5 / -6) |
+| intra_400_12 / medium_400_12 / lossless_400_12 | | Monochrome 12 |
+| recon_crf51_420_12 / recon_crf45_422_12 / recon_crf51_444_12 / recon_crf48_400_12 | 352x288 | x265 command-line encoder at CRF 45-51 (cu_qp_delta at the coarsest quantizers), compared with the encoder's own reconstruction (`--recon`): ffmpeg 9 decodes these to other pictures (some flat mid-grey) without an error |
 | intra_444 / intra_444_10 / intra_444_nosao_nodbk / intra_444_10_nosao_nodbk / no_strong_intra_444 / constrained_intra_444 | 352x288 | 4:4:4 8 / 10-bit intra, with and without the in-loop filters, strong smoothing off, constrained intra |
 | medium_444 / medium_444_10 / slow_444 / p_only_444_10 / bframes_444 / bframes_444_10 | 352x288 | 4:4:4 presets, P only, B pyramid |
 | no_sao_444 / no_deblock_444_10 / deblock_m3_3_444 / rect_amp_444_10 / tskip_444 / tskip_444_10 / weightp_444 / weightp_444_10 | 352x288 | 4:4:4 tool toggles |
@@ -241,8 +249,6 @@ streams that decode. CPU cycles per frame, one thread, release, alternating roun
   offset scaling) are rejected with `Error::Unsupported`, and so are separately coded colour planes.
   4:2:2, 4:4:4 and monochrome streams that use none of those tools (what cameras and libx265 write)
   decode.
-- 12-bit pictures are implemented, but only synthetic PCM streams cover them (no libx265 12-bit
-  fixture compared with ffmpeg yet).
 - Tiles and WPP substreams are decoded sequentially (entry points are parsed but the decoder finds
   substream starts itself); parallelism is at the picture level.
 - Error concealment is minimal: missing references are replaced by grey pictures, undecodable

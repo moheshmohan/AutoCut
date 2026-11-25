@@ -134,7 +134,51 @@ fixture_tests!(
     lossless_400,
     cu_lossless_400_10,
     odd_201x117_400,
+    intra_420_12,
+    intra_420_12_nosao_nodbk,
+    medium_420_12,
+    slow_420_12,
+    bframes_420_12,
+    weightp_420_12,
+    tskip_420_12,
+    qp1_420_12,
+    lossless_420_12,
+    scaling_list_420_12,
+    odd_1918x1078_420_12,
+    intra_422_12,
+    medium_422_12,
+    bframes_422_12,
+    lossless_422_12,
+    odd_330x117_422_12,
+    intra_444_12,
+    medium_444_12,
+    bframes_444_12,
+    weightp_444_12,
+    tskip_444_12,
+    lossless_444_12,
+    qp_444_12,
+    odd_201x117_444_12,
+    intra_400_12,
+    medium_400_12,
+    lossless_400_12,
 );
+
+/// 12-bit streams at the coarsest quantizers with cu_qp_delta (libx265 at CRF 45-51) decode to the
+/// x265 encoder's own reconstruction, sample for sample in every plane, single- and multi-threaded
+/// (ffmpeg 9 decodes them to other pictures, some of them flat mid-grey, without an error, so it
+/// cannot be the oracle there).
+#[test]
+fn coarse_12_bit_streams_match_the_encoders_reconstruction() {
+    for f in common::X265_RECON_FIXTURES {
+        let Some((hevc, yuv)) = common::ensure_x265_recon(f) else { return };
+        let reference = std::fs::read(&yuv).unwrap();
+        for threads in [1, 3, 0] {
+            let pics = common::decode_file_threads(&hevc, threads).unwrap_or_else(|(au, e, _)| panic!("{}: error at {au}: {e}", f.name));
+            common::compare(&pics, &reference, f.width as usize, f.height as usize, f.bit_depth, f.chroma)
+                .unwrap_or_else(|e| panic!("{} (threads {threads}): {e}", f.name));
+        }
+    }
+}
 
 /// Draft mode: sub-layer non-reference pictures skip deblocking and SAO and are flagged; every
 /// other picture stays bit-exact, single-threaded and frame-threaded.

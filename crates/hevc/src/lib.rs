@@ -1,8 +1,8 @@
 //! Clean-room pure-Rust H.265 / HEVC decoder, implemented from ITU-T Rec. H.265 (ISO/IEC 23008-2).
 //!
-//! Supported: Main, Main 10, Main 4:2:2 10, Main 4:4:4 (10) and monochrome profiles (4:2:0,
-//! 4:2:2, 4:4:4 and 4:0:0, 8/10-bit; up to 12-bit without range-extension tools), all coding
-//! tools of those profiles: CABAC, coding / transform quadtrees, AMP, PCM,
+//! Supported: Main, Main 10, Main 12, Main 4:2:2 10 / 12, Main 4:4:4 (10, 12) and monochrome
+//! profiles (4:2:0, 4:2:2, 4:4:4 and 4:0:0 at 8 to 12 bits) without range-extension tools, all
+//! coding tools of those profiles: CABAC, coding / transform quadtrees, AMP, PCM,
 //! transform skip, scaling lists, sign data hiding, 35 intra modes with strong intra smoothing,
 //! merge / AMVP / TMVP, weighted prediction, deblocking, SAO, tiles, wavefront parallel processing
 //! (parsing), dependent slice segments, short- and long-term reference picture sets.

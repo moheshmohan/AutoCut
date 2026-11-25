@@ -71,7 +71,8 @@ platforms** G4, G9, G17; **performance** G16; **ecosystem** G11; **measurement**
   as 10-bit / 4:2:2 frames (AutoCut AV99–AV101, `crates/h264/README.md`). HEVC 4:2:2 8- and
   10-bit (Sony XAVC HS, Fujifilm, Canon) decodes in software since AutoCut 0.14, and HEVC 4:4:4
   and monochrome (Main 4:4:4 / 4:4:4 10, Main 4:0:0; screen recordings, graphics masters) since
-  AutoCut AV105, bit-exact on 44 more libx265 fixtures, as 4:4:4 and grey frames
+  AutoCut AV105, bit-exact on 44 more libx265 fixtures, as 4:4:4 and grey frames; 12-bit (Main 12,
+  4:2:2 12, 4:4:4 12, Monochrome 12) is verified bit-exact on 27 more (AV106)
   (`crates/hevc/README.md`).
 - **Missing:** H.264 4:4:4, lossless, monochrome and interlaced field / MBAFF coding (1080i
   camera and broadcast H.264); the HEVC RExt coding tools (RDPCM, cross-component prediction,
@@ -374,3 +375,4 @@ platforms** G4, G9, G17; **performance** G16; **ecosystem** G11; **measurement**
 | 2026-10-26 | minor | G10: 360° video (Insta360, Spherical Video V1 / V2, the 360 Reframe virtual camera, 360° export) |
 | 2026-11-25 | minor | G3: H.264 High 10 / High 4:2:2 (8- and 10-bit 4:2:0 / 4:2:2, Intra profiles) decode in software; left: 4:4:4, interlaced H.264, HEVC RExt |
 | 2026-11-25 | minor | G3: HEVC 4:4:4 and monochrome (8- and 10-bit) decode in software; left: H.264 4:4:4 / interlaced, HEVC RExt coding tools |
+| 2026-11-25 | minor | G3: HEVC 12-bit (4:2:0, 4:2:2, 4:4:4, monochrome) verified bit-exact |
