@@ -167,6 +167,10 @@ pub struct Provider {
     /// refused before it runs ([`crate::generate_caps`]). Without it nothing is checked there.
     #[serde(default)]
     pub capabilities: Option<Capabilities>,
+    /// A workflow of a local ComfyUI server instead of a program ([`crate::generate_comfy`]):
+    /// such an entry has no `command`, `perReference` or `optional`.
+    #[serde(default)]
+    pub comfyui: Option<crate::generate_comfy::Config>,
     #[serde(default)]
     pub license: String,
     /// What the model's licence asks to be shown where it is used.
@@ -485,12 +489,16 @@ pub fn ask(p: &Provider, a: &Ask) -> Result<(), String> {
 
 /// Whether the tool takes reference pictures at all.
 pub fn takes_references(p: &Provider) -> bool {
-    !p.per_reference.is_empty()
+    match &p.comfyui {
+        Some(c) => c.references() > 0,
+        None => !p.per_reference.is_empty(),
+    }
 }
 
 /// The most reference pictures a request may give the tool.
 pub fn max_references(p: &Provider) -> usize {
-    let own = p.max_references.map_or(MAX_REFERENCES, |m| (m as usize).min(MAX_REFERENCES));
+    let most = p.comfyui.as_ref().map_or(MAX_REFERENCES, |c| c.references());
+    let own = p.max_references.map_or(most, |m| (m as usize).min(most));
     p.capabilities.as_ref().and_then(|c| c.references).map_or(own, |n| own.min(n as usize))
 }
 
@@ -501,12 +509,33 @@ pub fn starts_on_picture(p: &Provider) -> bool {
 
 /// Whether a video tool can end a clip on a given picture.
 pub fn ends_on_picture(p: &Provider) -> bool {
-    p.optional.contains_key("lastImage") && p.capabilities.as_ref().and_then(|c| c.last_frame) != Some(false)
+    takes_last_image(p) && p.capabilities.as_ref().and_then(|c| c.last_frame) != Some(false)
+}
+
+/// Whether the entry has somewhere to put the picture a clip ends on (an `optional` group
+/// `lastImage`, or a workflow input that takes `{lastImage}`).
+pub fn takes_last_image(p: &Provider) -> bool {
+    match &p.comfyui {
+        Some(c) => c.uses("lastImage"),
+        None => p.optional.contains_key("lastImage"),
+    }
+}
+
+/// Whether the tool itself makes a transparent picture when asked (an `optional` group
+/// `transparent`, or a workflow input that takes `{transparent}`), without a cut-out step.
+pub fn takes_transparent(p: &Provider) -> bool {
+    match &p.comfyui {
+        Some(c) => c.uses("transparent"),
+        None => p.optional.contains_key("transparent"),
+    }
 }
 
 /// Whether any argument of the tool's command (its optional groups and per-reference arguments
 /// included) takes the placeholder `name`, or an optional group is keyed by it.
 fn uses(p: &Provider, name: &str) -> bool {
+    if let Some(c) = &p.comfyui {
+        return c.uses(name);
+    }
     let tag = format!("{{{name}}}");
     p.optional.contains_key(name) || p.command.iter().chain(&p.per_reference).chain(p.optional.values().flatten()).any(|a| a.contains(&tag))
 }
@@ -523,9 +552,9 @@ fn check_capabilities(p: &Provider) -> Result<(), String> {
         return claim("lastFrame", "nothing in `command` or `optional` takes {lastImage}");
     }
     if c.references.is_some_and(|n| n > 0) && !takes_references(p) {
-        return Err("`capabilities.references` is more than 0, but there is no `perReference`".into());
+        return Err("`capabilities.references` is more than 0, but there is no `perReference` (or {reference1} input)".into());
     }
-    if c.transparent == Some(true) && !p.optional.contains_key("transparent") && p.cutout_command.is_empty() {
+    if c.transparent == Some(true) && !takes_transparent(p) && p.cutout_command.is_empty() {
         return claim("transparent", "there is no `transparent` option and no `cutoutCommand`");
     }
     if c.negative == Some(true) && !uses(p, "negative") {
@@ -559,7 +588,13 @@ fn check(p: &Provider) -> Result<(), String> {
     if p.kind == Kind::Composition {
         return check_composition(p);
     }
-    if p.command.is_empty() || p.command.len() > MAX_ARGS || p.per_reference.len() > MAX_ARGS || p.optional.len() > MAX_ARGS {
+    let comfy = p.comfyui.as_ref();
+    if let Some(c) = comfy {
+        if !p.command.is_empty() || !p.per_reference.is_empty() || !p.optional.is_empty() {
+            return err("a ComfyUI entry has no `command`, `perReference` or `optional`: `comfyui.inputs` says where the request goes".into());
+        }
+        crate::generate_comfy::check_config(c).or_else(err)?;
+    } else if p.command.is_empty() || p.command.len() > MAX_ARGS || p.per_reference.len() > MAX_ARGS || p.optional.len() > MAX_ARGS {
         return err(format!("`command` needs 1 to {MAX_ARGS} arguments"));
     }
     let groups = p.optional.values().flat_map(|g| g.iter());
@@ -601,10 +636,10 @@ fn check(p: &Provider) -> Result<(), String> {
         }
     }
     let program = p.command.first().map(String::as_str).unwrap_or("");
-    if !std::path::Path::new(program).is_absolute() || program.contains('{') {
+    if comfy.is_none() && (!std::path::Path::new(program).is_absolute() || program.contains('{')) {
         return err("the program (the first of `command`) must be an absolute path".into());
     }
-    if !p.command.iter().any(|a| a.contains("{out}")) {
+    if comfy.is_none() && !p.command.iter().any(|a| a.contains("{out}")) {
         return err("`command` must say where the result goes with {out}".into());
     }
     if let Some(cut) = p.cutout_command.first() {
@@ -674,9 +709,10 @@ fn check_composition(p: &Provider) -> Result<(), String> {
         || !p.extend_command.is_empty()
         || !p.restyle_command.is_empty()
         || !p.restyles.is_empty()
-        || p.capabilities.is_some();
+        || p.capabilities.is_some()
+        || p.comfyui.is_some();
     if generation_only {
-        return err("it takes no generation options (perReference, optional, cutoutCommand, extendCommand, restyleCommand, restyles, capabilities)");
+        return err("it takes no generation options (perReference, optional, cutoutCommand, extendCommand, restyleCommand, restyles, capabilities, comfyui)");
     }
     if p.env.len() > 64 || p.env.iter().any(|(k, v)| k.is_empty() || k.len() > 128 || k.contains(['=', '\0']) || v.len() > MAX_ARG_LEN || v.contains('\0')) {
         return err("`env` has too many or malformed names");
@@ -742,6 +778,7 @@ pub fn cutout(p: &Provider) -> Option<Provider> {
         return None;
     }
     let mut c = p.clone();
+    c.comfyui = None;
     c.command = p.cutout_command.clone();
     c.name = format!("{} (cut-out)", p.name);
     c.per_reference.clear();
@@ -757,6 +794,7 @@ pub fn extender(p: &Provider) -> Option<Provider> {
         return None;
     }
     let mut c = p.clone();
+    c.comfyui = None;
     c.command = p.extend_command.clone();
     c.name = format!("{} (carrying on)", p.name);
     c.per_reference.clear();
@@ -772,6 +810,7 @@ pub fn restyler(p: &Provider, way: &str) -> Option<Provider> {
         return None;
     }
     let mut c = p.clone();
+    c.comfyui = None;
     c.command = p.restyle_command.iter().chain(&w.args).cloned().collect();
     c.name = format!("{} ({way})", p.name);
     c.per_reference.clear();
@@ -874,9 +913,20 @@ pub fn progress_in(text: &str) -> Option<f64> {
     f.is_finite().then(|| f.clamp(0.0, 1.0))
 }
 
-/// Whether the provider's program is there to run (a composition tool without a program: whether
-/// RAEA is found where it installs itself).
+/// What is missing when a tool is not [`installed`], for the message that says so.
+pub fn missing(p: &Provider) -> String {
+    match &p.comfyui {
+        Some(c) => format!("its workflow {} is not on this computer", c.workflow),
+        None => format!("its program {} is not on this computer", p.command.first().cloned().unwrap_or_default()),
+    }
+}
+
+/// Whether the provider's program is there to run (a ComfyUI entry: its workflow file; a
+/// composition tool without a program: whether RAEA is found where it installs itself).
 pub fn installed(p: &Provider) -> bool {
+    if let Some(c) = &p.comfyui {
+        return std::path::Path::new(&c.workflow).is_file();
+    }
     match p.command.first() {
         Some(c) => std::path::Path::new(c).is_file(),
         None => p.kind == Kind::Composition && crate::motion_graphics::locate(Some(p)).is_ok(),

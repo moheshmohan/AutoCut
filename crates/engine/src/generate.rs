@@ -62,6 +62,20 @@ struct Step {
     provider: Provider,
     args: Vec<String>,
     out: String,
+    /// A ComfyUI entry's filled workflow (then `args` is empty).
+    comfy: Option<crate::generate_comfy::Job>,
+}
+
+/// One run of a tool that writes `vars.out`: its command line, or for a ComfyUI entry its
+/// workflow filled and checked (models, licences, inputs), so that what cannot run is refused
+/// here, before anything starts.
+fn make_step(cmd: &str, prov: &Provider, vars: &Vars) -> Result<Step> {
+    let comfy = match &prov.comfyui {
+        Some(c) => Some(crate::generate_comfy::prepare(c, vars, &ext(prov)).map_err(|e| bad(cmd, format!("{}: {e}", prov.name)))?),
+        None => None,
+    };
+    let args = if comfy.is_some() { Vec::new() } else { run::argv(prov, vars).map_err(|e| bad(cmd, e))? };
+    Ok(Step { provider: prov.clone(), args, out: vars.out.clone(), comfy })
 }
 
 /// Where a result goes on the timeline.
@@ -186,22 +200,67 @@ pub fn commands() -> Vec<CommandSpec> {
             true,
         ),
         spec("generate.history", "Generated Media", "{}", history, false),
+        spec("generate.checkTool", "Check Generation Tool", r#"{"provider":id}"#, check_tool, false),
     ]
 }
 
 fn provider_json(p: &Provider) -> Value {
     json!({
         "id": p.id, "kind": p.kind.name(), "name": p.name, "installed": run::installed(p),
+        "runs": if p.comfyui.is_some() { "comfyui" } else { "program" },
         "license": p.license, "attribution": p.attribution, "source": p.source,
         "estimateSeconds": p.estimate_seconds, "maxSeconds": p.max_seconds, "maxSide": p.max_side,
-        "maxReferences": p.max_references, "references": !p.per_reference.is_empty(),
-        "bothEnds": p.optional.contains_key("lastImage"), "carriesOn": !p.extend_command.is_empty(),
+        "maxReferences": p.max_references, "references": run::takes_references(p),
+        "bothEnds": run::takes_last_image(p), "carriesOn": !p.extend_command.is_empty(),
         "restyles": p.restyles.iter().map(|(name, w)| json!({
             "name": name, "about": w.about, "license": w.license, "installed": run::restyle_installed(p, name),
         })).collect::<Vec<_>>(),
         // what the tool can do, as its entry says (null: not said, nothing checked) and in words
         "capabilities": p.capabilities, "can": p.capabilities.as_ref().map(|c| c.summary()),
+        // a ComfyUI entry: where it runs, its models and licences, and what stops it (if anything
+        // does before the workflow is read: generate.checkTool reads it)
+        "comfyui": p.comfyui.as_ref().map(|c| json!({
+            "server": c.server_url(), "workflow": c.workflow, "models": c.models, "problem": c.licence_problem(),
+        })),
     })
+}
+
+/// `generate.checkTool`: whether a tool can run, without running it. Its program (or workflow)
+/// must be there; a ComfyUI entry's workflow is read and checked as a job would be (its inputs,
+/// the models it loads and their licences), and its server asked whether it answers.
+fn check_tool(s: &mut Session, p: &Value) -> Result<Value> {
+    let cmd = "generate.checkTool";
+    poll(s);
+    let id = str_p(p, "provider").ok_or_else(|| bad(cmd, "`provider` is needed: a tool id (generate.providers lists them)"))?;
+    let list = run::load().map_err(|e| bad(cmd, e))?;
+    let where_ = run::manifest_path().map(|m| m.to_string_lossy().into_owned()).unwrap_or_default();
+    let prov = list.into_iter().find(|x| x.id == id).ok_or_else(|| bad(cmd, format!("no generation tool `{}` in {where_}", short(id))))?;
+    let installed = run::installed(&prov);
+    let mut problems: Vec<String> = Vec::new();
+    if !installed {
+        problems.push(run::missing(&prov));
+    }
+    let mut out = json!({"provider": prov.id, "kind": prov.kind.name(), "name": prov.name, "installed": installed, "runs": "program"});
+    if let Some(c) = &prov.comfyui {
+        out["runs"] = json!("comfyui");
+        if installed {
+            match crate::generate_comfy::check_workflow(c) {
+                Ok(models) => out["models"] = json!(models),
+                Err(e) => problems.push(e),
+            }
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        match crate::generate_comfy::probe(c.server_url()) {
+            Ok(version) => out["server"] = json!({"url": c.server_url(), "answering": true, "version": version}),
+            Err(e) => {
+                out["server"] = json!({"url": c.server_url(), "answering": false});
+                problems.push(format!("ComfyUI is not answering at {} ({e}): start it on this computer (docs/generation.md)", c.server_url()));
+            }
+        }
+    }
+    out["ok"] = json!(problems.is_empty());
+    out["problems"] = json!(problems);
+    Ok(out)
 }
 
 /// The generation tools as JSON (also for the Generate panel): `providers`, `manifest`, `error`
@@ -434,14 +493,7 @@ fn start(s: &mut Session, cmd: &'static str, label: String, steps: Vec<Step>, la
     }
     for st in &steps {
         if !run::installed(&st.provider) {
-            return Err(bad(
-                cmd,
-                format!(
-                    "{} is not installed: its program {} is not on this computer",
-                    st.provider.name,
-                    st.provider.command.first().cloned().unwrap_or_default()
-                ),
-            ));
+            return Err(bad(cmd, format!("{} is not installed: {}", st.provider.name, run::missing(&st.provider))));
         }
     }
     let job = crate::narration::new_job(s, label);
@@ -454,7 +506,8 @@ fn start(s: &mut Session, cmd: &'static str, label: String, steps: Vec<Step>, la
     s.generation.pending.push(Pending { job: job_id, cmd, out: out.clone(), lands });
     let spawned = crate::narration::spawn(s, job, wait, "filmcraft-generate", move || {
         let t0 = web_time::Instant::now();
-        let r = run_steps(&steps, &prog);
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_steps(&steps, &prog)))
+            .unwrap_or_else(|_| Err("internal error (see the crash log); the generation was stopped".into()));
         let status = r.clone().map(|()| format!("{} generated", if steps.len() == 1 { "1 file".to_string() } else { format!("{} files", steps.len()) }));
         *out.lock().unwrap_or_else(PoisonError::into_inner) = Some(r);
         crate::narration::finish(&prog, &res, status, t0);
@@ -505,7 +558,15 @@ fn run_steps(steps: &[Step], prog: &filmcraft_export::Progress) -> std::result::
             let done = ((before + part * est) / total * 1000.0).clamp(0.0, 990.0) as u64;
             prog.done.store(done, Ordering::Relaxed);
         };
-        run::run(&st.provider, &st.args, std::path::Path::new(&st.out), &prog.cancel, &mut tick)?;
+        let out = std::path::Path::new(&st.out);
+        match &st.comfy {
+            Some(job) => {
+                let name = st.provider.name.clone();
+                let mut note = |t: String| status(format!("{name}: {t}"));
+                crate::generate_comfy::run(&st.provider, job, out, &prog.cancel, &mut tick, &mut note)?
+            }
+            None => run::run(&st.provider, &st.args, out, &prog.cancel, &mut tick)?,
+        }
         before += est;
     }
     prog.done.store(1000, Ordering::Relaxed);
@@ -741,7 +802,7 @@ struct Picture<'a> {
 
 /// Whether a transparent picture of this tool takes its cut-out program as a second step.
 fn cut_after(cmd: &str, prov: &Provider, transparent: bool) -> Result<Option<Provider>> {
-    if !transparent || prov.optional.contains_key("transparent") {
+    if !transparent || run::takes_transparent(prov) {
         return Ok(None);
     }
     run::cutout(prov)
@@ -770,12 +831,10 @@ fn picture_steps(cmd: &str, q: &Picture, out: &str, cutter: Option<(Provider, St
         transparent: q.transparent && cutter.is_none(),
         ..Default::default()
     };
-    let args = run::argv(q.prov, &vars).map_err(|e| bad(cmd, e))?;
-    let mut steps = vec![Step { provider: q.prov.clone(), args, out: first.clone() }];
+    let mut steps = vec![make_step(cmd, q.prov, &vars)?];
     if let Some((cut, _)) = cutter {
         let cut_vars = Vars { out: out.to_string(), image: Some(first), ..Default::default() };
-        let args = run::argv(&cut, &cut_vars).map_err(|e| bad(cmd, e))?;
-        steps.push(Step { provider: cut, args, out: out.to_string() });
+        steps.push(make_step(cmd, &cut, &cut_vars)?);
     }
     Ok(steps)
 }
@@ -892,7 +951,7 @@ fn video_step(
     dir: &str,
     taken: &[String],
 ) -> Result<(Step, f64, (u32, u32))> {
-    if last_image.is_some() && !prov.optional.contains_key("lastImage") {
+    if last_image.is_some() && !run::takes_last_image(prov) {
         return Err(bad(cmd, format!("{} cannot end a clip on a given picture (it has no `lastImage` option)", prov.name)));
     }
     run::ask(prov, &Ask { first_frame: image.is_some(), last_frame: last_image.is_some(), ..Default::default() }).map_err(|e| bad(cmd, e))?;
@@ -914,8 +973,7 @@ fn video_step(
         last_image,
         ..Default::default()
     };
-    let args = run::argv(prov, &vars).map_err(|e| bad(cmd, e))?;
-    Ok((Step { provider: prov.clone(), args, out }, made, (w, h)))
+    Ok((make_step(cmd, prov, &vars)?, made, (w, h)))
 }
 
 fn video(s: &mut Session, p: &Value) -> Result<Value> {
@@ -987,14 +1045,14 @@ fn sound(s: &mut Session, p: &Value) -> Result<Value> {
         taken.push(out.clone());
         let this = seed.wrapping_add(k);
         let vars = Vars { out: out.clone(), prompt: prompt.clone(), seed: this, seconds: Some(seconds), ..Default::default() };
-        let args = run::argv(&prov, &vars).map_err(|e| bad(cmd, e))?;
+        let step = make_step(cmd, &prov, &vars)?;
         let place =
             (placing && k == 0).then(|| Place { track: str_p(p, "track").map(str::to_string), fit: Some(Tick::from_seconds_f64(seconds)), ..Place::at(at) });
         let mut land = land_of(&prov, &out, &prompt, this, &format!("{seconds:.1} s"), true, place);
         let group = first.get_or_insert_with(|| file_name(&out)).clone();
         land.variation_of = (count > 1).then_some(group);
         lands.push(land);
-        steps.push(Step { provider: prov.clone(), args, out });
+        steps.push(step);
     }
     let mut v = start(s, cmd, format!("Generating sound: {}", short(&prompt)), steps, lands, bool_p(p, "wait").unwrap_or(false))?;
     v["provider"] = json!(prov.id);
@@ -1065,10 +1123,10 @@ fn carry_on(s: &mut Session, cmd: &str, prov: &Provider, prompt: &str, at: Tick,
         video: Some(source.clone()),
         ..Default::default()
     };
-    let args = run::argv(&ext_prov, &vars).map_err(|e| bad(cmd, e))?;
+    let step = make_step(cmd, &ext_prov, &vars)?;
     // whole frames in, so the cut falls on a frame of the file
     let skip = if fps.fract() == 0.0 { Tick::from_units(i64::from(carry), fps as i64) } else { Tick::from_seconds_f64(carried) };
-    Ok(CarryOn { step: Step { provider: ext_prov, args, out }, made, size: (w, h), skip, source })
+    Ok(CarryOn { step, made, size: (w, h), skip, source })
 }
 
 fn extend(s: &mut Session, p: &Value) -> Result<Value> {
@@ -1259,8 +1317,7 @@ fn restyle(s: &mut Session, p: &Value) -> Result<Value> {
         strength: Some(strength),
         ..Default::default()
     };
-    let args = run::argv(&rprov, &vars).map_err(|e| bad(cmd, e))?;
-    steps.push(Step { provider: rprov, args, out: out.clone() });
+    steps.push(make_step(cmd, &rprov, &vars)?);
     // over the clip it was made from, as long as the stretch it covers
     let place = bool_p(p, "place").unwrap_or(true).then(|| Place {
         track: str_p(p, "track").map(str::to_string),
@@ -1462,8 +1519,7 @@ fn assets(s: &mut Session, p: &Value) -> Result<Value> {
                         image,
                         ..Default::default()
                     };
-                    let args = run::argv(&prov, &vars).map_err(|e| bad(cmd, e))?;
-                    steps.push(Step { provider: prov.clone(), args, out: out.clone() });
+                    steps.push(make_step(cmd, &prov, &vars)?);
                     format!("{made:.1} s · {w}×{h}")
                 }
                 Kind::Sfx | Kind::Music => {
@@ -1471,8 +1527,7 @@ fn assets(s: &mut Session, p: &Value) -> Result<Value> {
                     let secs = run::seconds_for(&prov, named.unwrap_or(if kind == Kind::Sfx { 5.0 } else { 20.0 }), named.is_some(), 5.0)
                         .map_err(|e| of_asset(&a.name, e))?;
                     let vars = Vars { out: out.clone(), prompt: prompt.clone(), seed, seconds: Some(secs), ..Default::default() };
-                    let args = run::argv(&prov, &vars).map_err(|e| bad(cmd, e))?;
-                    steps.push(Step { provider: prov.clone(), args, out: out.clone() });
+                    steps.push(make_step(cmd, &prov, &vars)?);
                     format!("{secs:.1} s")
                 }
                 // (asset kinds are image, video, sfx and music: refused above)
@@ -1571,7 +1626,7 @@ fn fill_gap(s: &mut Session, p: &Value) -> Result<Value> {
     }
     let ends = run::ends_on_picture(&prov);
     if from == "both" && !ends {
-        let why = if prov.optional.contains_key("lastImage") { "its capabilities say lastFrame: false" } else { "it has no `lastImage` option" };
+        let why = if run::takes_last_image(&prov) { "its capabilities say lastFrame: false" } else { "it has no `lastImage` option" };
         return Err(bad(cmd, format!("{} cannot end a clip on a given picture ({why}): use `from: \"before\"`", prov.name)));
     }
     if !run::starts_on_picture(&prov) && (matches!(from, "before" | "both") || (from == "after" && !ends)) {
@@ -1701,9 +1756,8 @@ fn augment(s: &mut Session, p: &Value) -> Result<Value> {
         references: refs,
         ..Default::default()
     };
-    let args = run::argv(&prov, &vars).map_err(|e| bad(cmd, e))?;
     let place = bool_p(p, "place").unwrap_or(true);
-    let mut steps = vec![Step { provider: prov.clone(), args, out: out.clone() }];
+    let mut steps = vec![make_step(cmd, &prov, &vars)?];
     let mut lands = Vec::new();
     let over = |still: Option<Tick>, fit: Option<Tick>| Place { above: track + 1, still, fit, ..Place::at(at) };
     match vprov {

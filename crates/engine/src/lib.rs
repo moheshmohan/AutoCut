@@ -54,6 +54,7 @@ pub mod fingerprint;
 pub mod follow_reid;
 pub mod generate;
 pub mod generate_caps;
+pub mod generate_comfy;
 pub mod generate_run;
 pub mod graphic_templates;
 pub mod graphics;
@@ -67,6 +68,8 @@ pub mod ken_burns;
 pub mod keyboard;
 mod keyframe_ease;
 mod keyframe_move;
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) mod loopback_http;
 pub mod loudness;
 mod marker_export;
 pub mod masks;
