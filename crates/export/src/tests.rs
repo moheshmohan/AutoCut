@@ -1033,3 +1033,49 @@ fn an_m4a_export_carries_the_chapters() {
     // the chapter track hangs off the audio track
     assert!(f.tracks[0].references.iter().any(|(k, _)| k == b"chap"));
 }
+
+/// An AV1 stand-in: an `av01` sample entry and one key packet per frame (the bytes do not matter
+/// to the container).
+struct FakeAv1 {
+    rate: FrameRate,
+}
+
+impl VideoEncoder for FakeAv1 {
+    fn sample_entry(&self) -> filmcraft_isobmff::SampleEntry {
+        filmcraft_isobmff::SampleEntry::av1(filmcraft_isobmff::Av1Config::default(), 320, 180)
+    }
+    fn timescale(&self) -> u32 {
+        self.rate.num as u32
+    }
+    fn encode(&mut self, _: &EncoderFrame) -> Result<Vec<EncodedPacket>> {
+        Ok(vec![EncodedPacket { data: vec![0x12, 0, 0x0A], key: true, duration: self.rate.den as u32, composition_offset: 0 }])
+    }
+    fn flush(&mut self) -> Result<Vec<EncodedPacket>> {
+        Ok(Vec::new())
+    }
+}
+
+/// Takes only the AV1 exports of [`an_av1_mp4_lists_the_av01_brand`] (factories are process-wide).
+fn fake_av1(format: Format, _w: u32, _h: u32, rate: FrameRate, s: &ExportSettings) -> Option<Result<Box<dyn VideoEncoder>>> {
+    (format == Format::Av1 && s.path.contains("fc-av01-brand")).then(|| Ok(Box::new(FakeAv1 { rate }) as Box<dyn VideoEncoder>))
+}
+
+/// An AV1 MP4 export lists `av01` among its compatible brands (AV1-ISOBMFF §2.1); other codecs and
+/// MOV files keep the muxer's own list.
+#[test]
+fn an_av1_mp4_lists_the_av01_brand() {
+    register_encoder(fake_av1);
+    let (p, seq, m) = project();
+    let path = tmp("fc-av01-brand.mp4");
+    export(&p, seq, &ExportSettings { format: Format::Av1, path: path.clone(), ..Default::default() }, &m, &Progress::default()).unwrap();
+    let bytes = std::fs::read(&path).unwrap();
+    let f = filmcraft_isobmff::open(bytes.as_slice()).unwrap();
+    let brands: Vec<[u8; 4]> = f.compatible_brands.iter().map(|b| b.0).collect();
+    assert_eq!(brands, [*b"isom", *b"iso2", *b"avc1", *b"mp41", *b"mp42", *b"av01"]);
+    assert!(matches!(f.tracks[0].codec(), Some(filmcraft_isobmff::CodecConfig::Av1(_))));
+    let av1 = filmcraft_isobmff::SampleEntry::av1(filmcraft_isobmff::Av1Config::default(), 16, 16);
+    let avc = filmcraft_isobmff::SampleEntry::avc(filmcraft_isobmff::AvcConfig::new(vec![vec![0x67, 0x64, 0, 0x1f]], vec![vec![0x68, 0xee]], 4), 16, 16);
+    assert_eq!(crate::job::compatible_brands(filmcraft_isobmff::Brand::Mp4, &av1), [filmcraft_isobmff::FourCc(*b"av01")]);
+    assert!(crate::job::compatible_brands(filmcraft_isobmff::Brand::Mov, &av1).is_empty());
+    assert!(crate::job::compatible_brands(filmcraft_isobmff::Brand::Mp4, &avc).is_empty());
+}

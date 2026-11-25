@@ -33,3 +33,8 @@ The exported sequence's chapter markers become the chapters of an MP4, MOV or M4
 devices, VLC and ffprobe list. Marker names are the titles; an In/Out range counts the chapters
 from its start, and the chapter still running there begins the list. A sequence without chapter
 markers is exported as before. MXF and ADTS `.aac` files carry no chapters.
+
+## AV1 brand, AV163
+
+An AV1 MP4 export lists `av01` among the `ftyp` compatible brands, as AV1-ISOBMFF §2.1 asks of a
+conformant file (`job::compatible_brands`). Other codecs, and MOV files, keep the muxer's list.

@@ -98,7 +98,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use filmcraft_isobmff::spherical::{SPHERICAL_V1_UUID, SphericalBox, SphericalV1, StereoMode};
-use filmcraft_isobmff::{Brand, Mp4Writer, PcmConfig, SampleEntry, TrackConfig, WriteSample, WriterOptions};
+use filmcraft_isobmff::{Brand, CodecConfig, FourCc, Mp4Writer, PcmConfig, SampleEntry, TrackConfig, WriteSample, WriterOptions};
 use filmcraft_project::{ItemId, Project};
 use filmcraft_render::SourceProvider;
 use filmcraft_time::FrameRate;
@@ -323,6 +323,16 @@ pub(crate) fn video_is_vr(asked: Option<bool>, sequence_360: bool, size: (u32, u
         }
         Some(on) => Ok(on),
         None => Ok(sequence_360 && two_to_one),
+    }
+}
+
+/// The compatible brands a video track asks of the `ftyp` beyond the muxer's own: `av01` for AV1
+/// in MP4 (AV1-ISOBMFF §2.1: a conformant file lists it among its compatible brands). MOV files
+/// carry no brands to add.
+pub(crate) fn compatible_brands(brand: Brand, entry: &SampleEntry) -> Vec<FourCc> {
+    match (brand, &entry.codec) {
+        (Brand::Mp4, CodecConfig::Av1(_)) => vec![FourCc(*b"av01")],
+        _ => Vec::new(),
     }
 }
 
@@ -617,14 +627,15 @@ impl Exporter {
             return Ok(());
         }
         let file = Out::create(&self.settings)?;
+        let mut entry = self.venc.sample_entry();
         let mut opts = WriterOptions::new(self.brand);
         opts.metadata = self.settings.metadata.udta();
+        opts.compatible_brands = compatible_brands(self.brand, &entry);
         // the movie starts at the first exported frame
         if let Some(q) = self.project.sequence(self.seq) {
             opts.chapters = crate::chapters_out::chapters(&q.markers, self.pipe.rate.tick_of(self.f0), self.pipe.rate.tick_of(self.f1));
         }
         let mut mux = Mp4Writer::new(file, opts).map_err(|e| ExportError::Io(e.to_string()))?;
-        let mut entry = self.venc.sample_entry();
         let mut uuid_boxes = Vec::new();
         if self.settings.vr == Some(true)
             && let Some(v) = entry.video.as_mut()

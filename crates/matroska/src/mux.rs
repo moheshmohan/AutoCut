@@ -99,6 +99,13 @@ pub(crate) fn el_uint(out: &mut Vec<u8>, id: u32, v: u64) {
     el(out, id, &v.to_be_bytes()[8 - n..]);
 }
 
+/// A signed integer element in the fewest bytes whose two's complement holds `v`.
+pub(crate) fn el_sint(out: &mut Vec<u8>, id: u32, v: i64) {
+    let n = (1..8usize).find(|&n| (-(1i64 << (8 * n - 1))..1i64 << (8 * n - 1)).contains(&v)).unwrap_or(8);
+    let bytes = v.to_be_bytes();
+    el(out, id, bytes.get(8 - n..).unwrap_or(&bytes));
+}
+
 pub(crate) fn el_float(out: &mut Vec<u8>, id: u32, v: f64) {
     el(out, id, &v.to_be_bytes());
 }
@@ -185,6 +192,8 @@ pub struct MkvWriter<W: Write + Seek> {
     pending: Option<Pending>,
     cues: Vec<(u64, u64, u64)>, // (time ticks, track number, cluster position)
     cued_tracks_in_cluster: Vec<bool>,
+    /// Each track's last frame timestamp (ticks): what a dependent frame's ReferenceBlock names.
+    last_ts: Vec<Option<i64>>,
     end_ns: i64,
     has_video: bool,
 }
@@ -305,6 +314,7 @@ impl<W: Write + Seek> MkvWriter<W> {
             pending: None,
             cues: Vec::new(),
             cued_tracks_in_cluster: vec![false; n],
+            last_ts: vec![None; n],
             end_ns: 0,
             has_video,
         })
@@ -360,6 +370,7 @@ impl<W: Write + Seek> MkvWriter<W> {
                 Some(p) => p.frames.push(data.to_vec()),
                 None => self.pending = Some(Pending { track, ts: ts - cts, frames: vec![data.to_vec()] }),
             }
+            self.set_last_ts(track, ts);
             return Ok(());
         }
         self.flush_pending();
@@ -373,7 +384,10 @@ impl<W: Write + Seek> MkvWriter<W> {
             el(&mut g, BLOCK, &block);
             el_uint(&mut g, BLOCK_DURATION, (d as i64 / scale) as u64);
             if !keyframe {
-                el(&mut g, REFERENCE_BLOCK, &[0xFF]);
+                // the track's previous frame, relative to this one (RFC 9559 ReferenceBlock); the
+                // first frame of a track has none to name and says -1, "an earlier frame"
+                let delta = self.last_ts.get(track).copied().flatten().map_or(-1, |prev| prev.saturating_sub(ts));
+                el_sint(&mut g, REFERENCE_BLOCK, delta);
             }
             el(&mut self.cluster, BLOCK_GROUP, &g);
         } else {
@@ -381,7 +395,14 @@ impl<W: Write + Seek> MkvWriter<W> {
             block.extend_from_slice(data);
             el(&mut self.cluster, SIMPLE_BLOCK, &block);
         }
+        self.set_last_ts(track, ts);
         Ok(())
+    }
+
+    fn set_last_ts(&mut self, track: usize, ts: i64) {
+        if let Some(t) = self.last_ts.get_mut(track) {
+            *t = Some(ts);
+        }
     }
 
     fn flush_pending(&mut self) {
@@ -615,6 +636,62 @@ mod tests {
         m.write_frame(0, 0, true, &[0; 4], None).unwrap();
         let bytes = m.finish().unwrap().into_inner();
         assert!(crate::open(&bytes[..]).unwrap().tracks[0].video.is_none());
+    }
+
+    #[test]
+    fn signed_integers_take_the_fewest_bytes() {
+        let body = |v: i64| {
+            let mut out = Vec::new();
+            el_sint(&mut out, REFERENCE_BLOCK, v);
+            assert_eq!(out[..2], [0xFB, 0x80 | (out.len() - 2) as u8]);
+            assert_eq!(crate::ebml::int(&out[2..]), v, "{v}");
+            out[2..].to_vec()
+        };
+        assert_eq!(body(0), [0]);
+        assert_eq!(body(-1), [0xFF]);
+        assert_eq!(body(-33), [0xDF]);
+        assert_eq!(body(127), [0x7F]);
+        assert_eq!(body(128), [0, 0x80]);
+        assert_eq!(body(-128), [0x80]);
+        assert_eq!(body(-129), [0xFF, 0x7F]);
+        assert_eq!(body(i64::MAX).len(), 8);
+        assert_eq!(body(i64::MIN).len(), 8);
+        assert_eq!(body(1 << 40).len(), 6);
+    }
+
+    /// A dependent BlockGroup names the track's previous frame in its ReferenceBlock; a first frame
+    /// with none says -1 as before; the demuxer reads both as dependent.
+    #[test]
+    fn dependent_block_group_writes_actual_reference_block_delta() {
+        let mut v = TrackSpec::new(TrackKind::Video, "V_AV1");
+        v.video_size = Some((16, 16));
+        v.default_duration_ns = Some(33_333_333);
+        let mut m = MkvWriter::new(Cursor::new(Vec::new()), vec![v], MuxOptions::default()).unwrap();
+        m.write_frame(0, 0, true, &[1; 4], Some(33_000_000)).unwrap();
+        m.write_frame(0, 33_000_000, true, &[2; 4], Some(33_000_000)).unwrap();
+        m.write_frame(0, 66_000_000, false, &[3; 4], Some(67_000_000)).unwrap();
+        let bytes = m.finish().unwrap().into_inner();
+        // ReferenceBlock (0xFB, len 1 = 0x81, value -33i8 = 0xDF).
+        assert!(bytes.windows(3).any(|w| w == [0xFB, 0x81, (-33i8) as u8]));
+        let mut d = Demuxer::from_slice(&bytes).unwrap();
+        let mut frames = Vec::new();
+        while let Some(p) = d.next_packet().unwrap() {
+            frames.push((p.pts_ns, p.keyframe, p.duration));
+        }
+        assert_eq!(frames, vec![(0, true, 33), (33_000_000, true, 33), (66_000_000, false, 67)]);
+        // a track's first frame says -1; a B-frame after a later frame names it forward
+        let mut v = TrackSpec::new(TrackKind::Video, "V_AV1");
+        v.video_size = Some((16, 16));
+        let mut m = MkvWriter::new(Cursor::new(Vec::new()), vec![v], MuxOptions::default()).unwrap();
+        m.write_frame(0, 0, false, &[1; 4], Some(40_000_000)).unwrap();
+        m.write_frame(0, 120_000_000, false, &[2; 4], Some(40_000_000)).unwrap();
+        m.write_frame(0, 40_000_000, false, &[3; 4], Some(40_000_000)).unwrap();
+        let bytes = m.finish().unwrap().into_inner();
+        assert!(bytes.windows(3).any(|w| w == [0xFB, 0x81, 0xFF]), "the first frame: -1");
+        assert!(bytes.windows(3).any(|w| w == [0xFB, 0x81, (-120i8) as u8]), "the second names the first, 120 ms before it");
+        assert!(bytes.windows(3).any(|w| w == [0xFB, 0x81, 80]), "the third names the second, 80 ms after it");
+        let d = Demuxer::from_slice(&bytes).unwrap();
+        assert!(d.map(|p| p.unwrap()).all(|p| !p.keyframe));
     }
 
     #[test]

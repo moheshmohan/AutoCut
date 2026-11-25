@@ -329,3 +329,34 @@ fn chapters_are_listed_by_ffprobe() {
         decode_clean(&path);
     }
 }
+
+/// Extra compatible brands are what ffprobe lists for the file, after the muxer's own, and the
+/// remuxed packets are unchanged.
+#[test]
+fn compatible_brands_are_listed_by_ffprobe() {
+    let (Some(src), Some(_)) = (fixture("h264_bframes.mp4"), ffprobe()) else { return };
+    let data = std::fs::read(&src).unwrap();
+    let f = open(data.as_slice()).unwrap();
+    let av: Vec<usize> = (0..f.tracks.len()).filter(|&i| matches!(f.tracks[i].kind, TrackKind::Video | TrackKind::Audio)).collect();
+    let mut opts = WriterOptions::new(Brand::Mp4);
+    opts.movie_timescale = f.timescale;
+    opts.compatible_brands = vec![FourCc(*b"dby1"), FourCc(*b"iso2"), FourCc(*b"cmfc")];
+    let mut w = Mp4Writer::new(Cursor::new(Vec::new()), opts).unwrap();
+    let mut map = vec![usize::MAX; f.tracks.len()];
+    for &i in &av {
+        map[i] = w.add_track(track_config(&f, &f.tracks[i], true)).unwrap();
+    }
+    for (t, i) in interleave(&f, &av) {
+        let s = f.tracks[t].samples[i];
+        let bytes = f.read_sample(data.as_slice(), t, i).unwrap();
+        w.write_sample(map[t], WriteSample { data: &bytes, duration: s.duration, composition_offset: (s.pts - s.dts) as i32, is_sync: s.is_sync }).unwrap();
+    }
+    let out = w.finish_faststart().unwrap().into_inner();
+    let path = out_dir().join("brands.mp4");
+    std::fs::write(&path, &out).unwrap();
+    let Some(v) = probe_json(&path, &["-show_format"]) else { return };
+    assert_eq!(v["format"]["tags"]["major_brand"], "isom", "{v}");
+    assert_eq!(v["format"]["tags"]["compatible_brands"], "isomiso2avc1mp41mp42dby1cmfc", "{v}");
+    assert_same_packets(&src, &path);
+    decode_clean(&path);
+}

@@ -431,3 +431,35 @@ fn colour_element_is_read_by_ffprobe() {
     assert_eq!(st["color_transfer"], "smpte2084", "{st}");
     std::fs::remove_file(&outp).unwrap();
 }
+
+/// Frames written as BlockGroups (explicit durations) keep their keyframe flags for ffprobe and our
+/// demuxer: dependent ones carry a ReferenceBlock naming the track's previous frame (B-frames
+/// included, whose previous frame comes later), keyframes none.
+#[test]
+fn block_groups_keep_keyframe_flags() {
+    let Some((ffmpeg, ffprobe)) = tools() else { return };
+    let Some(path) = fixture(&ffmpeg, "h264_aac.mkv") else { return };
+    let bytes = std::fs::read(&path).unwrap();
+    let d = Demuxer::from_slice(&bytes).unwrap();
+    let file = d.file().clone();
+    let v = file.track_of_kind(TrackKind::Video).unwrap();
+    let packets: Vec<Packet> = d.collect::<Result<_>>().unwrap();
+    let video: Vec<&Packet> = packets.iter().filter(|p| p.track == v).collect();
+    assert!(video.iter().any(|p| !p.keyframe) && video.iter().any(|p| p.keyframe));
+    let t = &file.tracks[v];
+    let mut s = TrackSpec::new(t.kind, t.codec_id.clone());
+    s.codec_private = t.codec_private.clone();
+    s.video_size = t.video.as_ref().map(|v| (v.pixel_width, v.pixel_height));
+    let mut w = MkvWriter::new(std::io::Cursor::new(Vec::new()), vec![s], MuxOptions::default()).unwrap();
+    for p in &video {
+        // no DefaultDuration: every frame gets a BlockGroup with its BlockDuration
+        w.write_frame(0, p.pts_ns, p.keyframe, &p.data, Some(p.duration_ns.max(1))).unwrap();
+    }
+    let out = w.finish().unwrap().into_inner();
+    let outp = fixture_dir().join("block_groups.mkv");
+    std::fs::write(&outp, &out).unwrap();
+    // every packet as ffprobe reads it (keyframe flags included) is what our demuxer reads
+    let (_, got) = compare(&ffprobe, &outp);
+    assert_eq!(got.iter().map(|p| (p.pts_ns, p.keyframe)).collect::<Vec<_>>(), video.iter().map(|p| (p.pts_ns, p.keyframe)).collect::<Vec<_>>());
+    std::fs::remove_file(&outp).unwrap();
+}

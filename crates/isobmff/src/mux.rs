@@ -1,6 +1,6 @@
 //! Muxers: progressive MP4/MOV ([`Mp4Writer`], optional faststart) and fragmented MP4 ([`FragmentedWriter`]).
 
-use crate::bytes::BoxBuf;
+use crate::bytes::{BoxBuf, FourCc};
 use crate::chapters::{Chapter, normalize_chapters, text_sample, text_sample_entry_payload, write_chpl};
 use crate::codec::{CodecConfig, SampleEntry, TimecodeConfig};
 use crate::demux::Edit;
@@ -28,11 +28,19 @@ pub struct WriterOptions {
     /// chapter track (`tref/chap` → disabled text track) and as a Nero `udta/chpl` list;
     /// [`FragmentedWriter`] writes only `chpl`. See [`crate::chapters`] for the formats and limits.
     pub chapters: Vec<Chapter>,
+    /// More compatible brands for the `ftyp` box, after the brand's own (for example `av01`, which
+    /// AV1-ISOBMFF §2.1 asks of a file with AV1 tracks). A brand already listed is written once;
+    /// at most [`MAX_EXTRA_BRANDS`] distinct ones are taken, more is an error.
+    pub compatible_brands: Vec<FourCc>,
 }
+
+/// Most extra compatible brands [`WriterOptions::compatible_brands`] takes: far more than a file
+/// needs, and far fewer than the 64 KiB `ftyp` the demuxer reads.
+pub const MAX_EXTRA_BRANDS: usize = 256;
 
 impl WriterOptions {
     pub fn new(brand: Brand) -> Self {
-        WriterOptions { brand, movie_timescale: 1000, metadata: Vec::new(), chapters: Vec::new() }
+        WriterOptions { brand, movie_timescale: 1000, metadata: Vec::new(), chapters: Vec::new(), compatible_brands: Vec::new() }
     }
 }
 
@@ -179,23 +187,28 @@ fn rescale(v: u64, from: u32, to: u32) -> u64 {
 
 const MATRIX: [i32; 9] = [0x10000, 0, 0, 0, 0x10000, 0, 0, 0, 0x4000_0000];
 
-fn write_ftyp(b: &mut BoxBuf, brand: Brand) {
-    let m = b.start(b"ftyp");
-    match brand {
-        Brand::Mp4 => {
-            b.bytes(b"isom");
-            b.u32(0x200);
-            for c in [b"isom", b"iso2", b"avc1", b"mp41", b"mp42"] {
-                b.bytes(c);
+fn write_ftyp(b: &mut BoxBuf, brand: Brand, extra: &[FourCc]) -> Result<()> {
+    let (major, base): (&[u8; 4], &[[u8; 4]]) = match brand {
+        Brand::Mp4 => (b"isom", &[*b"isom", *b"iso2", *b"avc1", *b"mp41", *b"mp42"]),
+        Brand::Mov => (b"qt  ", &[*b"qt  "]),
+    };
+    let mut brands: Vec<[u8; 4]> = base.to_vec();
+    for c in extra {
+        if !brands.contains(&c.0) {
+            if brands.len() >= base.len() + MAX_EXTRA_BRANDS {
+                return Err(Error::Mux(format!("more than {MAX_EXTRA_BRANDS} extra compatible brands")));
             }
-        }
-        Brand::Mov => {
-            b.bytes(b"qt  ");
-            b.u32(0x200);
-            b.bytes(b"qt  ");
+            brands.push(c.0);
         }
     }
+    let m = b.start(b"ftyp");
+    b.bytes(major);
+    b.u32(0x200);
+    for c in &brands {
+        b.bytes(c);
+    }
     b.end(m);
+    Ok(())
 }
 
 fn movie_duration(tracks: &[WTrack], movie_ts: u32) -> u64 {
@@ -606,7 +619,7 @@ impl<W: Write + Seek> Mp4Writer<W> {
     pub fn new(mut w: W, opts: WriterOptions) -> Result<Self> {
         let start = w.stream_position()?;
         let mut b = BoxBuf::new();
-        write_ftyp(&mut b, opts.brand);
+        write_ftyp(&mut b, opts.brand, &opts.compatible_brands)?;
         let pad_pos = start + b.len() as u64;
         b.leaf(if opts.brand == Brand::Mov { b"wide" } else { b"free" }, &[]);
         let mdat_pos = start + b.len() as u64;
@@ -923,7 +936,7 @@ impl<W: Write> FragmentedWriter<W> {
         let qt = self.opts.brand == Brand::Mov;
         let ts = self.opts.movie_timescale.max(1);
         let mut b = BoxBuf::new();
-        write_ftyp(&mut b, self.opts.brand);
+        write_ftyp(&mut b, self.opts.brand, &self.opts.compatible_brands)?;
         let m = b.start(b"moov");
         write_mvhd(&mut b, ts, 0, self.tracks.len() as u32 + 1);
         for t in &self.tracks {
@@ -1417,5 +1430,55 @@ mod tests {
         bad.video.as_mut().unwrap().log_transfer_function = Some(String::new());
         let mut w = Mp4Writer::new(Cursor::new(Vec::new()), WriterOptions::new(Brand::Mov)).unwrap();
         assert!(matches!(w.add_track(TrackConfig::new(bad, 25)), Err(Error::Mux(_))));
+    }
+
+    /// The compatible brands of a file's `ftyp`.
+    fn brands_of(out: &[u8]) -> Vec<[u8; 4]> {
+        let size = u32::from_be_bytes(out[0..4].try_into().unwrap()) as usize;
+        assert_eq!(&out[4..8], b"ftyp");
+        let (brands, rest) = out[16..size].as_chunks::<4>();
+        assert!(rest.is_empty());
+        brands.to_vec()
+    }
+
+    #[test]
+    fn ftyp_appends_custom_compatible_brands_without_duplicates() {
+        let mut opts = WriterOptions::new(Brand::Mp4);
+        opts.compatible_brands = vec![crate::FourCc(*b"av01"), crate::FourCc(*b"isom"), crate::FourCc(*b"av01")];
+        let mut w = Mp4Writer::new(Cursor::new(Vec::new()), opts.clone()).unwrap();
+        let v = w.add_track(TrackConfig::new(avc_entry(), 1000)).unwrap();
+        w.write_sample(v, WriteSample { data: &[1; 4], duration: 40, composition_offset: 0, is_sync: true }).unwrap();
+        let out = w.finish().unwrap().into_inner();
+        assert_eq!(brands_of(&out), [*b"isom", *b"iso2", *b"avc1", *b"mp41", *b"mp42", *b"av01"]);
+        // the reader sees them, and the media still reads
+        let f = crate::open(out.as_slice()).unwrap();
+        assert_eq!(f.compatible_brands.last(), Some(&crate::FourCc(*b"av01")));
+        assert_eq!(f.read_sample(out.as_slice(), 0, 0).unwrap(), [1; 4]);
+        // the fragmented writer's init segment too
+        let mut w = FragmentedWriter::new(Vec::new(), opts);
+        let v = w.add_track(TrackConfig::new(avc_entry(), 1000)).unwrap();
+        w.write_sample(v, WriteSample { data: &[1; 4], duration: 40, composition_offset: 0, is_sync: true }).unwrap();
+        assert_eq!(brands_of(&w.finish().unwrap()).last(), Some(b"av01"));
+        // without extra brands the box is as before
+        let w = Mp4Writer::new(Cursor::new(Vec::new()), WriterOptions::new(Brand::Mov)).unwrap();
+        assert_eq!(brands_of(&w.finish().unwrap().into_inner()), [*b"qt  "]);
+    }
+
+    /// Too many distinct extra brands are refused before anything is written; repeats do not count.
+    #[test]
+    fn too_many_compatible_brands_are_refused() {
+        let many = |n: u32| (0..n).map(|i| crate::FourCc(i.to_be_bytes())).collect::<Vec<_>>();
+        let mut opts = WriterOptions::new(Brand::Mp4);
+        opts.compatible_brands = many(MAX_EXTRA_BRANDS as u32);
+        assert!(Mp4Writer::new(Cursor::new(Vec::new()), opts.clone()).is_ok());
+        opts.compatible_brands.extend(many(MAX_EXTRA_BRANDS as u32));
+        assert!(Mp4Writer::new(Cursor::new(Vec::new()), opts.clone()).is_ok(), "repeats are written once");
+        opts.compatible_brands.push(crate::FourCc(*b"zzzz"));
+        let mut sink = Cursor::new(Vec::new());
+        assert!(matches!(Mp4Writer::new(&mut sink, opts.clone()), Err(Error::Mux(_))));
+        assert!(sink.get_ref().is_empty());
+        let mut w = FragmentedWriter::new(Vec::new(), opts);
+        w.add_track(TrackConfig::new(avc_entry(), 1000)).unwrap();
+        assert!(matches!(w.finish(), Err(Error::Mux(_))));
     }
 }

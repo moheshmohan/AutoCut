@@ -104,7 +104,9 @@ let bytes = w.finish_faststart()?.into_inner(); // or finish() for moov-at-end
   `moov` before it. If `mdat` goes past 4 GiB the header becomes a large-size header, and chunk offsets
   switch to `co64` when needed.
 - Brands: `Brand::Mp4` writes `isom` with `isom iso2 avc1 mp41 mp42`. `Brand::Mov` writes `qt  `, uses
-  QuickTime `hdlr`/Pascal names, and sets `wide` as the placeholder box.
+  QuickTime `hdlr`/Pascal names, and sets `wide` as the placeholder box. `WriterOptions::compatible_brands`
+  adds more after those (each brand once, at most `MAX_EXTRA_BRANDS` = 256 distinct ones, more is an
+  error), for example `av01`, which `filmcraft-export` adds for an AV1 MP4 (AV1-ISOBMFF §2.1).
 - Tables written: `stts`, `ctts` (v1 when an offset is negative), `stss` (omitted when every sample is
   sync), `stsc`, `stsz` (constant or table), `stco`/`co64`. Consecutive samples of one track share a chunk.
 - Sample entries come from `SampleEntry` (`avc`, `hevc`, `prores`, `jpeg`, `aac`, `pcm`, or any demuxed

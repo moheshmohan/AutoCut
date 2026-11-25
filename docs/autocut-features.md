@@ -914,3 +914,6 @@ items: the tests use stand-ins.
   counts them from its start, the chapter running there first; at most 255 chapters with titles of
   at most 255 bytes. The MP4 reader reads both forms (`Mp4File::read_chapters`); imported chapters
   do not become markers yet.
+- **AV163**: an AV1 MP4 export lists `av01` among its compatible brands (AV1-ISOBMFF §2.1). The MP4
+  muxer takes extra compatible brands; the Matroska muxer's dependent frames name their real
+  reference frame.

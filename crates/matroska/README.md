@@ -96,7 +96,8 @@ while let Some(p) = d.next_packet()? {        // file order, all tracks
 `MkvWriter::new(w: Write + Seek, Vec<TrackSpec>, MuxOptions)` → `write_frame(track, pts_ns,
 keyframe, data, duration_ns)` → `finish()`. Writes the EBML header, Segment, SeekHead, Info (with
 Duration), Tracks, Clusters of SimpleBlocks (new cluster at a video keyframe after
-`cluster_duration_ns`), BlockGroups for explicit durations, optional audio lacing (Xiph, EBML,
+`cluster_duration_ns`), BlockGroups for explicit durations (a dependent frame's ReferenceBlock names
+its track's previous frame, relative to it; a track's first frame says -1), optional audio lacing (Xiph, EBML,
 fixed-size), and Cues (video keyframes, or the first frame of each track per cluster).
 `TrackSpec::colour` writes a video track's `Colour` element (matrix, range, transfer, primaries,
 chroma layout, light levels and mastering metadata: the fields that are set), which is where a WebM
