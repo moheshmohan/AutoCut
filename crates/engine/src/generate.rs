@@ -116,6 +116,8 @@ struct Land {
     place: Option<Place>,
     /// The file name of the first of the variations this is one of.
     variation_of: Option<String>,
+    /// The first frame of an image sequence at this rate (a rendered scene), not a single file.
+    sequence_fps: Option<f64>,
 }
 
 /// A generation in flight.
@@ -201,13 +203,20 @@ pub fn commands() -> Vec<CommandSpec> {
         ),
         spec("generate.history", "Generated Media", "{}", history, false),
         spec("generate.checkTool", "Check Generation Tool", r#"{"provider":id}"#, check_tool, false),
+        spec(
+            "generate.render3d",
+            "Render a 3D Scene",
+            r#"{"scene":abs .blend path? (default the tool's own; neither: a plain stage for `text`),"text":str? (the plain stage's title; with a scene, the text object named Text),"texts":{object name:text}? (at most 32),"objects":{name:{"location":[x,y,z]?,"rotation":[x,y,z] degrees?,"scale":n|[x,y,z]?,"hide":bool?}}? (at most 64),"camera":abs path to a camera track .json? (keyed onto the scene's camera: a match-move),"frameStart":0..9999=1,"frameEnd":n?|"seconds":0.1..600? (default 3 s),"fps":1..240? (default the tool's, else the sequence's),"width":px?,"height":px? (default the sequence's size),"transparent":bool=true,"format":"png"|"exr"? (default the tool's, else png),"cryptomatte":bool=false (EXR only: object, material and asset passes beside the frames),"seed":u64?,"provider":id?,"dir":str?,"place":bool=true,"track":"V2"?,"atTime":ticks?|"atSeconds":f64?,"wait":bool=false}"#,
+            render3d,
+            true,
+        ),
     ]
 }
 
 fn provider_json(p: &Provider) -> Value {
     json!({
         "id": p.id, "kind": p.kind.name(), "name": p.name, "installed": run::installed(p),
-        "runs": if p.comfyui.is_some() { "comfyui" } else { "program" },
+        "runs": if p.comfyui.is_some() { "comfyui" } else if p.blender.is_some() { "blender" } else { "program" },
         "license": p.license, "attribution": p.attribution, "source": p.source,
         "estimateSeconds": p.estimate_seconds, "maxSeconds": p.max_seconds, "maxSide": p.max_side,
         "maxReferences": p.max_references, "references": run::takes_references(p),
@@ -221,6 +230,10 @@ fn provider_json(p: &Provider) -> Value {
         // does before the workflow is read: generate.checkTool reads it)
         "comfyui": p.comfyui.as_ref().map(|c| json!({
             "server": c.server_url(), "workflow": c.workflow, "models": c.models, "problem": c.licence_problem(),
+        })),
+        // a 3D scene renderer: its program, default scene and how it renders
+        "blender": p.blender.as_ref().map(|b| json!({
+            "program": b.program, "scene": b.scene, "script": b.script, "engine": b.engine, "format": b.format.as_deref().unwrap_or("png"),
         })),
     })
 }
@@ -258,9 +271,212 @@ fn check_tool(s: &mut Session, p: &Value) -> Result<Value> {
             }
         }
     }
+    if let Some(b) = &prov.blender {
+        out["runs"] = json!("blender");
+        for (what, file) in [("scene", &b.scene), ("script", &b.script)] {
+            if let Some(f) = file.as_ref().filter(|f| !std::path::Path::new(f).is_file()) {
+                problems.push(format!("its {what} {f} is not on this computer"));
+            }
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        if installed {
+            match crate::generate_scene::version(b) {
+                Ok(v) => out["version"] = json!(v),
+                Err(e) => problems.push(e),
+            }
+        }
+    }
     out["ok"] = json!(problems.is_empty());
     out["problems"] = json!(problems);
     Ok(out)
+}
+
+/// Where a render's frames go: `<dir>/Rendered Scene <n>`, the first `n` not taken.
+fn frames_folder(dir: &str) -> Result<String> {
+    for k in 1..=99_999u32 {
+        let f = std::path::Path::new(dir).join(format!("Rendered Scene {k}"));
+        if cfg!(target_arch = "wasm32") || std::fs::symlink_metadata(&f).is_err() {
+            return Ok(f.to_string_lossy().into_owned());
+        }
+    }
+    Err(EngineError::Other(format!("{dir}: no free folder name for \"Rendered Scene <n>\"")))
+}
+
+/// The frame rate of a render: asked (one the tool's capabilities list), else the tool's own,
+/// else the sequence's (moved to the nearest listed rate when the tool lists others).
+fn render_rate(s: &Session, cmd: &str, p: &Value, prov: &Provider) -> Result<f64> {
+    let rates = prov.capabilities.as_ref().and_then(|c| c.fps.clone());
+    let listed = |x: f64| rates.as_ref().is_none_or(|r| r.iter().any(|f| (f - x).abs() < 1.0e-3));
+    let say = |r: &[f64]| r.iter().map(|f| run::number_text(*f)).collect::<Vec<_>>().join(", ");
+    match p.get("fps") {
+        None | Some(Value::Null) => {
+            let own = prov.fps.filter(|f| f.is_finite() && (1.0..=240.0).contains(f)).unwrap_or_else(|| s.sequence_rate().sane().as_f64());
+            Ok(match &rates {
+                Some(r) if !listed(own) => r.iter().copied().min_by(|a, b| (a - own).abs().total_cmp(&(b - own).abs())).unwrap_or(own),
+                _ => own,
+            })
+        }
+        Some(v) => match v.as_f64() {
+            Some(x) if x.is_finite() && (1.0..=240.0).contains(&x) => match &rates {
+                Some(r) if !listed(x) => Err(bad(cmd, format!("{} renders at {} fps, not {}", prov.name, say(r), run::number_text(x)))),
+                _ => Ok(x),
+            },
+            _ => Err(bad(cmd, "`fps` must be 1 to 240")),
+        },
+    }
+}
+
+/// How many frames a render makes: `frameEnd` or `seconds` (asked: refused when the tool's
+/// capabilities do not allow it), else three seconds fitted to what it allows.
+fn render_count(cmd: &str, p: &Value, prov: &Provider, first: u32, fps: f64) -> Result<u32> {
+    let end = checked_u32_p(p, "frameEnd", cmd)?;
+    let secs = seconds_p(cmd, p, 600.0)?;
+    let count = match (end, secs) {
+        (Some(_), Some(_)) => return Err(bad(cmd, "give `frameEnd` or `seconds`, not both")),
+        (Some(e), None) if e < first => return Err(bad(cmd, "`frameEnd` comes before `frameStart`")),
+        (Some(e), None) => e.saturating_sub(first).saturating_add(1),
+        (None, Some(x)) => (x * fps).round().clamp(1.0, 100_000.0) as u32,
+        (None, None) => (3.0 * fps).round().clamp(1.0, 100_000.0) as u32,
+    };
+    let Some(c) = &prov.capabilities else { return Ok(count) };
+    let asked = end.is_some() || secs.is_some();
+    if asked {
+        crate::generate_caps::check_length(&prov.name, c, f64::from(count) / fps, fps).map_err(|e| bad(cmd, e))?;
+        if let Some(f) = c.frames.filter(|f| !f.allows(count)) {
+            return Err(bad(cmd, format!("{} cannot render {count} frames: it renders {} (nearest: {})", prov.name, f.describe(), f.fit(count))));
+        }
+        return Ok(count);
+    }
+    let mut n = count;
+    if let Some((lo, hi)) = crate::generate_caps::length_range(c, fps) {
+        let lo_n = (lo * fps).ceil().clamp(1.0, 100_000.0) as u32;
+        let hi_n = (hi * fps).floor().clamp(1.0, 100_000.0) as u32;
+        n = n.max(lo_n.min(hi_n)).min(hi_n);
+    }
+    Ok(c.frames.map_or(n, |f| f.fit(n)))
+}
+
+/// `generate.render3d`: a 3D scene rendered by the user's Blender without its window, its
+/// frames imported as a clip (a picture when it is one frame) and placed above what is at the
+/// time when they are transparent.
+fn render3d(s: &mut Session, p: &Value) -> Result<Value> {
+    use crate::generate_scene as scene3d;
+    let cmd = "generate.render3d";
+    poll(s);
+    let prov = provider_for(cmd, p, Kind::Scene, "provider")?;
+    let cfg = prov.blender.clone().ok_or_else(|| bad(cmd, format!("{} has no `blender` block", prov.name)))?;
+    let scene = match p.get("scene") {
+        None | Some(Value::Null) => cfg.scene.clone(),
+        Some(Value::String(t)) => Some(t.clone()),
+        Some(_) => return Err(bad(cmd, "`scene` must be the absolute path of a .blend file")),
+    };
+    let scene = scene.map(|sc| scene3d::scene_file(&sc)).transpose().map_err(|e| bad(cmd, e))?;
+    let text = text_p(cmd, p, "text")?;
+    let texts = scene3d::texts_p(p).map_err(|e| bad(cmd, e))?;
+    let objects = scene3d::objects_p(p).map_err(|e| bad(cmd, e))?;
+    let camera = match p.get("camera") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(t)) => {
+            scene3d::check_track(t).map_err(|e| bad(cmd, e))?;
+            Some(t.clone())
+        }
+        Some(_) => return Err(bad(cmd, "`camera` must be the absolute path of a camera track (.json)")),
+    };
+    let fps = render_rate(s, cmd, p, &prov)?;
+    let first = match checked_u32_p(p, "frameStart", cmd)? {
+        Some(n) if n <= scene3d::MAX_FRAME => n,
+        Some(_) => return Err(bad(cmd, format!("`frameStart` is 0 to {}", scene3d::MAX_FRAME))),
+        None => 1,
+    };
+    let count = render_count(cmd, p, &prov, first, fps)?;
+    let last = first.saturating_add(count.saturating_sub(1));
+    if last > scene3d::MAX_FRAME {
+        return Err(bad(cmd, format!("a render ends by frame {} (frames are named with four digits): this one would end at {last}", scene3d::MAX_FRAME)));
+    }
+    // the size asked, else the sequence's, as far as the tool allows
+    let asked = (checked_u32_p(p, "width", cmd)?, checked_u32_p(p, "height", cmd)?);
+    let want = if asked.0.is_some() || asked.1.is_some() {
+        asked
+    } else {
+        s.active_sequence().map_or((None, None), |q| (Some(q.settings.width), Some(q.settings.height)))
+    };
+    let computed = run::size(&prov, want, aspect(s));
+    let size = match &prov.capabilities {
+        Some(c) => {
+            let grid = (prov.multiple_of.unwrap_or(2).clamp(1, 256), prov.max_side.unwrap_or(4096).clamp(64, 16_384));
+            crate::generate_caps::fit_size(&prov.name, c, computed, asked, grid).map_err(|e| bad(cmd, e))?
+        }
+        None => computed,
+    };
+    let asked_clear = bool_p(p, "transparent");
+    run::ask(&prov, &Ask { transparent: asked_clear == Some(true), ..Default::default() }).map_err(|e| bad(cmd, e))?;
+    let transparent = asked_clear.unwrap_or(prov.capabilities.as_ref().and_then(|c| c.transparent) != Some(false));
+    let format = match str_p(p, "format").or(cfg.format.as_deref()) {
+        None => "png",
+        Some(f @ ("png" | "exr")) => f,
+        Some(f) => return Err(bad(cmd, format!("`format` is png or exr, not {}", short(f)))),
+    };
+    let cryptomatte = bool_p(p, "cryptomatte").unwrap_or(false);
+    if cryptomatte && format != "exr" {
+        return Err(bad(cmd, "Cryptomatte passes are written as EXR: give `format: \"exr\"`"));
+    }
+    let script = match &cfg.script {
+        Some(own) if !cfg!(target_arch = "wasm32") && !std::path::Path::new(own).is_file() => {
+            return Err(bad(cmd, format!("{}: its script {own} is not on this computer", prov.name)));
+        }
+        Some(own) => own.clone(),
+        None => scene3d::ensure_script().map_err(|e| bad(cmd, e))?,
+    };
+    let dir = crate::voiceover::generated_dir(s, p, FOLDER)?;
+    let folder = frames_folder(&dir)?;
+    let frame = |n: u32| std::path::Path::new(&folder).join(format!("frame_{n:04}.{format}")).to_string_lossy().into_owned();
+    let seed = seed_p(s, p);
+    let request = scene3d::Request {
+        output: std::path::Path::new(&folder).join("frame_").to_string_lossy().into_owned(),
+        format,
+        size,
+        fps,
+        frames: (first, last),
+        transparent,
+        cryptomatte,
+        seed,
+        text: text.clone(),
+        texts,
+        objects,
+        camera,
+        scene: scene.is_some(),
+    };
+    let json_arg = scene3d::request_json(&cfg, &request).map_err(|e| bad(cmd, e))?;
+    let args = scene3d::argv(&cfg, scene.as_deref(), &script, &json_arg);
+    // the last frame is there when the render is: it is what the run waits for
+    let step = Step { provider: prov.clone(), args, out: frame(last), comfy: None };
+    let placing = bool_p(p, "place").unwrap_or(true) && s.state.active_sequence.is_some();
+    let at = time_p(s, p, "at").unwrap_or(s.playhead()).max(Tick::ZERO);
+    // a transparent render goes over what is there
+    let above = if transparent { clip_under(s, at).map_or(0, |(i, _)| i.saturating_add(1)) } else { 0 };
+    let still = (count == 1).then(|| Tick::from_seconds_f64(5.0));
+    let place = placing.then(|| Place { track: str_p(p, "track").map(str::to_string), above, still, ..Place::at(at) });
+    let description = text.clone().or_else(|| scene.as_deref().map(file_name)).unwrap_or_else(|| "a 3D scene".to_string());
+    let note = format!(
+        "{count} frame{} · {}×{} · {} fps · {format}{}",
+        if count == 1 { "" } else { "s" },
+        size.0,
+        size.1,
+        run::number_text(fps),
+        if transparent { " with alpha" } else { "" }
+    );
+    let mut land = land_of(&prov, &frame(first), &description, seed, &note, true, place);
+    land.sequence_fps = (count > 1).then_some(fps);
+    let mut v = start(s, cmd, format!("Rendering a 3D scene: {}", short(&description)), vec![step], vec![land], bool_p(p, "wait").unwrap_or(false))?;
+    v["provider"] = json!(prov.id);
+    v["frames"] = json!(count);
+    v["frameStart"] = json!(first);
+    v["fps"] = json!(fps);
+    v["width"] = json!(size.0);
+    v["height"] = json!(size.1);
+    v["folder"] = json!(folder);
+    v["seed"] = json!(seed);
+    Ok(v)
 }
 
 /// The generation tools as JSON (also for the Generate panel): `providers`, `manifest`, `error`
@@ -480,6 +696,7 @@ fn land_of(p: &Provider, path: &str, description: &str, seed: u64, extra: &str, 
         import,
         place,
         variation_of: None,
+        sequence_fps: None,
     }
 }
 
@@ -683,7 +900,10 @@ fn land_one(s: &mut Session, l: &Land) -> Result<Value> {
     if !l.import {
         return Ok(out);
     }
-    let imported = s.execute("file.import", json!({"paths": [l.path]}))?;
+    let imported = match l.sequence_fps {
+        Some(fps) => s.execute("file.import", json!({"paths": [l.path], "imageSequence": true, "fps": fps}))?,
+        None => s.execute("file.import", json!({"paths": [l.path]}))?,
+    };
     let item = imported
         .get("items")
         .and_then(Value::as_array)
@@ -1531,7 +1751,7 @@ fn assets(s: &mut Session, p: &Value) -> Result<Value> {
                     format!("{secs:.1} s")
                 }
                 // (asset kinds are image, video, sfx and music: refused above)
-                Kind::Composition => return Err(bad(cmd, format!("{}: a composition is rendered with motion.render", a.name))),
+                Kind::Composition | Kind::Scene => return Err(bad(cmd, format!("{}: compositions and scenes are rendered by their own commands", a.name))),
             };
             row["note"] = json!(note);
             lands.push(land_of(&prov, &out, &prompt, seed, &format!("{note} · asset {}", a.name), import, None));

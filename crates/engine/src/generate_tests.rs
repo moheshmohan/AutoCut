@@ -866,3 +866,153 @@ fn capabilities_refuse_what_a_tool_cannot_do_before_it_runs() {
     assert!(b.args_of(made(&v, 0)["path"].as_str().unwrap()).contains(&"2".to_string()));
     let _ = std::fs::remove_dir_all(&dir0);
 }
+
+/// A stand-in for Blender: it answers `--version`, checks it is run headless with the scene's
+/// scripts off and AutoCut's script given, notes its arguments beside the frames' folder, and
+/// copies `fixture` to every frame the request asks for, saying how far it is.
+fn stand_in_blender(at: &Path, fixture: &Path) -> String {
+    use std::os::unix::fs::PermissionsExt as _;
+    let script = format!(
+        r#"#!/bin/sh
+for a; do last=$a; done
+case " $* " in *" --version "*) echo "Blender 4.2.0 (stand-in)"; exit 0;; esac
+[ "$1" = "--background" ] || {{ echo "not headless" >&2; exit 9; }}
+case " $* " in *" --disable-autoexec "*) ;; *) echo "a scene's scripts would run" >&2; exit 9;; esac
+case " $* " in *" --python "*) ;; *) echo "no script" >&2; exit 9;; esac
+out=$(printf '%s' "$last" | sed -n 's/.*"output":"\([^"]*\)".*/\1/p')
+start=$(printf '%s' "$last" | sed -n 's/.*"frameStart":\([0-9]*\).*/\1/p')
+end=$(printf '%s' "$last" | sed -n 's/.*"frameEnd":\([0-9]*\).*/\1/p')
+ext=$(printf '%s' "$last" | sed -n 's/.*"format":"\([a-z]*\)".*/\1/p')
+[ -n "$out" ] && [ -n "$start" ] && [ -n "$end" ] || {{ echo "autocut-error: no request" >&2; exit 3; }}
+folder=$(dirname "$out")
+printf '%s\n' "$@" > "$folder.args"
+mkdir -p "$folder"
+i=$start
+while [ "$i" -le "$end" ]; do
+  cp "{}" "$(printf '%s%04d.%s' "$out" "$i" "$ext")"
+  echo "progress $((i - start + 1))/$((end - start + 1))"
+  i=$((i + 1))
+done
+"#,
+        fixture.display()
+    );
+    let path = at.join("blender");
+    std::fs::write(&path, script).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    path.to_string_lossy().into_owned()
+}
+
+#[test]
+fn a_3d_scene_is_rendered_headless_and_its_frames_come_in_as_a_clip() {
+    let dir0 = std::env::temp_dir().join(format!("fc-generate-fixture-b-{}", std::process::id()));
+    std::fs::create_dir_all(&dir0).unwrap();
+    let still = dir0.join("frame.png");
+    std::fs::write(&still, png(64, 36, 150)).unwrap();
+    let program = stand_in_blender(&dir0, &still);
+    let broken = dir0.join("broken");
+    std::fs::write(&broken, "#!/bin/sh\necho 'autocut-error: the scene has no text object named Title' >&2\nexit 3\n").unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&broken, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let blender = format!(
+        r#"{{"id":"blender","kind":"scene","name":"Stand-in Blender","blender":{{"program":"{program}","engine":"eevee"}},"estimateSeconds":5,"timeoutSeconds":60,"capabilities":{{"fps":[24,25,30],"frames":{{"max":240}}}}}}"#
+    );
+    let failing = format!(r#"{{"id":"broken","kind":"scene","name":"Broken Blender","blender":{{"program":"{}"}}}}"#, broken.display());
+    let mut b = bench("scene", &[blender, failing]);
+    // listed as a scene renderer; checked without rendering
+    let listed = b.s.execute("generate.providers", json!({})).unwrap();
+    assert_eq!((listed["providers"][0]["kind"].as_str(), listed["providers"][0]["runs"].as_str()), (Some("scene"), Some("blender")));
+    let checked = b.s.execute("generate.checkTool", json!({"provider": "blender"})).unwrap();
+    assert_eq!((checked["ok"].as_bool(), checked["version"].as_str()), (Some(true), Some("Blender 4.2.0 (stand-in)")), "{checked}");
+    // a title on the plain stage: half a second at 24 fps, the sequence's size, with alpha, placed as a clip
+    let (undo0, items0) = (b.s.history.undo.len(), b.s.project.items.len());
+    let v = b.s.execute("generate.render3d", json!({"text": "Hello \"there\"", "seconds": 0.5, "fps": 24, "dir": b.out(), "wait": true})).unwrap();
+    assert_eq!(v["frames"], 12, "{v}");
+    assert_eq!((b.s.history.undo.len(), b.s.project.items.len()), (undo0 + 1, items0 + 1), "one item, one undo step: {v}");
+    let g = made(&v, 0);
+    assert!(g["path"].as_str().unwrap().ends_with("Rendered Scene 1/frame_0001.png"), "{g}");
+    assert!(g["clip"].as_u64().is_some(), "{v}");
+    let duration = Tick(g["duration"].as_i64().unwrap()).seconds();
+    assert!((duration - 0.5).abs() < 0.05, "twelve frames at 24 fps: {duration}");
+    let it = b.s.project.item(ItemId(g["item"].as_u64().unwrap())).unwrap();
+    assert_eq!(it.metadata.get("Generator").map(String::as_str), Some("blender"));
+    // how Blender was called: headless, factory settings, a scene's own scripts off, AutoCut's script, one request
+    let folder = v["folder"].as_str().unwrap();
+    let args: Vec<String> = std::fs::read_to_string(format!("{folder}.args")).unwrap().lines().map(str::to_string).collect();
+    assert_eq!(args[..5], ["--background", "--factory-startup", "--disable-autoexec", "--python-exit-code", "3"], "{args:?}");
+    let script = &args[args.iter().position(|a| a == "--python").unwrap() + 1];
+    assert_eq!(std::fs::read_to_string(script).unwrap(), crate::generate_scene::SCRIPT);
+    let request: Value = serde_json::from_str(args.last().unwrap()).unwrap();
+    let (w, h) = (b.s.active_sequence().unwrap().settings.width, b.s.active_sequence().unwrap().settings.height);
+    assert_eq!((request["width"].as_u64(), request["height"].as_u64()), (Some(u64::from(w)), Some(u64::from(h))));
+    assert_eq!((request["fps"].as_f64(), request["frameStart"].as_u64(), request["frameEnd"].as_u64()), (Some(24.0), Some(1), Some(12)));
+    assert_eq!((request["transparent"].as_bool(), request["text"].as_str(), request["engine"].as_str()), (Some(true), Some("Hello \"there\""), Some("eevee")));
+    assert_eq!(request["scene"], false);
+    // a scene file, a camera track, named texts and objects reach Blender; frames from 10
+    let blend = dir0.join("stage.blend");
+    std::fs::write(&blend, b"BLENDER-v300 stand-in").unwrap();
+    let track = dir0.join("track.json");
+    std::fs::write(&track, r#"{"frames": [{"frame": 10, "position": [0, -8, 1], "rotation": [90, 0, 0], "focalLength": 35}]}"#).unwrap();
+    let v = b
+        .s
+        .execute(
+            "generate.render3d",
+            json!({"scene": blend, "camera": track, "texts": {"Title": "Hi"}, "objects": {"Cube": {"hide": true, "scale": 2}}, "frameStart": 10, "frameEnd": 12, "place": false, "dir": b.out(), "wait": true}),
+        )
+        .unwrap();
+    let folder = v["folder"].as_str().unwrap();
+    assert!(Path::new(&format!("{folder}/frame_0010.png")).is_file() && Path::new(&format!("{folder}/frame_0012.png")).is_file());
+    let args: Vec<String> = std::fs::read_to_string(format!("{folder}.args")).unwrap().lines().map(str::to_string).collect();
+    let py = args.iter().position(|a| a == "--python").unwrap();
+    assert_eq!(args[py - 1], blend.to_string_lossy(), "the scene is opened before the script runs: {args:?}");
+    let request: Value = serde_json::from_str(args.last().unwrap()).unwrap();
+    assert_eq!((request["camera"].as_str(), request["scene"].as_bool()), (Some(&*track.to_string_lossy()), Some(true)));
+    assert_eq!(request["texts"]["Title"], "Hi");
+    assert_eq!(request["objects"]["Cube"], json!({"hide": true, "scale": [2.0, 2.0, 2.0]}));
+    assert!(made(&v, 0)["clip"].is_null(), "not placed when asked not to");
+    // what cannot be rendered is refused before Blender starts
+    let txt = dir0.join("notes.txt");
+    std::fs::write(&txt, "x").unwrap();
+    let bad_track = dir0.join("bad.json");
+    std::fs::write(&bad_track, r#"{"frames": [{"frame": 1, "position": [0, 0]}]}"#).unwrap();
+    let made_dir = b.out();
+    let renders = || runs_in(&made_dir);
+    let renders0 = renders();
+    for (p, why) in [
+        (json!({"scene": "stage.blend"}), "absolute"),
+        (json!({"scene": "/nonexistent/stage.blend"}), "not on this computer"),
+        (json!({"scene": txt}), ".blend"),
+        (json!({"scene": 5}), ".blend"),
+        (json!({"camera": "/nonexistent/track.json"}), "camera track"),
+        (json!({"camera": bad_track}), "position"),
+        (json!({"frameStart": 20000}), "0 to 9999"),
+        (json!({"frameStart": 5, "frameEnd": 2}), "before"),
+        (json!({"frameEnd": 9, "seconds": 1}), "not both"),
+        (json!({"frameStart": 9990, "seconds": 2, "fps": 24}), "four digits"),
+        (json!({"fps": 0}), "1 to 240"),
+        (json!({"fps": 50}), "renders at 24, 25, 30 fps"),
+        (json!({"seconds": 20, "fps": 24}), "nearest: 10 s"),
+        (json!({"format": "tiff"}), "png or exr"),
+        (json!({"cryptomatte": true}), "EXR"),
+        (json!({"texts": {"Title": 5}}), "texts"),
+        (json!({"objects": {"Cube": {"location": [1]}}}), "3 numbers"),
+        (json!({"objects": {"Cube": {"spin": 1}}}), "takes location"),
+        (json!({"provider": "nope"}), "no generation tool"),
+        (json!({"text": "x".repeat(MAX_PROMPT + 1)}), "longer than"),
+    ] {
+        let e = b.s.execute("generate.render3d", p.clone()).unwrap_err().to_string();
+        assert!(e.contains(why), "{p}: {e}");
+    }
+    assert_eq!(renders(), renders0, "Blender never started for a refused request");
+    assert!(running(&b.s).is_none());
+    // a render that fails says Blender's last words, and nothing comes in
+    let items1 = b.s.project.items.len();
+    let e = b.s.execute("generate.render3d", json!({"provider": "broken", "seconds": 0.1, "dir": b.out(), "wait": true})).unwrap_err().to_string();
+    assert!(e.contains("no text object named Title"), "{e}");
+    assert_eq!(b.s.project.items.len(), items1);
+    // the other generation commands never pick a scene renderer
+    let e = b.s.execute("generate.video", json!({"prompt": "x"})).unwrap_err().to_string();
+    assert!(e.contains("no video generation tool is set up"), "{e}");
+    let _ = std::fs::remove_dir_all(&dir0);
+}

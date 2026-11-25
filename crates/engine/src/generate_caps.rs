@@ -207,7 +207,7 @@ impl Counts {
         let k = n.saturating_sub(off).div_ceil(s);
         off.saturating_add(k.saturating_mul(s)).min(last)
     }
-    fn describe(&self) -> String {
+    pub fn describe(&self) -> String {
         let (lo, hi) = self.ends().unwrap_or((self.lo(), self.hi()));
         let grid = match (self.step(), self.offset()) {
             (1, _) => String::new(),
@@ -244,6 +244,7 @@ fn fields_for(kind: Kind) -> &'static [&'static str] {
         Kind::Image => &["sizes", "width", "height", "aspects", "references", "transparent", "negative", "steps"],
         Kind::Video => &["sizes", "width", "height", "aspects", "seconds", "frames", "fps", "firstFrame", "lastFrame", "audio"],
         Kind::Music | Kind::Sfx => &["seconds"],
+        Kind::Scene => &["sizes", "width", "height", "aspects", "seconds", "frames", "fps", "transparent"],
         Kind::Composition => &[],
     }
 }

@@ -56,6 +56,7 @@ pub mod generate;
 pub mod generate_caps;
 pub mod generate_comfy;
 pub mod generate_run;
+pub mod generate_scene;
 pub mod graphic_templates;
 pub mod graphics;
 pub mod graphics_counter;

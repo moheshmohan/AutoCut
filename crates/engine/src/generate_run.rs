@@ -40,6 +40,9 @@ pub enum Kind {
     /// A renderer of code-authored compositions (RAEA): driven by the `motion.*` commands, never
     /// by `generate.*`.
     Composition,
+    /// A renderer of 3D scenes (Blender without its window, [`crate::generate_scene`]): driven by
+    /// `generate.render3d` only, never picked for another `generate.*` command.
+    Scene,
 }
 
 impl Kind {
@@ -50,13 +53,14 @@ impl Kind {
             Kind::Music => "music",
             Kind::Sfx => "sfx",
             Kind::Composition => "composition",
+            Kind::Scene => "scene",
         }
     }
 
     /// The file extension a provider of this kind writes unless it says otherwise.
     pub fn extension(self) -> &'static str {
         match self {
-            Kind::Image => "png",
+            Kind::Image | Kind::Scene => "png",
             Kind::Video | Kind::Composition => "mp4",
             Kind::Music | Kind::Sfx => "wav",
         }
@@ -171,6 +175,10 @@ pub struct Provider {
     /// such an entry has no `command`, `perReference` or `optional`.
     #[serde(default)]
     pub comfyui: Option<crate::generate_comfy::Config>,
+    /// A 3D scene renderer's Blender ([`crate::generate_scene`]): the block of a `kind: "scene"`
+    /// entry, which has no `command`.
+    #[serde(default)]
+    pub blender: Option<crate::generate_scene::Config>,
     #[serde(default)]
     pub license: String,
     /// What the model's licence asks to be shown where it is used.
@@ -374,7 +382,7 @@ pub fn prompt_for(p: &Provider, prompt: &str, references: usize) -> String {
 /// The size a provider is asked for: the wanted one, else its default long side in the shape
 /// `aspect`; never past its largest side, each side a multiple of what it takes.
 pub fn size(p: &Provider, want: (Option<u32>, Option<u32>), aspect: (u32, u32)) -> (u32, u32) {
-    let step = p.multiple_of.unwrap_or(16).clamp(1, 256);
+    let step = p.multiple_of.unwrap_or(if p.kind == Kind::Scene { 2 } else { 16 }).clamp(1, 256);
     let (aw, ah) = (f64::from(aspect.0.max(1)), f64::from(aspect.1.max(1)));
     let long = f64::from(p.default_side.unwrap_or(if p.kind == Kind::Video { 480 } else { 1024 }).clamp(64, 16_384));
     let (mut w, mut h) = match want {
@@ -588,6 +596,9 @@ fn check(p: &Provider) -> Result<(), String> {
     if p.kind == Kind::Composition {
         return check_composition(p);
     }
+    if p.kind == Kind::Scene || p.blender.is_some() {
+        return check_scene(p).or_else(err);
+    }
     let comfy = p.comfyui.as_ref();
     if let Some(c) = comfy {
         if !p.command.is_empty() || !p.per_reference.is_empty() || !p.optional.is_empty() {
@@ -710,9 +721,12 @@ fn check_composition(p: &Provider) -> Result<(), String> {
         || !p.restyle_command.is_empty()
         || !p.restyles.is_empty()
         || p.capabilities.is_some()
-        || p.comfyui.is_some();
+        || p.comfyui.is_some()
+        || p.blender.is_some();
     if generation_only {
-        return err("it takes no generation options (perReference, optional, cutoutCommand, extendCommand, restyleCommand, restyles, capabilities, comfyui)");
+        return err(
+            "it takes no generation options (perReference, optional, cutoutCommand, extendCommand, restyleCommand, restyles, capabilities, comfyui, blender)",
+        );
     }
     if p.env.len() > 64 || p.env.iter().any(|(k, v)| k.is_empty() || k.len() > 128 || k.contains(['=', '\0']) || v.len() > MAX_ARG_LEN || v.contains('\0')) {
         return err("`env` has too many or malformed names");
@@ -723,6 +737,44 @@ fn check_composition(p: &Provider) -> Result<(), String> {
     if p.timeout_seconds.is_some_and(|x| !x.is_finite() || x <= 0.0 || x > 1.0e6) || p.estimate_seconds.is_some_and(|x| !x.is_finite() || x <= 0.0 || x > 1.0e6)
     {
         return err("`timeoutSeconds` and `estimateSeconds` must be positive numbers");
+    }
+    Ok(())
+}
+
+/// A 3D scene renderer: its `blender` block (and only that: no command line of its own, no
+/// generation options), sane limits, and capabilities a scene renderer may state.
+fn check_scene(p: &Provider) -> Result<(), String> {
+    let Some(b) = p.blender.as_ref().filter(|_| p.kind == Kind::Scene) else {
+        return Err("a `blender` block goes with `kind: \"scene\"`, and a scene entry needs one".into());
+    };
+    let other = !p.command.is_empty()
+        || !p.per_reference.is_empty()
+        || !p.optional.is_empty()
+        || !p.cutout_command.is_empty()
+        || !p.extend_command.is_empty()
+        || !p.restyle_command.is_empty()
+        || !p.restyles.is_empty()
+        || p.comfyui.is_some();
+    if other {
+        return Err("a scene entry has its `blender` block alone (no command, optional, perReference, cutout, extend, restyle or comfyui)".into());
+    }
+    crate::generate_scene::check_config(b)?;
+    if p.env.len() > 64 || p.env.iter().any(|(k, v)| k.is_empty() || k.len() > 128 || k.contains(['=', '\0']) || v.len() > MAX_ARG_LEN || v.contains('\0')) {
+        return Err("`env` has too many or malformed names".into());
+    }
+    if p.cwd.as_deref().is_some_and(|d| d.len() > MAX_ARG_LEN || d.contains('\0')) {
+        return Err("`cwd` is too long or holds a NUL".into());
+    }
+    if p.extension.is_some() {
+        return Err("`extension` is not used: `blender.format` says png or exr".into());
+    }
+    for (name, v) in [("estimateSeconds", p.estimate_seconds), ("timeoutSeconds", p.timeout_seconds), ("maxSeconds", p.max_seconds), ("fps", p.fps)] {
+        if v.is_some_and(|x| !x.is_finite() || x <= 0.0 || x > 1.0e6) {
+            return Err(format!("`{name}` must be a positive number"));
+        }
+    }
+    if let Some(c) = &p.capabilities {
+        c.validate(p.kind)?;
     }
     Ok(())
 }
@@ -915,9 +967,10 @@ pub fn progress_in(text: &str) -> Option<f64> {
 
 /// What is missing when a tool is not [`installed`], for the message that says so.
 pub fn missing(p: &Provider) -> String {
-    match &p.comfyui {
-        Some(c) => format!("its workflow {} is not on this computer", c.workflow),
-        None => format!("its program {} is not on this computer", p.command.first().cloned().unwrap_or_default()),
+    match (&p.comfyui, &p.blender) {
+        (Some(c), _) => format!("its workflow {} is not on this computer", c.workflow),
+        (None, Some(b)) => format!("its program {} is not on this computer", b.program),
+        (None, None) => format!("its program {} is not on this computer", p.command.first().cloned().unwrap_or_default()),
     }
 }
 
@@ -926,6 +979,9 @@ pub fn missing(p: &Provider) -> String {
 pub fn installed(p: &Provider) -> bool {
     if let Some(c) = &p.comfyui {
         return std::path::Path::new(&c.workflow).is_file();
+    }
+    if let Some(b) = &p.blender {
+        return std::path::Path::new(&b.program).is_file();
     }
     match p.command.first() {
         Some(c) => std::path::Path::new(c).is_file(),
