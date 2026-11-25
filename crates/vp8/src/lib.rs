@@ -29,7 +29,7 @@ mod spec_tables;
 mod tables;
 mod transform;
 
-pub use decoder::{DecodeStats, Decoder};
+pub use decoder::{DecodeStats, Decoder, MAX_LUMA_SAMPLES};
 pub use error::{Error, Result};
 
 /// A decoded picture: 8-bit 4:2:0, planes tight (stride = width).

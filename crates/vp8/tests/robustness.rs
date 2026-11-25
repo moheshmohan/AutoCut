@@ -89,6 +89,41 @@ fn random_bytes_and_tiny_frames_do_not_panic() {
     assert!(dec.decode(&key, 0).is_err(), "oversized key frame must be rejected");
 }
 
+/// A key frame header of `w` x `h` with a one-byte first partition and garbage after it.
+fn key_header(w: u16, h: u16) -> Vec<u8> {
+    let mut key = vec![0u8; 64];
+    key[0] = 0x30; // key frame, version 0, shown, one-byte first partition
+    key[3..6].copy_from_slice(&[0x9d, 0x01, 0x2a]);
+    key[6..8].copy_from_slice(&w.to_le_bytes());
+    key[8..10].copy_from_slice(&h.to_le_bytes());
+    key
+}
+
+fn over_limit(r: filmcraft_vp8::Result<Option<filmcraft_vp8::Picture>>) -> bool {
+    matches!(r, Err(Error::Invalid(m)) if m.contains("memory limit"))
+}
+
+/// The frame limit is the caller's (`Decoder::with_max_luma_samples`), counted on the
+/// macroblock grid: 70x40 pads to 80x48 (3840 samples), refused one sample below and decoded
+/// at it. The default stays 2^26: 8192x8192 is within it, one macroblock row more is not, and
+/// a reset keeps the limit.
+#[test]
+fn the_frame_limit_is_the_callers() {
+    assert_eq!(Decoder::new().max_luma_samples(), 1 << 26);
+    assert_eq!(filmcraft_vp8::MAX_LUMA_SAMPLES, 1 << 26);
+    let small = key_header(70, 40);
+    assert!(over_limit(Decoder::with_max_luma_samples(80 * 48 - 1).decode(&small, 0)));
+    assert!(!over_limit(Decoder::with_max_luma_samples(80 * 48).decode(&small, 0)));
+    assert!(!over_limit(Decoder::new().decode(&small, 0)));
+    let tall = key_header(8192, 8193);
+    assert!(over_limit(Decoder::new().decode(&tall, 0)));
+    let mut dec = Decoder::with_max_luma_samples(80 * 48 - 1);
+    dec.reset();
+    assert_eq!(dec.max_luma_samples(), 80 * 48 - 1);
+    assert!(over_limit(dec.decode(&small, 0)));
+    assert!(over_limit(Decoder::with_max_luma_samples(0).decode(&key_header(1, 1), 0)));
+}
+
 #[test]
 fn inter_frame_without_key_frame_is_an_error() {
     let f = common::fixture("default");

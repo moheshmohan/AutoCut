@@ -52,7 +52,14 @@ let stats = dec.stats(); // frames, key frames, hidden frames
 // Random access points
 let key: bool = filmcraft_vp8::is_keyframe(frame);
 let info: Option<filmcraft_vp8::KeyframeInfo> = filmcraft_vp8::keyframe_info(frame);
+
+// A caller past 8K picks its own frame limit (luma samples on the macroblock grid).
+let mut big = Decoder::with_max_luma_samples(1 << 27);
 ```
+
+A key frame larger than the decoder's limit (`Decoder::new`: `MAX_LUMA_SAMPLES` = 2^26 luma
+samples padded to whole macroblocks, 8192x8192) is `Error::Invalid` before its macroblock map and
+planes are allocated; the decoder holds four frames of that size (last, golden, altref, current).
 
 `filmcraft-codecs` wires the decoder into Matroska / WebM (`V_VP8`, including the alpha layer of
 transparent WebM in `BlockAdditional`) and MP4 (`vp08`). VP8 has no colour signalling: pictures are

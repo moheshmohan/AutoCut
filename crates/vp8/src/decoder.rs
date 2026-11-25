@@ -15,9 +15,10 @@ use crate::transform;
 
 /// Largest frame dimension in macroblocks (14-bit sizes).
 const MAX_MBS: usize = 16384 / 16 + 1;
-/// Maximum padded luma samples retained by one VP8 reference picture (about 8K UHD).
-/// 2^26 luma samples: 8192x8192, above every VP8 frame a camera or encoder writes (8192x4320 is 35M).
-const MAX_LUMA_SAMPLES: usize = 1 << 26;
+/// Default maximum padded luma samples retained by one VP8 reference picture
+/// ([`Decoder::with_max_luma_samples`]): 2^26 luma samples, 8192x8192, above every VP8 frame a
+/// camera or encoder writes (8192x4320 is 35M).
+pub const MAX_LUMA_SAMPLES: usize = 1 << 26;
 
 /// A reconstructed frame: planes sized to whole macroblocks.
 #[derive(Clone)]
@@ -107,6 +108,8 @@ pub struct Decoder {
     /// `ref_frame_sign_bias`, indexed by reference frame (0 intra, 1 last, 2 golden, 3 altref).
     sign_bias: [bool; 4],
     stats: DecodeStats,
+    /// Largest frame accepted, in luma samples padded to whole macroblocks.
+    max_luma_samples: usize,
 }
 
 impl Default for Decoder {
@@ -116,7 +119,16 @@ impl Default for Decoder {
 }
 
 impl Decoder {
+    /// A decoder accepting frames of up to [`MAX_LUMA_SAMPLES`] luma samples.
     pub fn new() -> Decoder {
+        Self::with_max_luma_samples(MAX_LUMA_SAMPLES)
+    }
+
+    /// A decoder accepting frames of up to `max_luma_samples` luma samples, counted on the
+    /// macroblock grid (width and height rounded up to multiples of 16). A key frame above it
+    /// is an error before its macroblock map and planes are allocated; the decoder holds four
+    /// such frames (last, golden, altref and the one being decoded), 1.5 bytes a luma sample.
+    pub fn with_max_luma_samples(max_luma_samples: usize) -> Decoder {
         Decoder {
             ctx: EntropyContext::default(),
             seg: Segmentation::default(),
@@ -129,7 +141,13 @@ impl Decoder {
             refs: [None, None, None],
             sign_bias: [false; 4],
             stats: DecodeStats::default(),
+            max_luma_samples,
         }
+    }
+
+    /// The frame-size limit ([`Decoder::with_max_luma_samples`]).
+    pub fn max_luma_samples(&self) -> usize {
+        self.max_luma_samples
     }
 
     /// Forget the reference frames (after a seek): decoding resumes at the next key frame.
@@ -171,7 +189,7 @@ impl Decoder {
             let (w, h) = (usize::from(tag.width), usize::from(tag.height));
             let (mb_w, mb_h) = (w.div_ceil(16), h.div_ceil(16));
             let samples = mb_w.checked_mul(16).and_then(|w| w.checked_mul(mb_h)).and_then(|h| h.checked_mul(16));
-            ensure!(samples.is_some_and(|n| n <= MAX_LUMA_SAMPLES), "frame size {}x{} exceeds the decoder memory limit", tag.width, tag.height);
+            ensure!(samples.is_some_and(|n| n <= self.max_luma_samples), "frame size {}x{} exceeds the decoder memory limit", tag.width, tag.height);
             if w != self.width || h != self.height {
                 self.width = w;
                 self.height = h;
