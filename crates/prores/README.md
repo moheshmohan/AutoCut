@@ -13,6 +13,8 @@ use filmcraft_prores::*;
 let frame: Frame = decode_frame(&sample)?;                 // 10-bit 4:2:2 / 12-bit 4:4:4
 let f10 = decode_frame_with(&sample, &DecodeOptions { bit_depth: Some(10), threads: true })?;
 decode_frame_into(&sample, &DecodeOptions::default(), &mut frame_buf)?; // reuses planes
+let limits = DecodeLimits { max_pixels: 16384 * 16384, max_frame_bytes: 2 << 30 };
+let big = decode_frame_with_limits(&sample, &DecodeOptions::default(), &limits)?; // past 8K 4444
 let hdr: FrameHeader = probe(&sample)?;                    // header only
 
 // Encode (progressive).
@@ -24,6 +26,13 @@ let sample: Vec<u8> = enc.encode(&frame)?;                 // the QuickTime samp
 alpha: Option<Vec<u16>>, interlace: Interlace, color: ColorInfo { primaries, transfer, matrix },
 aspect_ratio, frame_rate_code }` holds planar samples with no row padding (`chroma_width()` is
 `ceil(width/2)` for 4:2:2). The colour codes are H.273 code points straight from the frame header.
+
+`DecodeLimits` bounds the frame area (`max_pixels`, `Error::Unsupported("frame size")`) and the
+output planes (`max_frame_bytes`, every plane at two bytes a sample, `Error::Invalid`), both
+checked against the frame header before anything is allocated. The defaults (`decode_frame`,
+`decode_frame_with`, `decode_frame_into`) set no area limit and `MAX_FRAME_BYTES` = 1 GiB (8K 4444
+with alpha is 283 MB); `decode_frame_with_limits` and `decode_frame_into_with_limits` take a
+stricter pixel policy or a larger ceiling for frames past that.
 
 `Profile` = `Proxy` (`apco`), `Lt` (`apcs`), `Standard` (`apcn`), `Hq` (`apch`), `P4444` (`ap4h`),
 `P4444Xq` (`ap4x`). The frame itself doesn't say which profile it is (only the container fourcc

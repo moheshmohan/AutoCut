@@ -6,9 +6,27 @@ use crate::header::{FrameHeader, PictureHeader, row_slice_widths};
 use crate::tables::*;
 use crate::{AlphaType, ChromaFormat, Error, Frame, Interlace, Result};
 
-/// Maximum aggregate decoded plane storage for one ProRes frame (256 MiB).
-// 1 GiB: 8K ProRes 4444 with alpha is 283 MB of 16-bit planes
-const MAX_FRAME_BYTES: usize = 1 << 30;
+/// Default maximum aggregate decoded plane storage for one ProRes frame ([`DecodeLimits`]):
+/// 1 GiB (8K ProRes 4444 with alpha is 283 MB of 16-bit planes).
+pub const MAX_FRAME_BYTES: usize = 1 << 30;
+
+/// Resource limits for decoding one ProRes frame, checked against the frame header before any
+/// plane is allocated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DecodeLimits {
+    /// Maximum frame width × height (`Error::Unsupported("frame size")` above it). The default
+    /// sets no area limit of its own: the plane storage bounds the frame.
+    pub max_pixels: u64,
+    /// Maximum aggregate output plane storage in bytes, every plane (alpha included) at two
+    /// bytes a sample (`Error::Invalid` above it). Default [`MAX_FRAME_BYTES`].
+    pub max_frame_bytes: usize,
+}
+
+impl Default for DecodeLimits {
+    fn default() -> Self {
+        DecodeLimits { max_pixels: u64::MAX, max_frame_bytes: MAX_FRAME_BYTES }
+    }
+}
 
 /// Decoder options.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -102,17 +120,31 @@ impl Scratch {
     }
 }
 
-/// Decode one ProRes frame.
+/// Decode one ProRes frame (default [`DecodeLimits`]).
 pub fn decode_frame_with(data: &[u8], opts: &DecodeOptions) -> Result<Frame> {
+    decode_frame_with_limits(data, opts, &DecodeLimits::default())
+}
+
+/// Decode one ProRes frame under explicit geometry and plane-memory limits (a stricter pixel
+/// policy, or a larger memory ceiling for frames past 8K 4444).
+pub fn decode_frame_with_limits(data: &[u8], opts: &DecodeOptions, limits: &DecodeLimits) -> Result<Frame> {
     let mut f = Frame::new(0, 0, ChromaFormat::Yuv422, 10, false);
-    decode_frame_into(data, opts, &mut f)?;
+    decode_frame_into_with_limits(data, opts, limits, &mut f)?;
     Ok(f)
 }
 
 /// Decode one ProRes frame into `out`, reusing its plane allocations (the fastest way to decode
-/// a sequence). On error the contents of `out` are unspecified.
+/// a sequence; default [`DecodeLimits`]). On error the contents of `out` are unspecified.
 pub fn decode_frame_into(data: &[u8], opts: &DecodeOptions, out: &mut Frame) -> Result<()> {
+    decode_frame_into_with_limits(data, opts, &DecodeLimits::default(), out)
+}
+
+/// [`decode_frame_into`] under explicit resource limits.
+pub fn decode_frame_into_with_limits(data: &[u8], opts: &DecodeOptions, limits: &DecodeLimits, out: &mut Frame) -> Result<()> {
     let (hdr, mut off, frame_size) = FrameHeader::parse(data)?;
+    if u64::from(hdr.width).saturating_mul(u64::from(hdr.height)) > limits.max_pixels {
+        return Err(Error::Unsupported("frame size"));
+    }
     let data = &data[..frame_size];
     let depth = opts.bit_depth.unwrap_or(match hdr.chroma {
         ChromaFormat::Yuv422 => 10,
@@ -130,7 +162,7 @@ pub fn decode_frame_into(data: &[u8], opts: &DecodeOptions, out: &mut Frame) -> 
         .checked_add(chroma.checked_mul(2).ok_or(Error::Invalid("chroma plane count overflows"))?)
         .and_then(|n| if hdr.alpha == AlphaType::None { Some(n) } else { n.checked_add(luma) })
         .ok_or(Error::Invalid("frame plane count overflows"))?;
-    if !samples.checked_mul(std::mem::size_of::<u16>()).is_some_and(|n| n <= MAX_FRAME_BYTES) {
+    if !samples.checked_mul(std::mem::size_of::<u16>()).is_some_and(|n| n <= limits.max_frame_bytes) {
         return Err(Error::Invalid("frame dimensions exceed the decoder memory limit"));
     }
     let interlaced = hdr.interlace != Interlace::Progressive;
@@ -508,5 +540,91 @@ fn put_block(f: &[f32; 64], plane: &mut [u16], stride: usize, x0: usize, y0: usi
         for (o, &v) in row.iter_mut().zip(src) {
             *o = conv.conv(v);
         }
+    }
+}
+
+#[cfg(test)]
+mod limits_tests {
+    use super::*;
+    use crate::{ColorInfo, Encoder, Profile};
+
+    /// A frame header with no picture after it: what the limits are checked against.
+    fn header_only(width: u16, height: u16, chroma: ChromaFormat, alpha: AlphaType) -> Vec<u8> {
+        let hdr = FrameHeader {
+            header_size: 20,
+            bitstream_version: 1,
+            encoder_id: *b"test",
+            width,
+            height,
+            chroma,
+            interlace: Interlace::Progressive,
+            aspect_ratio: 0,
+            frame_rate_code: 0,
+            color: ColorInfo::default(),
+            alpha,
+            qmat_luma: [4; 64],
+            qmat_chroma: [4; 64],
+            luma_matrix_present: false,
+            chroma_matrix_present: false,
+        };
+        let header = hdr.write();
+        let frame_size = 8 + header.len();
+        let mut data = Vec::with_capacity(frame_size);
+        data.extend_from_slice(&(frame_size as u32).to_be_bytes());
+        data.extend_from_slice(&crate::header::FRAME_ID);
+        data.extend_from_slice(&header);
+        data
+    }
+
+    fn with(data: &[u8], limits: DecodeLimits) -> Result<Frame> {
+        decode_frame_with_limits(data, &DecodeOptions::default(), &limits)
+    }
+
+    const OVER_MEMORY: Error = Error::Invalid("frame dimensions exceed the decoder memory limit");
+
+    /// 8192 x 8192 4444 with 16-bit alpha is 512 MiB of planes: within the default 1 GiB (the
+    /// missing picture is what fails), refused one byte under its size or one pixel under its
+    /// area, both before anything is allocated.
+    #[test]
+    fn limits_bound_area_and_plane_memory_before_allocating() {
+        let data = header_only(8192, 8192, ChromaFormat::Yuv444, AlphaType::Bits16);
+        assert!(matches!(decode_frame(&data), Err(Error::Truncated)));
+        assert!(matches!(with(&data, DecodeLimits::default()), Err(Error::Truncated)));
+        let exact = DecodeLimits { max_pixels: 8192 * 8192, max_frame_bytes: 512 << 20 };
+        assert!(matches!(with(&data, exact), Err(Error::Truncated)));
+        assert!(matches!(with(&data, DecodeLimits { max_frame_bytes: (512 << 20) - 1, ..exact }), Err(e) if e == OVER_MEMORY));
+        assert!(matches!(with(&data, DecodeLimits { max_pixels: 8192 * 8192 - 1, ..exact }), Err(Error::Unsupported("frame size"))));
+        let mut out = Frame::new(0, 0, ChromaFormat::Yuv422, 10, false);
+        let r = decode_frame_into_with_limits(&data, &DecodeOptions::default(), &DecodeLimits { max_pixels: 0, ..exact }, &mut out);
+        assert!(matches!(r, Err(Error::Unsupported("frame size"))));
+    }
+
+    /// Past the default: 16384 x 16384 4444 with alpha is 2 GiB of planes, refused at the
+    /// default and let through by a caller that raises the ceiling.
+    #[test]
+    fn a_raised_memory_ceiling_admits_frames_past_the_default() {
+        let data = header_only(16384, 16384, ChromaFormat::Yuv444, AlphaType::Bits16);
+        assert!(matches!(decode_frame(&data), Err(e) if e == OVER_MEMORY));
+        assert!(matches!(with(&data, DecodeLimits { max_frame_bytes: 1 << 31, ..DecodeLimits::default() }), Err(Error::Truncated)));
+        let widest = header_only(u16::MAX, u16::MAX, ChromaFormat::Yuv444, AlphaType::Bits16);
+        assert!(with(&widest, DecodeLimits { max_pixels: u64::MAX, max_frame_bytes: usize::MAX }).is_err());
+    }
+
+    /// A real frame decodes the same with limits that just admit it, and is refused below them.
+    #[test]
+    fn a_frame_at_its_limits_decodes_as_by_default() {
+        let (w, h) = (64u32, 48u32);
+        let mut src = Frame::new(w, h, ChromaFormat::Yuv422, 10, false);
+        for (i, s) in src.y.iter_mut().enumerate() {
+            *s = 64 + (i % 800) as u16;
+        }
+        let sample = Encoder::new(Profile::Hq, w, h).encode(&src).unwrap();
+        let want = decode_frame(&sample).unwrap();
+        let bytes = (64 * 48 + 2 * 32 * 48) * 2;
+        let exact = DecodeLimits { max_pixels: u64::from(w * h), max_frame_bytes: bytes };
+        let got = with(&sample, exact).unwrap();
+        assert_eq!((got.width, got.height, &got.y, &got.cb, &got.cr), (want.width, want.height, &want.y, &want.cb, &want.cr));
+        assert!(matches!(with(&sample, DecodeLimits { max_frame_bytes: bytes - 1, ..exact }), Err(e) if e == OVER_MEMORY));
+        assert!(matches!(with(&sample, DecodeLimits { max_pixels: u64::from(w * h) - 1, ..exact }), Err(Error::Unsupported("frame size"))));
     }
 }
