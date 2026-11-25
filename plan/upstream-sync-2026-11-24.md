@@ -399,3 +399,31 @@ craft-libs crate and no new dependency.
 | AV122 | Faster DNG decode and development, from the same work in upstream FilmCraft's own `crates/dng` (the fork's lineage of the crate: `705e9a17` `ProcessOptions`, `14e22013` tint sign, `7055d45a` the speed-ups and `reference` module): 13-bit code + difference lookup and 8-byte refills in lossless JPEG, tiles decoded in parallel bands straight into place, a single strip used without a copy, normalisation tables, row-by-row demosaic / crop / colour, and `ProcessOptions::target_size` (1/2, 1/4, 1/8 size without demosaic). Merged with the fork's own bounds: every chunk keeps its AV75 decode budget and aggregate charge, the band holds only its own chunks. Not taken: the optional serde derives (`e9b12176`, a new dependency edge in the lock); `target_size` is not yet asked for by playback | `eb5844d4da` (FilmCraft `7055d45a`) |
 | AV123 | DNG opcode lists (DNG 1.7.1.0 chapter 7: OpcodeList1/2/3, the 14 opcodes, the skip rule, optional / mandatory flags, preview-only opcodes), from FilmCraft `7e6f075e`, with its later opt-in (`fd0a455d`: `ProcessOptions::apply_opcodes`, off by default "until the interpretations are compared with real camera files"), the opt-in in `process::develop_with` (from `46c9d91e`) and the test helper fix `4e5d4df1`. Files without lists, and every file by default, develop exactly as before; nothing in AutoCut turns the lists on yet | `c31578e1ff`, `cb3f76848b` (FilmCraft `7e6f075e`) |
 | AV124 | Lossy JPEG DNG (Compression 34892, 8-bit LinearRaw, one or three components). Upstream adds the `image` crate to `filmcraft-dng`; here the L0 crate keeps no image codec (and the lock no new edge): `set_lossy_jpeg_decoder` takes a baseline JPEG decoder, which `filmcraft-media` registers (the image crate's, under its allocation limits) before every DNG it develops. The decoder runs under `catch_unwind` with a budget of about its tile; its components must equal SamplesPerPixel (`46c9d91e`); two bits per 8 × 8 block as the plausibility floor. The test writer takes precoded chunks (`Compression::Precoded`, `chunk_samples`) instead of encoding JPEG itself; upstream's lossy tests run in `filmcraft-media` | `589d84d0f4` (FilmCraft `00c93a3e`) |
+
+### Captions, audio and text (AV166–AV171)
+
+The caption, audio, text and AAF rows were ported in one lane (own worktree and target, lane gate),
+behaviour only, into the fork's `filmcraft-captions`, `filmcraft-flac`, `filmcraft-aac`,
+`filmcraft-opus`, `filmcraft-mpa`, `filmcraft-ac3` and `filmcraft-text`, with the engine and
+export passing what they know. The audio speed-ups of `44b4a23137` were taken from the upstream
+FilmCraft commits the TSV lists (they are in the fork's object store), merged where the fork's
+crates had moved on, and kept only where every decoded sample and encoded byte stays the same
+(FNV-1a of the output before and after, golden tests, oracle tests).
+
+| Commit | Port | craft-libs / upstream |
+|---|---|---|
+| AV166 | SCC / MCC time codes count from `Document::start_timecode` (`label_time` / `label_frame` carry the label across rates); readers note `Document::labels`, `count_from` reads cues back. `captions.export` labels from the sequence's start timecode, export sidecars from the range's first frame, `captions.import` counts SCC / MCC from it (`fromStartTimecode`) | `50f2189909` |
+| AV167 | `WriteOptions::every_frame_until`, `mcc::write_padded` / `write_padded_to`, `write_to` (24 h cap); `captions.export {everyFrame}` pads an MCC to the sequence's end and warns off 29.97 fps | `9e78e96c16` |
+| AV168 | `filmcraft_flac::{assumed_channel_mask, channel_mask_comment}`, `Encoder::header_with_comments`; a 5.1 FLAC export records the WAV export's `0x3F` (decoders read 6-channel FLAC as 5.1(side) without it) | `1648f33e6a`, `82424e59c3` |
+| AV169 | MPEG audio filterbank (2.7x), AAC decoder Huffman tables / FFT / buffers (1.35–1.5x), AAC encoder per-band cache (2.2–2.3x), Opus PVQ table / de-emphasis / SILK resampler (1.3–1.75x), Opus concealment capped at 120 ms (a fix), AC-3 word-wide bit reader without the new dependency (1.07x) | `44b4a23137` = upstream `51c755e5`, `f9627280`, `d587ceed`, `6121635c`, `dc124ab7`, `12e32026`, `c4dc64d1`, `eb352ec8`, `014b5e56`, `1c9c2e82` |
+| AV170 | FLAC per-order predictor kernels, kept residuals, cached window, merged partition sums, batches by offset (1.5–1.9x), the fork's i32 prediction rule kept; a 64-case golden test pinned to the fork's output | `44b4a23137` = upstream `5eaff794`, `d9dad4a5` |
+| AV171 | A bounded per-face shaping plan cache (32 plans) in `filmcraft-text`; same glyphs, 4–6% faster layout of caption text | `f25ce39493` |
+
+Already in: `f759a35db8` (AV82 refuses root mini-stream chain loops in AAF: `validate_root_chain`
+and its tests), the Ogg CRC of `44b4a23137` (AV90). Left out, with reasons in the commit
+messages: the Opus CELT radix-2/3/4 FFT kernels (`bf7ac420`) and the SILK resampler's eight
+partial sums (`87b8e22d`), which move the output at f32 rounding level; the strict-Clippy
+refactors (`7a532eca`, `78d77b72`); upstream's AC-3 golden frames (a binary file); craft-libs'
+`charset_warnings` naming time codes (the fork has no `charset_warnings`) and
+`WriteOptions::program`. Noticed, not changed: the FLAC README said wasted bits were not written
+(they are since AV80; corrected in AV170).

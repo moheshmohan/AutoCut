@@ -18,6 +18,7 @@
 pub mod fonts;
 pub mod layout;
 pub mod mask;
+mod plan_cache;
 pub mod raster;
 pub mod render;
 pub mod sfnt;

@@ -182,6 +182,8 @@ pub struct Face {
     pub info: FaceInfo,
     bytes: OnceLock<Option<FaceBytes>>,
     shaper: OnceLock<harfrust::ShaperData>,
+    /// Shaping plans built for this face, reused across runs with the same properties.
+    pub(crate) plans: crate::plan_cache::ShapePlanCache,
 }
 
 #[derive(Clone)]
@@ -355,7 +357,7 @@ fn db() -> &'static RwLock<Db> {
 
 fn push(db: &mut Db, info: FaceInfo) -> FaceId {
     let id = db.faces.len();
-    db.faces.push(Arc::new(Face { id, info, bytes: OnceLock::new(), shaper: OnceLock::new() }));
+    db.faces.push(Arc::new(Face { id, info, bytes: OnceLock::new(), shaper: OnceLock::new(), plans: Default::default() }));
     id
 }
 
@@ -786,7 +788,7 @@ mod tests {
             data: FaceData::File(path.clone()),
             origin: "system",
         };
-        let f = Face { id: 0, info, bytes: OnceLock::new(), shaper: OnceLock::new() };
+        let f = Face { id: 0, info, bytes: OnceLock::new(), shaper: OnceLock::new(), plans: Default::default() };
         assert!(!f.covers_text_within("A", cap), "a file past the probe cap is not read");
         assert!(f.bytes.get().is_none());
         assert!(f.covers_text_within("A", cap + 1));
@@ -807,7 +809,7 @@ mod tests {
             data: FaceData::File(path.clone()),
             origin: "system",
         };
-        let f = Face { id: 0, info, bytes: OnceLock::new(), shaper: OnceLock::new() };
+        let f = Face { id: 0, info, bytes: OnceLock::new(), shaper: OnceLock::new(), plans: Default::default() };
         assert!(f.covers_text("A\u{416}"));
         assert!(!f.covers_text("A\u{5d0}"));
         assert!(f.bytes.get().is_none(), "probing coverage must not cache the file");

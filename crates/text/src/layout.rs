@@ -351,7 +351,12 @@ fn shape_item(text: &str, chars: &[(usize, char, char)], rtl: bool, face: FaceId
         feats.push(Feature::new(Tag::new(b"liga"), 0, ..));
         feats.push(Feature::new(Tag::new(b"clig"), 0, ..));
     }
-    let out = shaper.shape(buf, harfrust::ShapeOptions::new().features(&feats));
+    // the plan `shape` would build for this buffer (its script is None when no character has
+    // one, its language unset), kept per face: building it costs more than shaping a short run
+    let direction = buf.direction();
+    let script = Some(buf.script()).filter(|s| *s != harfrust::script::UNKNOWN);
+    let plan = f.plans.get_or_create(&shaper, direction, script, buf.language().as_ref(), &feats);
+    let out = shaper.shape(buf, harfrust::ShapeOptions::new().features(&feats).plan(Some(&plan)));
     let k = size / f.units_per_em();
     let _ = text;
     out.glyph_infos()

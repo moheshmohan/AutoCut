@@ -955,3 +955,19 @@ Still-image improvements from upstream craft-libs, ported into AutoCut's own cra
   the specification are checked against real camera files.
 - **AV124**: lossy JPEG DNGs (the "lossy compressed" and proxy DNGs some cameras and converters
   write) open as stills and CinemaDNG frames; they were refused.
+
+## Update 2026-11-25 (AV166–AV171, caption, audio and text ports from craft-libs)
+
+- **AV166**: SCC and MCC caption exports count their time codes from the sequence's start
+  timecode (01:00:00:00 at 25 fps becomes 01:00:00;00 at the files' 29.97 fps), export sidecars from
+  the timecode of the exported range's first frame, and an imported SCC or MCC file that counts
+  from the sequence's start timecode lands at the sequence's start (`fromStartTimecode`).
+- **AV167**: `captions.export {everyFrame: true}` writes an MCC with a packet on every 29.97 frame
+  to the sequence's end, as SDI and frame-wrapped MXF deliveries expect.
+- **AV168**: a 5.1 FLAC export names its speakers as the WAV export does (back surrounds), so
+  players stop reading it as 5.1 with side surrounds.
+- **AV169 / AV170**: MP2, AAC, Opus and AC-3 decode and AAC and FLAC encode faster (MP2 2.7x, AAC
+  encode 2.3x, FLAC encode 1.7x, Opus CELT 1.75x, AAC decode 1.4x) with identical output; the
+  Opus decoder refuses a concealment longer than 120 ms instead of allocating without limit.
+- **AV171**: caption and title layout reuses each font's shaping plans (a few percent faster,
+  same glyphs).
