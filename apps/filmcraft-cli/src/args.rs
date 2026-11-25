@@ -179,7 +179,7 @@ const VALUED_IN: &[(&str, &[&str])] = &[
     ("scenes", &["--detail", "--limit", "--purpose", "--count", "--sheet"]),
     // photos pick --meaning: what FrameAtlas should find by meaning
     ("photos", &["--meaning"]),
-    ("quick", &["--template", "--full-detail"]),
+    ("quick", &["--template", "--full-detail", "--reference"]),
     // the taste-memory eval: where its briefs are, which runs, which brief, which judge
     ("eval", &["--briefs", "--modes", "--only", "--judge-model"]),
     // review gate: the reviewer's answer from a file
@@ -203,6 +203,7 @@ const VALUED_IN: &[(&str, &[&str])] = &[
             "--look-strength",
             "--revise",
             "--from",
+            "--reference",
         ],
     ),
 ];

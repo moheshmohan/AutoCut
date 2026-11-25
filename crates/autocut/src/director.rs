@@ -18,7 +18,11 @@
 //!    push in, a follow (Auto Reframe) or a speed ramp. The local model directs from the brief and
 //!    the shots' facts ([`model_plan`]); its plan is checked and repaired ([`validate`]: every
 //!    clip, moment, camera and length); without a model, or when its plan is unusable, rules
-//!    direct ([`rules_plan`]). The report says who directed and what was repaired.
+//!    direct ([`rules_plan`]). The report says who directed and what was repaired. With a
+//!    `reference` ([`crate::reference`], PX6.2) the rhythm is the reference's: each shot as long
+//!    as its shots are at that point of the video ([`rhythm_like`]; the rules use moments of a
+//!    clip again when it cuts faster than there are moments), its length and a fitting tempo
+//!    unless the video names them, and the report's `reference` says how close the edit came.
 //! 4. **Commands.** The plan compiles to engine commands ([`compile`]); a shot's own commands run
 //!    on its clip once it is placed. `dryRun` returns them with the plan, building nothing.
 //! 5. **Build.** A sequence of the `aspect`; the music first (generated, or `music`: the user's
@@ -197,6 +201,10 @@ pub struct Options {
     /// How the edit ends (`endCard`): `cut` on its last frame or `fadeOut` to black; none:
     /// dealt, else `cut`.
     pub end_card: Option<String>,
+    /// A reference's pace (`reference`, PX6.2): each shot as long as the reference's shots are at
+    /// that point of the video, moments of a clip used again when it asks for more shots than
+    /// there are; none: the director's own rhythm.
+    pub pace: Option<crate::reference::Targets>,
 }
 
 /// The layout a brief asks for, from its words ("16:9 recap", "vertical reel").
@@ -451,6 +459,7 @@ impl Options {
             title_style: one_of(p, "titleStyle", TITLE_STYLES)?,
             family: one_of(p, "transitionFamily", FAMILIES)?,
             end_card: one_of(p, "endCard", END_CARDS)?,
+            pace: None,
         })
     }
 
@@ -1015,6 +1024,14 @@ fn beats_for(secs: f64, beat: f64) -> u32 {
     if n > 2 && n % 2 == 1 { n + 1 } else { n }
 }
 
+/// Beats of a beat `beat` seconds long nearest `secs`, at least one: a reference's shot lengths
+/// are its own, not rounded up to pairs.
+fn beats_like(secs: f64, beat: f64) -> u32 {
+    let b = if beat.is_finite() && beat > 0.05 { beat } else { 0.5 };
+    let secs = if secs.is_finite() { secs } else { b };
+    (secs / b).round().clamp(1.0, 64.0) as u32
+}
+
 /// The longest a shot holds, seconds (an orbit, a hyperlapse a little longer): a reel keeps
 /// moving.
 pub const MAX_SHOT_SECONDS: f64 = 6.0;
@@ -1053,6 +1070,28 @@ fn window_from(c: &Candidate, need: f64) -> Option<f64> {
     let lo = if c.seconds() >= need { c.start } else { 0.0 };
     let hi = if c.seconds() >= need { c.end - need } else { c.media_seconds - need };
     Some((c.key - need / 3.0).clamp(lo, hi.max(lo)))
+}
+
+/// Where a shot of `need` media seconds starts in candidate `c` without playing any of `used`
+/// again (a moment of a clip used a second time, for a reference that cuts faster than there are
+/// moments): its best window when free, else the free window nearest its best moment, inside
+/// the shot when it is long enough, else inside the media. Never a photo (it would repeat).
+fn window_avoiding(c: &Candidate, need: f64, used: &[(f64, f64)]) -> Option<f64> {
+    let first = window_from(c, need)?;
+    let clash = |a: f64| used.iter().any(|(u0, u1)| a < *u1 - 1e-6 && a + need > *u0 + 1e-6);
+    if !clash(first) {
+        return Some(first);
+    }
+    if c.photo {
+        return None;
+    }
+    let (lo, hi) = if c.seconds() >= need { (c.start, c.end - need) } else { (0.0, c.media_seconds - need) };
+    if !(hi.is_finite() && lo.is_finite()) || hi < lo {
+        return None;
+    }
+    let mut options: Vec<f64> = used.iter().flat_map(|(u0, u1)| [*u1, *u0 - need]).filter(|a| *a >= lo - 1e-6 && *a <= hi + 1e-6).collect();
+    options.sort_by(|a, b| (a - c.key).abs().total_cmp(&(b - c.key).abs()));
+    options.into_iter().map(|a| a.clamp(lo, hi.max(lo))).find(|a| !clash(*a))
 }
 
 /// Rules' camera for a body shot of candidate `c` lasting `secs`, given the moves used so far.
@@ -1113,8 +1152,14 @@ pub fn rules_plan(cands: &[Candidate], o: &Options, beat: f64, bpm: f64) -> Plan
     // the hook: a 360° shot among the strongest opens as a tiny planet
     let hook = by_hook.iter().take(4).find(|c| c.kind == Kind::Vr && window_from(c, Camera::PlanetIn.min_seconds()).is_some()).or(by_hook.first()).copied();
     let Some(hook) = hook else { return plan };
-    let hook_cam = if hook.kind == Kind::Vr { Camera::PlanetIn } else { rules_camera(hook, 2.0, &HashMap::new(), None, frame_aspect) };
-    let hook_beats = beats_for(hook_cam.min_seconds().max(2.0), beat);
+    // (a reference sets every length: its shots at that point of the video)
+    let pace = o.pace.as_ref();
+    let hook_secs = pace.map_or(2.0, |t| t.shot_at(0.0));
+    let hook_cam = if hook.kind == Kind::Vr { Camera::PlanetIn } else { rules_camera(hook, hook_secs, &HashMap::new(), None, frame_aspect) };
+    let hook_beats = match pace {
+        Some(_) => beats_like(hook_cam.min_seconds().max(hook_secs), beat).min(total),
+        None => beats_for(hook_cam.min_seconds().max(2.0), beat),
+    };
     // the ending: a 360° shot of another clip folds into a planet, else a wide shot
     let end = good
         .iter()
@@ -1128,7 +1173,11 @@ pub fn rules_plan(cands: &[Candidate], o: &Options, beat: f64, bpm: f64) -> Plan
         Some(_) => Camera::PushIn,
         None => Camera::Hold,
     };
-    let end_beats = if end.is_some() { beats_for(end_cam.min_seconds().max(2.0), beat) } else { 0 };
+    let end_beats = match (end, pace) {
+        (None, _) => 0,
+        (Some(_), Some(t)) => beats_like(end_cam.min_seconds().max(t.shot_at(1.0)), beat),
+        (Some(_), None) => beats_for(end_cam.min_seconds().max(2.0), beat),
+    };
     let body_room = total.saturating_sub(hook_beats + end_beats);
     // the body: filming order, the kinds taking turns
     let used_ids: BTreeSet<&str> = [Some(hook.id.as_str()), end.map(|c| c.id.as_str())].into_iter().flatten().collect();
@@ -1141,7 +1190,29 @@ pub fn rules_plan(cands: &[Candidate], o: &Options, beat: f64, bpm: f64) -> Plan
     let mut room = body_room;
     let mut last_kind = hook.kind;
     let mut last_item = hook.item;
-    while room >= 2 && (!flat.is_empty() || !vr.is_empty()) && body.len() < MAX_SHOTS {
+    // with a reference, a shot may be one beat, and when it asks for more shots than there are
+    // moments the moments come round again, other parts of them (at most three more times)
+    let min_room = if pace.is_some() { 1 } else { 2 };
+    let mut rounds = 0usize;
+    let mut windows_used: HashMap<String, Vec<(f64, f64)>> = HashMap::new();
+    let mut guard = 0usize;
+    loop {
+        guard += 1;
+        if room < min_room || body.len() >= MAX_SHOTS || guard > 16 * (good.len() + MAX_SHOTS) {
+            break;
+        }
+        if flat.is_empty() && vr.is_empty() {
+            if pace.is_none() || rounds >= 3 {
+                break;
+            }
+            rounds += 1;
+            let again = |c: &&&Candidate| !c.photo && !used_ids.contains(c.id.as_str());
+            flat = good.iter().filter(|c| c.kind != Kind::Vr).filter(again).copied().collect();
+            vr = good.iter().filter(|c| c.kind == Kind::Vr).filter(again).copied().collect();
+            if flat.is_empty() && vr.is_empty() {
+                break;
+            }
+        }
         // the other kind when it has shots left, else the one that has; the earliest first
         let pick_vr = match (flat.front(), vr.front()) {
             (Some(f), Some(v)) => {
@@ -1168,17 +1239,40 @@ pub fn rules_plan(cands: &[Candidate], o: &Options, beat: f64, bpm: f64) -> Plan
                 continue;
             }
         }
-        let base: f64 = if c.kind == Kind::Vr {
-            2.0
-        } else if c.energy >= 0.6 {
-            1.0
-        } else {
-            1.8
+        let last_cam = if c.kind == Kind::Vr { last_vr } else { None };
+        let (cam, beats) = match pace {
+            Some(t) => {
+                let x = f64::from(total.saturating_sub(room).saturating_sub(end_beats)) / f64::from(total.max(1));
+                let base = t.shot_at(x);
+                let mut cam = rules_camera(c, base, &used, last_cam, frame_aspect);
+                // a move that needs far longer than the reference's shot here gives way to a push in
+                // (or a held look), so a quick reference stays quick
+                if cam.min_seconds() > 1.5 * base {
+                    cam = [Camera::PushIn, Camera::Hold].into_iter().find(|m| c.fits(*m)).unwrap_or(cam);
+                }
+                (cam, beats_like(base.max(cam.min_seconds()), beat).min(room))
+            }
+            None => {
+                let base: f64 = if c.kind == Kind::Vr {
+                    2.0
+                } else if c.energy >= 0.6 {
+                    1.0
+                } else {
+                    1.8
+                };
+                let cam = rules_camera(c, base.max(1.2), &used, last_cam, frame_aspect);
+                (cam, beats_for(base.max(cam.min_seconds()), beat).min(room.max(2)))
+            }
         };
-        let cam = rules_camera(c, base.max(1.2), &used, if c.kind == Kind::Vr { last_vr } else { None }, frame_aspect);
-        let beats = beats_for(base.max(cam.min_seconds()), beat).min(room.max(2));
         let need = f64::from(beats) * beat * cam.speed();
-        let Some(from) = window_from(c, need) else { continue };
+        let from = match pace {
+            Some(_) => window_avoiding(c, need, windows_used.get(&c.id).map_or(&[][..], Vec::as_slice)),
+            None => window_from(c, need),
+        };
+        let Some(from) = from else { continue };
+        if pace.is_some() {
+            windows_used.entry(c.id.clone()).or_default().push((from, from + need));
+        }
         let (look, to) = match (c.kind, cam) {
             (Kind::Vr, Camera::WhipPan) => (c.looks.first().map(|l| l.id.clone()), c.second_look().map(|l| l.id.clone())),
             (Kind::Vr, _) => (c.looks.first().map(|l| l.id.clone()), None),
@@ -1340,6 +1434,47 @@ pub fn rhythm(total: u32, beat: f64, available: usize) -> Vec<Slot> {
     // more beats than moments: the body slots take them, up to their ceiling
     let mut i = 1usize;
     let mut guard = 0usize;
+    while left > 0 && guard < 4096 && out.len() > 1 {
+        if let Some(s) = out.get_mut(i)
+            && s.beats < beats_for(MAX_SHOT_SECONDS, beat)
+        {
+            s.beats += 1;
+            left -= 1;
+        }
+        i = if i + 1 >= out.len() { 1 } else { i + 1 };
+        guard += 1;
+    }
+    out.push(Slot { beats: end + left, role: Role::Ending });
+    out
+}
+
+/// The rhythm of an edit `total` beats long cut like a reference (`t`): each slot as long as the
+/// reference's shots are at that point of the video, at least a beat; never more slots than
+/// `available` moments (beats left over go to the body slots, up to their ceiling, then the
+/// ending).
+pub fn rhythm_like(total: u32, beat: f64, available: usize, t: &crate::reference::Targets) -> Vec<Slot> {
+    let total = total.max(1);
+    let hook = beats_like(t.shot_at(0.0).max(1.2), beat).min(total);
+    let mut out = vec![Slot { beats: hook, role: Role::Hook }];
+    let left = total.saturating_sub(hook);
+    if left == 0 {
+        return out;
+    }
+    let end = beats_like(t.shot_at(1.0).max(1.5), beat);
+    if left <= end || available < 2 {
+        out.push(Slot { beats: left, role: Role::Ending });
+        return out;
+    }
+    let body_end = total - end;
+    let mut used = hook;
+    let room = available.saturating_sub(2).clamp(1, MAX_SHOTS);
+    while used < body_end && out.len() - 1 < room {
+        let b = beats_like(t.shot_at(f64::from(used) / f64::from(total)), beat).min(body_end - used);
+        out.push(Slot { beats: b, role: Role::Body });
+        used += b;
+    }
+    let mut left = body_end - used;
+    let (mut i, mut guard) = (1usize, 0usize);
     while left > 0 && guard < 4096 && out.len() > 1 {
         if let Some(s) = out.get_mut(i)
             && s.beats < beats_for(MAX_SHOT_SECONDS, beat)
@@ -2075,6 +2210,10 @@ pub struct Report {
     /// The finished edit's fingerprint as recorded in the taste history (`autocut.fingerprint`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fingerprint: Option<Value>,
+    /// The reference it was cut like (`reference`): what was given and measured, the targets,
+    /// what was taken and what the video's own options kept, what came out and how far apart.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reference: Option<Value>,
     /// What the edit is about (the places or the people), and why.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub focus: Option<Value>,
@@ -2337,6 +2476,41 @@ pub async fn make(ex: &dyn Executor, p: &Value, model: Option<&dyn ChatModel>, l
     let merged = crate::taste::under(&merged, &crate::taste::director_options(&taste));
     let p = &merged;
     let mut o = Options::from_params(p)?;
+    // ---- a reference (PX6.2): its measured style becomes targets; what the video names wins
+    let reference = match p.get("reference").filter(|v| !v.is_null()) {
+        Some(v) => {
+            lines("measuring the reference");
+            Some(crate::reference::load(ex, v).await?)
+        }
+        None => None,
+    };
+    let (mut ref_applied, mut ref_kept) = (Vec::new(), Vec::new());
+    if let Some(r) = &reference {
+        if previous.is_some() {
+            ref_kept.push("the plan: a revision changes its saved plan, the reference is only compared".to_string());
+        } else {
+            if p["seconds"].is_null() && seconds_from_brief(&o.brief).is_none() {
+                o.seconds = r.targets.seconds.clamp(MIN_SECONDS, MAX_SECONDS);
+                ref_applied.push(format!("seconds: {:.1} (the reference's length)", o.seconds));
+            } else {
+                ref_kept.push(format!("seconds: {:.1}, as asked", o.seconds));
+            }
+            match (o.bpm, &o.music) {
+                (None, None) => {
+                    let bpm = r.targets.bpm();
+                    o.bpm = Some(bpm);
+                    ref_applied.push(format!("bpm: {bpm} (its beats fit the reference's quicker shots)"));
+                }
+                (Some(b), _) => ref_kept.push(format!("bpm: {b}, as asked")),
+                (None, Some(_)) => ref_kept.push("bpm: the track's own".into()),
+            }
+            o.pace = Some(r.targets.clone());
+            ref_applied.push(format!(
+                "pace: each shot as long as the reference's at that point (median {:.2} s, {:.0} cuts a minute)",
+                r.targets.median, r.targets.cuts_per_minute
+            ));
+        }
+    }
     let mut report = Report { brief: o.brief.clone(), aspect: o.aspect.clone(), seconds: o.seconds, models: json!({}), ..Report::default() };
     report.options = own;
     report.taste = (!taste.is_empty()).then(|| json!(taste));
@@ -2461,7 +2635,13 @@ pub async fn make(ex: &dyn Executor, p: &Value, model: Option<&dyn ChatModel>, l
     let bpm = o.bpm.unwrap_or(DEFAULT_BPM);
     let beat = beat_of(bpm);
     let total = ((o.seconds / beat).round() as u32).max(4);
-    let need = rhythm(total, beat, cands.len()).len() + 2;
+    // (a reference's pace: the slots it cuts to; more shots than moments use moments again
+    // rather than keeping unusable ones)
+    let slots_for = |n: usize| match &o.pace {
+        Some(t) => rhythm_like(total, beat, n, t),
+        None => rhythm(total, beat, n),
+    };
+    let need = slots_for(cands.len()).len() + 2;
     // (a revision finds its saved moments among all of them: this run may rank them otherwise)
     let measured = previous.as_ref().map(|_| cands.clone()).unwrap_or_default();
     let (mut cands, verdicts) = rank::choose(cands, need);
@@ -2480,7 +2660,7 @@ pub async fn make(ex: &dyn Executor, p: &Value, model: Option<&dyn ChatModel>, l
     // this run's)
     let remapped = previous.as_ref().map(|pr| revise::remap(pr, &mut cands, &measured));
     let short = shortlist(&cands, MAX_CANDIDATES);
-    let slots = rhythm(total, beat, cands.len());
+    let slots = slots_for(cands.len());
     report.candidates = short.iter().map(|c| candidate_json(c)).collect();
     let mut plan = None;
     if let (Some(pr), Some((mut revised, lost))) = (&previous, remapped) {
@@ -2627,6 +2807,10 @@ pub async fn make(ex: &dyn Executor, p: &Value, model: Option<&dyn ChatModel>, l
         let wins = windows(&plan, &Beats::grid(bpm));
         report.steps = compile(&plan, &cands, &wins, &o, frame, beat);
         report.commands = report.steps.len();
+        if let Some(r) = &reference {
+            let achieved = crate::reference::achieved(ex, None, &shot_spans(&wins), wins.last().map_or(0.0, |w| w.1)).await;
+            report.reference = Some(crate::reference::report(r, &ref_applied, &ref_kept, &achieved));
+        }
         report.plan = Some(plan);
         report.warnings = notes;
         return Ok(finish_json(&report, "Director: planned (dry run)"));
@@ -2806,6 +2990,12 @@ pub async fn make(ex: &dyn Executor, p: &Value, model: Option<&dyn ChatModel>, l
             Err(e) => notes.push(format!("safe zones: {e}")),
         }
     }
+    // ---- the reference: the edit measured as the reference was, and how close it came
+    if let Some(r) = &reference {
+        lines("measuring the edit against the reference");
+        let achieved = crate::reference::achieved(ex, Some(seq), &shot_spans(&wins), wins.last().map_or(0.0, |w| w.1)).await;
+        report.reference = Some(crate::reference::report(r, &ref_applied, &ref_kept, &achieved));
+    }
     report.plan = Some(plan);
     // ---- taste memory: the finished edit's fingerprint, so the next video can differ
     if guided {
@@ -2853,6 +3043,11 @@ fn finish_json(report: &Report, status: &str) -> Value {
     let mut out = serde_json::to_value(report).unwrap_or_else(|_| json!({}));
     out["status"] = json!(status);
     out
+}
+
+/// The shots of an edit laid on its beats (`windows`) as (start, seconds).
+fn shot_spans(wins: &[(f64, f64)]) -> Vec<(f64, f64)> {
+    wins.iter().map(|w| (w.0, (w.1 - w.0).max(0.0))).collect()
 }
 
 /// The film events of a directed edit on the music's beats (`wins`, as [`windows`] gives them):

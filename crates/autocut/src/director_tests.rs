@@ -1267,3 +1267,83 @@ async fn a_directed_edit_fits_the_users_track() {
     assert!((a3[0].end() - end).abs().seconds() < 0.6, "music to {:.2} s, picture to {:.2} s", a3[0].end().seconds(), end.seconds());
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A reference made in code: a 320×180 sequence of the demo project's clips cut every `secs`
+/// seconds for `total` seconds (no two night scenes side by side, which the cut measure cannot
+/// tell apart); its id.
+fn reference_edit(ex: &crate::SessionExecutor, secs: f64, total: f64) -> u64 {
+    let mut s = ex.0.lock().unwrap();
+    let main = s.active_sequence().unwrap().video_tracks[0].items.iter().map(|c| c.item.0).collect::<Vec<_>>();
+    s.execute("file.newSequence", json!({"name": format!("reference {secs}"), "width": 320, "height": 180, "fps": 30, "video": 1, "audio": 1})).unwrap();
+    let order = [0usize, 1, 3, 2, 4, 5];
+    let rate = filmcraft_time::FrameRate::FPS_30;
+    let n = (total / secs).round() as usize;
+    let len = rate.tick_of((secs * 30.0).round() as i64).0;
+    for k in 0..n {
+        let item = main[order[k % order.len()]];
+        let from = rate.tick_of(30 * (k / 6) as i64).0;
+        s.execute("timeline.place", json!({"item": item, "track": "V1", "time": len * k as i64, "duration": len, "sourceIn": from, "audio": false})).unwrap();
+    }
+    s.state.active_sequence.unwrap().0
+}
+
+/// PX6.2: a reference that cuts fast makes the director cut faster than a slow one does, on the
+/// same footage and length; what the video names (the length, the tempo) wins over the reference;
+/// without a reference nothing changes.
+#[tokio::test]
+async fn a_fast_reference_cuts_faster_than_a_slow_one() {
+    let ex = demo_session();
+    let fast = reference_edit(&ex, 0.5, 12.0);
+    let slow = reference_edit(&ex, 4.0, 12.0);
+    let mut lines = |_: &str| {};
+    let p = |reference: Value| json!({"seconds": 12, "dryRun": true, "captions": false, "guidance": false, "reference": reference});
+    let a = make(&ex, &p(json!(fast)), None, &mut lines).await.unwrap();
+    let b = make(&ex, &p(json!(slow)), None, &mut lines).await.unwrap();
+    let shots = |r: &Value| r["plan"]["shots"].as_array().unwrap().len();
+    let median = |r: &Value| r["reference"]["achieved"]["timeline"]["shot"]["median"].as_f64().unwrap();
+    assert!(shots(&a) > 2 * shots(&b), "fast {} shots, slow {}", shots(&a), shots(&b));
+    assert!(median(&a) < median(&b) / 2.0, "fast {} s, slow {} s", median(&a), median(&b));
+    // the reference was measured and its targets kept
+    let r = &a["reference"];
+    assert!((r["measured"]["shot"]["median"].as_f64().unwrap() - 0.5).abs() < 0.11, "{:#}", r["measured"]);
+    assert_eq!(r["achieved"]["from"], "plan", "a dry run is compared from its plan");
+    assert!(r["kept"].as_array().unwrap().iter().any(|k| k.as_str().unwrap().starts_with("seconds: 12")), "{:#}", r["kept"]);
+    assert!(r["applied"].as_array().unwrap().iter().any(|k| k.as_str().unwrap().starts_with("bpm")), "{:#}", r["applied"]);
+    // each comes nearer its own reference than the other's
+    let own = r["distance"]["overall"].as_f64().unwrap();
+    let crossed = crate::reference::distance(&b["reference"]["measured"], &a["reference"]["achieved"]["timeline"])["overall"].as_f64().unwrap();
+    assert!(own < crossed, "{own} against {crossed}");
+    // the video's own tempo wins, and without a length the reference's is taken
+    let asked = make(&ex, &json!({"dryRun": true, "captions": false, "guidance": false, "bpm": 90, "reference": fast}), None, &mut lines).await.unwrap();
+    assert_eq!(asked["plan"]["bpm"], 90.0);
+    assert!(asked["reference"]["kept"].as_array().unwrap().iter().any(|k| k == "bpm: 90, as asked"), "{:#}", asked["reference"]);
+    assert!(asked["reference"]["applied"].as_array().unwrap().iter().any(|k| k.as_str().unwrap().starts_with("seconds: 12.0")), "{:#}", asked["reference"]);
+    // a stored fingerprint works as well as the video it came from
+    let stored = make(&ex, &p(json!({"fingerprint": a["reference"]["measured"]})), None, &mut lines).await.unwrap();
+    assert_eq!(stored["plan"], a["plan"]);
+    // no reference: the plan of before, and no reference in the report
+    let plain = make(&ex, &json!({"seconds": 12, "dryRun": true, "captions": false, "guidance": false}), None, &mut lines).await.unwrap();
+    let null = make(&ex, &p(Value::Null), None, &mut lines).await.unwrap();
+    assert_eq!(plain["plan"], null["plan"]);
+    assert!(plain.get("reference").is_none());
+    // a reference that cannot be measured is an error, not a silent default
+    for bad in [json!(987_654), json!("/no/such/reference.mp4"), json!({"fingerprint": {"version": 1}})] {
+        assert!(make(&ex, &p(bad.clone()), None, &mut lines).await.is_err(), "{bad}");
+    }
+}
+
+/// PX6.2: a built edit is measured as its reference was, and the report says how close it came.
+#[tokio::test]
+async fn a_built_edit_is_measured_against_its_reference() {
+    let ex = demo_session();
+    let fast = reference_edit(&ex, 0.5, 8.0);
+    let mut lines = |_: &str| {};
+    let r = make(&ex, &json!({"seconds": 8, "captions": false, "guidance": false, "color": false, "reference": fast}), None, &mut lines).await.unwrap();
+    let reference = &r["reference"];
+    assert_eq!(reference["achieved"]["from"], "render", "{:#}", reference["achieved"]);
+    let fp = &reference["achieved"]["fingerprint"];
+    assert!(fp["cutsPerMinute"].as_f64().unwrap() > 30.0, "{fp:#}");
+    let d = reference["distance"]["overall"].as_f64().unwrap();
+    assert!((0.0..=1.0).contains(&d), "{:#}", reference["distance"]);
+    assert!(reference["distance"]["parts"]["energy"].is_number(), "a render has an energy curve to compare");
+}

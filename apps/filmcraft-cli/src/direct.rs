@@ -16,8 +16,21 @@ direct [folder | files… | project.fcproj] [--brief \"a 30 s reel of our trip\"
        [--sound-level 0.4] [--no-color] [--color-strength 0.7] [--no-cutouts] [--no-denoise] [--no-depth] [--no-upscale] [--no-smooth]
        [--look none|punchy|soft|warm|cool|golden|teal] [--look-strength 25]
        [--revise \"1:10 is too long; warmer at the end\" --from out.report.json]
+       [--reference liked.mp4|ITEM]
        [--dry-run] [--no-qa] [--export out.mp4] [--download]
        [--save | --save-as p.fcproj]";
+
+/// `--reference`: a media item or sequence id of the project, else a video file (made absolute).
+pub fn reference(r: &str) -> Result<Value, String> {
+    let r = r.trim();
+    if r.is_empty() {
+        return Err("--reference wants a video file or an item id".into());
+    }
+    Ok(match r.parse::<u64>() {
+        Ok(id) => json!(id),
+        Err(_) => json!(absolute(r)),
+    })
+}
 
 /// `direct`'s options as `autocut.direct` parameters (with `wait: true`); a usage error says
 /// what is wrong.
@@ -84,6 +97,9 @@ pub fn params(a: &Args) -> Result<Value, String> {
     if let Some(f) = a.opt("--from") {
         p["previous"] = json!(absolute(f));
     }
+    if let Some(r) = a.opt("--reference") {
+        p["reference"] = reference(r)?;
+    }
     if p.get("revise").is_some() != p.get("previous").is_some() {
         return Err("--revise takes the notes and --from the report of the edit they are about".into());
     }
@@ -145,6 +161,7 @@ pub async fn run(a: &Args) {
         "--look-strength",
         "--revise",
         "--from",
+        "--reference",
         "--dry-run",
         "--no-qa",
         "--export",
@@ -297,6 +314,11 @@ mod tests {
         let p = params(&args(&["direct", "--revise", "warmer at the end", "--from", "/tmp/r.report.json"])).unwrap();
         assert_eq!((p["revise"].as_str(), p["previous"].as_str()), (Some("warmer at the end"), Some("/tmp/r.report.json")));
         assert!(params(&args(&["direct", "--revise", "warmer"])).is_err());
+        // a reference: an item of the project, else a file
+        assert_eq!(params(&args(&["direct", "x", "--reference", "12"])).unwrap()["reference"], json!(12));
+        let p = params(&args(&["direct", "x", "--reference", "/tmp/liked.mp4"])).unwrap();
+        assert_eq!(p["reference"], json!("/tmp/liked.mp4"));
+        assert!(params(&args(&["direct", "x", "--reference", " "])).is_err());
         // the colour pass
         let p = params(&args(&["direct", "x", "--no-color", "--look", "warm", "--look-strength", "20", "--color-strength", "0.5"])).unwrap();
         assert_eq!(

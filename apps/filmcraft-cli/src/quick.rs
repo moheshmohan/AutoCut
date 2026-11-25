@@ -11,7 +11,8 @@ quick <folder | files… | project.fcproj> [--template auto|ID] [--aspect 9:16|1
       [--platform reels|shorts|tiktok|vertical] [--seconds 30] [--topic T] [--language en|ml]
       [--look tech|vhs|clean] [--music file|generate] [--redact faces,plates|faces|plates|off]
       [--caption-style bold|clean|glow|box|karaoke|twoLine|plain] [--name N] [--full-detail 12]
-      [--no-qa] [--export out.mp4] [--download] [--save | --save-as p.fcproj]";
+      [--reference liked.mp4|ITEM] [--no-qa] [--export out.mp4] [--download]
+      [--save | --save-as p.fcproj]";
 
 /// `quick`'s options as `autocut.quick` parameters (with `wait: true`); a usage error says what
 /// is wrong. `sources` are the positional files, folders or one project.
@@ -46,6 +47,9 @@ pub fn params(a: &Args) -> Result<Value, String> {
     if let Some(e) = a.opt("--export") {
         p["export"] = json!(absolute(e));
     }
+    if let Some(r) = a.opt("--reference") {
+        p["reference"] = crate::direct::reference(r)?;
+    }
     if a.flag("--no-qa") {
         p["qa"] = json!(false);
     }
@@ -75,6 +79,7 @@ pub async fn run(a: &Args) {
         "--caption-style",
         "--name",
         "--full-detail",
+        "--reference",
         "--no-qa",
         "--export",
         "--download",
@@ -191,11 +196,13 @@ mod tests {
         assert_eq!((p["aspect"].as_str(), p["seconds"].as_f64(), p["look"].as_str()), (Some("1:1"), Some(20.0), Some("vhs")));
         assert_eq!((p["music"].as_str(), p["redact"].as_str(), p["fullDetail"].as_u64()), (Some("generate"), Some("off"), Some(4)));
         assert_eq!((p["qa"].as_bool(), p["download"].as_bool(), p["wait"].as_bool()), (Some(false), Some(true), Some(true)));
+        assert_eq!(params(&args(&["quick", "x", "--reference", "7"])).unwrap()["reference"], json!(7));
         for bad in [
             &["quick", "x", "--seconds", "0"][..],
             &["quick", "x", "--seconds", "NaN"],
             &["quick", "x", "--full-detail", "999"],
             &["quick", "x", "--look", "sparkly"],
+            &["quick", "x", "--reference", ""],
         ] {
             assert!(params(&args(bad)).is_err(), "{bad:?}");
         }

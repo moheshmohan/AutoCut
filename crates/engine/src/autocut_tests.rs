@@ -673,3 +673,29 @@ fn taste_memory_parameters_are_checked() {
         assert!(r.is_ok_and(|r| r.is_err()), "{id} {bad} was accepted");
     }
 }
+
+/// `reference` (PX6.2): an item id, a file or a fingerprint, checked before a job starts; a Quick
+/// Short with a reference and no length leaves the length to it, without one it is 30 s as before.
+#[test]
+fn a_reference_is_checked_and_handed_on() {
+    let (mut s, _fake) = session(Fake::default());
+    for id in ["autocut.direct", "autocut.quick"] {
+        for good in [json!(7), json!(" /clips/liked.mp4 "), json!({"fingerprint": {"version": 1}})] {
+            let r = s.execute(id, json!({"reference": good, "wait": true})).unwrap();
+            let p = &r["showcase"]["params"];
+            assert!(!p["reference"].is_null(), "{id} {good}: {p}");
+        }
+        for bad in [json!(-1), json!(1.5), json!(""), json!("   "), json!("a\nb"), json!([1]), json!(true), json!({"pad": "x".repeat(20_000)})] {
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| s.execute(id, json!({"reference": bad}))));
+            assert!(r.is_ok_and(|r| r.is_err()), "{id} {bad} was accepted");
+        }
+    }
+    let r = s.execute("autocut.quick", json!({"reference": 7, "wait": true})).unwrap();
+    assert!(r["showcase"]["params"]["seconds"].is_null(), "the reference's length: {}", r["showcase"]["params"]);
+    assert_eq!(r["showcase"]["params"]["reference"], 7);
+    let r = s.execute("autocut.quick", json!({"wait": true})).unwrap();
+    assert_eq!(r["showcase"]["params"]["seconds"], 30.0, "no reference: as before");
+    assert!(r["showcase"]["params"].get("reference").is_none());
+    let r = s.execute("autocut.direct", json!({"reference": "/clips/liked.mp4", "wait": true})).unwrap();
+    assert_eq!(r["showcase"]["params"]["reference"], "/clips/liked.mp4");
+}

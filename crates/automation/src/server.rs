@@ -961,6 +961,12 @@ pub struct DirectParams {
     /// The report of the edit to revise (`<out>.report.json` of the earlier export).
     #[serde(default)]
     pub previous: Option<String>,
+    /// Cut it like this video: a media item or sequence id, a video file, or a fingerprint that
+    /// `media.measureStyle` gave. Its shot lengths over time, cut rate, bursts and energy become
+    /// the targets, its length and a fitting tempo unless `seconds` and `bpm` are given; the
+    /// report's `reference` gives the targets, what came out and how far apart (`distance`).
+    #[serde(default)]
+    pub reference: Option<Value>,
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
@@ -1011,6 +1017,12 @@ pub struct QuickShortParams {
     /// (several GB; `scenes.status`, `transcript.models` list them).
     #[serde(default)]
     pub download: Option<bool>,
+    /// Make it like this video: a media item or sequence id, a video file, or a fingerprint that
+    /// `media.measureStyle` gave. The template whose shots are nearest its own is chosen (unless
+    /// `template` names one) and its length taken unless `seconds` is given; the report's
+    /// `reference` says how close it came.
+    #[serde(default)]
+    pub reference: Option<Value>,
 }
 
 /// `autocut.quick` params for a `quick_short` call (a long job).
@@ -1035,6 +1047,7 @@ fn quick_short_params(p: QuickShortParams) -> Value {
     put("name", p.name.map(Value::String));
     put("export", p.export.map(Value::String));
     put("download", p.download.map(Value::Bool));
+    put("reference", p.reference.filter(|v| !v.is_null()));
     params
 }
 
@@ -1075,6 +1088,7 @@ fn direct_params(p: DirectParams) -> Value {
     put("lookStrength", p.look_strength.map(|v| json!(v)));
     put("revise", p.revise.map(Value::String));
     put("previous", p.previous.map(Value::String));
+    put("reference", p.reference.filter(|v| !v.is_null()));
     params
 }
 

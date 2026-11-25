@@ -1160,3 +1160,32 @@ fn consecutive_shorts_are_dealt_different_looks() {
     let plain = rt.block_on(make(&ex, &json!({"items": movies, "seconds": 12, "topic": "a sunny day", "guidance": false}), None, &mut |_| {})).unwrap();
     assert!(plain["deals"].is_null() && plain["fingerprint"].is_null(), "{plain}");
 }
+
+/// PX6.2: a short made like a reference (a fingerprint kept from an earlier measure) takes its
+/// length, picks its template by the reference's shots, is measured as built and reports how
+/// close it came; a length or template asked for wins.
+#[test]
+fn a_short_is_made_like_a_reference() {
+    let (s, movies) = clips_session(4);
+    let ex = SessionExecutor::from(s);
+    let fingerprint = json!({
+        "version": 1, "seconds": 14.0, "cutsPerMinute": 90.0,
+        "shot": {"median": 0.7, "p25": 0.5, "p75": 1.0, "cv": 0.4},
+        "bursts": {"perMinute": 0.0, "share": 0.0, "at": []},
+        "pace": vec![0.7; 16], "energy": vec![0.5; 16], "loudness": null,
+    });
+    let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
+    let p = json!({"items": movies, "topic": "robots", "redact": false, "guidance": false, "reference": {"fingerprint": fingerprint}});
+    let out = rt.block_on(make(&ex, &p, None, &mut |_| {})).unwrap();
+    let r = &out["reference"];
+    assert!(r["applied"].as_array().unwrap().iter().any(|a| a.as_str().unwrap().starts_with("seconds: 14.0")), "{r:#}");
+    assert!(out["template"]["chosen"]["reasons"].as_array().unwrap().iter().any(|x| x.as_str().unwrap().contains("the reference")), "{:#}", out["template"]);
+    assert_eq!(r["achieved"]["from"], "render", "{:#}", r["achieved"]);
+    assert!(r["distance"]["overall"].as_f64().is_some_and(|d| (0.0..=1.0).contains(&d)), "{:#}", r["distance"]);
+    // asked for wins
+    let asked = json!({"items": movies, "topic": "robots", "redact": false, "guidance": false, "seconds": 20, "template": "builtin:tech-reveal", "reference": {"fingerprint": fingerprint}});
+    let out = rt.block_on(make(&ex, &asked, None, &mut |_| {})).unwrap();
+    assert_eq!(out["template"]["chosen"]["id"], "builtin:tech-reveal");
+    let kept: Vec<&str> = out["reference"]["kept"].as_array().unwrap().iter().filter_map(Value::as_str).collect();
+    assert!(kept.iter().any(|k| k.starts_with("seconds: 20")) && kept.iter().any(|k| k.starts_with("template")), "{kept:?}");
+}

@@ -833,6 +833,51 @@ fn energy_words(e: f64) -> &'static str {
     }
 }
 
+/// How long the shots of template `t` hold when it is brought to `target` seconds (each picture
+/// media's first placement; a beat template's at the tempo [`tempo`] gives), seconds.
+pub fn template_shots(t: &TemplateInfo, target: f64) -> Vec<f64> {
+    let factor = match (t.bpm, tempo(t, target)) {
+        (Some(bpm), Some(tp)) if tp.bpm > 0.0 => bpm / tp.bpm,
+        _ => 1.0,
+    };
+    let mut out = Vec::new();
+    for s in t.slots.iter().filter(|s| s.picture()) {
+        let mut seen = BTreeSet::new();
+        for p in s.placements.iter().filter(|p| p.seconds > 0.0) {
+            if seen.insert(p.media) {
+                out.push(p.seconds * factor);
+            }
+        }
+    }
+    out
+}
+
+/// [`score_template`], with how near its shot lengths are to a reference's (`like`, PX6.2):
+/// +0.5 at the reference's median, −0.5 at three times or a third of it.
+pub fn score_template_like(t: &TemplateInfo, f: &Facts, target: f64, like: Option<&crate::reference::Targets>) -> Scored {
+    let mut s = score_template(t, f, target);
+    let Some(r) = like else { return s };
+    let mut shots = template_shots(t, target);
+    shots.retain(|x| x.is_finite() && *x > 0.0);
+    shots.sort_by(f64::total_cmp);
+    match shots.get(shots.len() / 2).copied() {
+        Some(m) if r.median > 0.0 => {
+            let off = ((m / r.median).ln().abs() / 3f64.ln()).min(1.0);
+            s.score = ((s.score + 1.0 - off - 0.5) * 1000.0).round() / 1000.0;
+            let how = if off <= 0.25 {
+                "cuts like the reference"
+            } else if m > r.median {
+                "cuts slower than the reference"
+            } else {
+                "cuts faster than the reference"
+            };
+            s.reasons.push(format!("{how}: shots of {m:.1} s against its {:.1} s", r.median));
+        }
+        _ => s.reasons.push("its shot lengths are not known: not compared with the reference".into()),
+    }
+    s
+}
+
 /// The template choice: the best and the runners-up.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Choice {
@@ -844,11 +889,22 @@ pub struct Choice {
 /// Choose among `templates` the best for `f` in layout `aspect` (the AI-ready ones when any has
 /// the layout; templates without it are left out).
 pub fn choose_template(templates: &[TemplateInfo], f: &Facts, aspect: &str, target: f64) -> Result<Choice, AutoCutError> {
+    choose_template_like(templates, f, aspect, target, None)
+}
+
+/// [`choose_template`], the shots of each weighed against a reference's (`like`).
+pub fn choose_template_like(
+    templates: &[TemplateInfo],
+    f: &Facts,
+    aspect: &str,
+    target: f64,
+    like: Option<&crate::reference::Targets>,
+) -> Result<Choice, AutoCutError> {
     let fits: Vec<&TemplateInfo> = templates.iter().filter(|t| t.aspects.iter().any(|a| a == aspect) && t.needs() > 0).collect();
     if fits.is_empty() {
         return Err(invalid(format!("no template has a {aspect} layout")));
     }
-    let mut scored: Vec<Scored> = fits.iter().map(|t| score_template(t, f, target)).collect();
+    let mut scored: Vec<Scored> = fits.iter().map(|t| score_template_like(t, f, target, like)).collect();
     scored.sort_by(|a, b| b.score.total_cmp(&a.score).then(a.id.cmp(&b.id)));
     let chosen = scored.first().cloned().ok_or_else(|| invalid("no template"))?;
     let others = scored.into_iter().skip(1).take(4).collect();
@@ -1452,6 +1508,10 @@ pub struct Report {
     /// The short's fingerprint as recorded in the taste history (`autocut.fingerprint`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fingerprint: Option<Value>,
+    /// The reference it was made like (`reference`): what was given and measured, the targets,
+    /// what was taken and what the short's own options kept, what came out and how far apart.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reference: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub privacy: Option<Value>,
     /// How the shots were kept apart and how long they hold: the moments that looked alike and
@@ -1780,6 +1840,28 @@ pub async fn make(ex: &dyn Executor, p: &Value, writer: Option<&dyn ChatModel>, 
         opts.caption_style = crate::taste::first_kept(&taste, "captionStyle", &CAPTION_STYLES).to_string();
     }
     opts.taste = taste.clone();
+    // ---- a reference (PX6.2): the template that cuts most like it, and its length unless asked
+    let reference = match p.get("reference").filter(|v| !v.is_null()) {
+        Some(v) => {
+            lines("measuring the reference");
+            Some(crate::reference::load(ex, v).await?)
+        }
+        None => None,
+    };
+    let (mut ref_applied, mut ref_kept) = (Vec::new(), Vec::new());
+    if let Some(r) = &reference {
+        if p["seconds"].is_null() {
+            opts.seconds = r.targets.seconds.clamp(5.0, 180.0);
+            ref_applied.push(format!("seconds: {:.1} (the reference's length)", opts.seconds));
+        } else {
+            ref_kept.push(format!("seconds: {:.1}, as asked", opts.seconds));
+        }
+        if opts.template.is_some() {
+            ref_kept.push("template: as asked (the reference is only compared)".into());
+        } else {
+            ref_applied.push(format!("template: the one whose shots are nearest the reference's (median {:.2} s)", r.targets.median));
+        }
+    }
     let mut report = Report { seconds: opts.seconds, ..Report::default() };
     let mut notes: Vec<String> = Vec::new();
     if opts.download {
@@ -1929,7 +2011,7 @@ pub async fn make(ex: &dyn Executor, p: &Value, writer: Option<&dyn ChatModel>, 
     let mut templates: Vec<TemplateInfo> = list["templates"].as_array().map(Vec::as_slice).unwrap_or_default().iter().filter_map(parse_template).collect();
     if opts.template.is_none() {
         // how long each shot of a beat template would hold at the tempo asked: their placements
-        for t in templates.iter_mut().filter(|t| t.bpm.is_some() && t.aspects.contains(&opts.aspect)).take(32) {
+        for t in templates.iter_mut().filter(|t| (t.bpm.is_some() || reference.is_some()) && t.aspects.contains(&opts.aspect)).take(32) {
             if let Ok(v) = run(ex, "template.inspect", json!({"template": t.id})).await
                 && let Some(full) = parse_template(&v)
             {
@@ -1944,11 +2026,11 @@ pub async fn make(ex: &dyn Executor, p: &Value, writer: Option<&dyn ChatModel>, 
             if !info.aspects.contains(&opts.aspect) {
                 return Err(invalid(format!("{} has no {} layout (it has {})", info.name, opts.aspect, info.aspects.join(", "))));
             }
-            let mut s = score_template(&info, &report.facts, opts.seconds);
+            let mut s = score_template_like(&info, &report.facts, opts.seconds, reference.as_ref().map(|r| &r.targets));
             s.reasons.insert(0, "asked for".into());
             Choice { chosen: s, auto: false, others: Vec::new() }
         }
-        None => choose_template(&templates, &report.facts, &opts.aspect, opts.seconds)?,
+        None => choose_template_like(&templates, &report.facts, &opts.aspect, opts.seconds, reference.as_ref().map(|r| &r.targets))?,
     };
     let chosen_id = choice.chosen.id.clone();
     lines(&format!("[4/8] {} — {}", choice.chosen.name, choice.chosen.reasons.join("; ")));
@@ -2162,6 +2244,11 @@ pub async fn make(ex: &dyn Executor, p: &Value, writer: Option<&dyn ChatModel>, 
     // ---- 8. finish
     lines("[8/8] finishing");
     finish(ex, &opts, &t, &applied, seq, &picks, bed.as_ref(), &mut report, &mut notes, lines).await;
+    if let Some(r) = &reference {
+        lines("measuring the short against the reference");
+        let achieved = crate::reference::achieved(ex, Some(seq), &picture_spans(&t, &applied), report.seconds).await;
+        report.reference = Some(crate::reference::report(r, &ref_applied, &ref_kept, &achieved));
+    }
     report.warnings.extend(notes);
     if let Some(path) = report.export.clone() {
         let file = crate::trailer::beside(&path, "report.json");
@@ -2180,6 +2267,30 @@ pub async fn make(ex: &dyn Executor, p: &Value, writer: Option<&dyn ChatModel>, 
     let mut out = serde_json::to_value(&report).unwrap_or_else(|_| json!({}));
     out["status"] = json!(status);
     Ok(out)
+}
+
+/// The picture shots of an applied template as (start, seconds), one after the other (a layer
+/// over another, a blurred copy behind it, is left out).
+fn picture_spans(t: &TemplateInfo, applied: &Value) -> Vec<(f64, f64)> {
+    let tps = TICKS_PER_SECOND as f64;
+    let mut spans: Vec<(f64, f64)> = applied["slots"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or_default()
+        .iter()
+        .take(4096)
+        .filter(|x| x["slot"].as_str().is_some_and(|id| t.slots.iter().any(|s| s.id == id && s.picture())))
+        .filter_map(|x| Some((x["start"].as_i64()? as f64 / tps, x["duration"].as_i64()? as f64 / tps)))
+        .filter(|(a, d)| a.is_finite() && d.is_finite() && *d > 0.0)
+        .collect();
+    spans.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let mut out: Vec<(f64, f64)> = Vec::new();
+    for s in spans {
+        if out.last().is_none_or(|l| s.0 >= l.0 + l.1 - 0.02) {
+            out.push(s);
+        }
+    }
+    out
 }
 
 /// The mood and genre the template's music slot generates with (`default.generate`).
