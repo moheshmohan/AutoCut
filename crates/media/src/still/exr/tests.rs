@@ -318,8 +318,63 @@ fn unsupported_files_say_why() {
     assert!(matches!(decode("d.exr", &dwab), Err(MediaError::Unsupported(m)) if m.contains("DWAB")));
     let ry = exr_file(&[("BY", 1), ("RY", 1), ("Y", 1)], [0, 0, 1, 1], [0, 0, 1, 1], 0, pattern);
     assert!(matches!(decode("c.exr", &ry), Err(MediaError::Unsupported(_))));
-    let depth = exr_file(&[("Z", 2)], [0, 0, 1, 1], [0, 0, 1, 1], 0, pattern);
-    assert!(matches!(decode("z.exr", &depth), Err(MediaError::Unsupported(m)) if m.contains("no R, G, B or Y")));
+    // alpha and depth make no picture (a lone depth channel does: see below)
+    let data = exr_file(&[("A", 1), ("Z", 2)], [0, 0, 1, 1], [0, 0, 1, 1], 0, pattern);
+    assert!(matches!(decode("z.exr", &data), Err(MediaError::Unsupported(m)) if m.contains("no R, G, B or Y")));
+}
+
+/// A renderer's multilayer file names every channel by its layer (`ViewLayer.Combined.R`): it has
+/// no main picture and was refused ("no R, G, B or Y channel"); its richest colour layer shows.
+#[test]
+fn a_file_of_named_layers_shows_its_richest_colour_layer() {
+    let chans: &[Chan] = &[
+        ("ViewLayer.AO.B", 1),
+        ("ViewLayer.AO.G", 1),
+        ("ViewLayer.AO.R", 1),
+        ("ViewLayer.Combined.A", 1),
+        ("ViewLayer.Combined.B", 1),
+        ("ViewLayer.Combined.G", 1),
+        ("ViewLayer.Combined.R", 1),
+        ("ViewLayer.Depth.Z", 2),
+    ];
+    // AO is 9 everywhere; Combined is (0.25, 0.5, 2, alpha 0.5)
+    let value = |c: usize, _: i32, _: i32| [9.0, 9.0, 9.0, 0.5, 2.0, 0.5, 0.25, 100.0][c];
+    let f = exr_file(chans, [0, 0, 2, 1], [0, 0, 2, 1], 3, value);
+    let d = decode("multilayer.exr", &f).unwrap();
+    assert_eq!(d.pixel_format, "RGBA 16-bit float, layer ViewLayer.Combined");
+    assert!(d.has_alpha);
+    assert!(floats(&d).as_chunks::<4>().0.iter().all(|p| p == &[0.25, 0.5, 2.0, 0.5]));
+}
+
+/// The unprefixed colour is the main picture even beside a richer named layer; alpha is never
+/// taken from another layer.
+#[test]
+fn the_main_picture_wins_and_layers_are_not_mixed() {
+    let chans: &[Chan] = &[("B", 1), ("G", 1), ("R", 1), ("beauty.A", 1), ("beauty.B", 1), ("beauty.G", 1), ("beauty.R", 1)];
+    let f = exr_file(chans, [0, 0, 1, 0], [0, 0, 1, 0], 0, |c, _, _| [1.0, 2.0, 3.0, 0.5, 5.0, 6.0, 7.0][c]);
+    let d = decode("main.exr", &f).unwrap();
+    assert_eq!((d.pixel_format.as_str(), d.has_alpha), ("RGB 16-bit float", false));
+    assert_eq!(&floats(&d)[..4], &[3.0, 2.0, 1.0, 1.0]);
+    // bare alpha beside a named colour layer: the layer's colour, opaque
+    let chans: &[Chan] = &[("A", 1), ("diffuse.B", 1), ("diffuse.G", 1), ("diffuse.R", 1)];
+    let f = exr_file(chans, [0, 0, 1, 0], [0, 0, 1, 0], 0, |c, _, _| [0.5, 1.0, 2.0, 4.0][c]);
+    let d = decode("diffuse.exr", &f).unwrap();
+    assert_eq!((d.pixel_format.as_str(), d.has_alpha), ("RGB 16-bit float, layer diffuse", false));
+    assert_eq!(&floats(&d)[..4], &[4.0, 2.0, 1.0, 1.0]);
+}
+
+/// A file of one channel (a depth or mask pass) was refused; it shows grey, and Y with alpha is
+/// luminance with alpha.
+#[test]
+fn a_lone_channel_is_grey_and_luminance_keeps_its_alpha() {
+    let f = exr_file(&[("Z", 2)], [0, 0, 1, 0], [0, 0, 1, 0], 0, |_, x, _| 10.0 + x as f32);
+    let d = decode("z.exr", &f).unwrap();
+    assert_eq!(d.pixel_format, "Y 32-bit float");
+    assert_eq!(floats(&d), &[10.0, 10.0, 10.0, 1.0, 11.0, 11.0, 11.0, 1.0]);
+    let f = exr_file(&[("A", 1), ("Y", 1)], [0, 0, 0, 0], [0, 0, 0, 0], 0, |c, _, _| [0.5, 2.0][c]);
+    let d = decode("ya.exr", &f).unwrap();
+    assert_eq!((d.pixel_format.as_str(), d.has_alpha), ("YA 16-bit float", true));
+    assert_eq!(floats(&d), &[2.0, 2.0, 2.0, 0.5]);
 }
 
 #[test]

@@ -930,3 +930,7 @@ Still-image improvements from upstream craft-libs, ported into AutoCut's own cra
 - **AV117**: MXF files with an RGBA picture descriptor (CinemaDNG in MXF) report their real
   component depth and reference levels (16-bit, 0–65535) instead of the Y'CbCr fields they do
   not have.
+- **AV118**: OpenEXR files show their main picture the way compositing apps do (the unprefixed
+  R, G, B and A); a renderer's multilayer file of named layers only (`ViewLayer.Combined.R`) now
+  opens on its richest colour layer instead of being refused, and a one-channel file (a depth or
+  mask pass) opens grey. The media info names the layer shown.

@@ -1,16 +1,22 @@
 //! OpenEXR stills (and the frames of EXR image sequences), read from the public OpenEXR file layout:
 //! single-part scan-line files with no, RLE, ZIPS (one line per chunk), ZIP or PXR24 (16 lines)
 //! compression,
-//! half, float or uint channels. R, G, B and A become the frame's channels (missing colour channels
-//! are 0, missing alpha is opaque); a luminance-only file (Y) is shown grey. EXR values are
-//! scene-linear with premultiplied alpha, which is exactly the compositor's working format, so the
-//! frame keeps them as 32-bit floats (values above 1.0 survive into effects and colour work).
+//! half, float or uint channels. The picture shown is the file's main picture, as compositing
+//! applications show it: the unprefixed R, G, B (and A), else the unprefixed Y (and A), shown
+//! grey. A file of named layers only (`ViewLayer.Combined.R`) shows its richest colour layer, and
+//! a file of one channel (a depth map) shows it grey ([`channels`]). Missing alpha is opaque. EXR
+//! values are scene-linear with premultiplied alpha, which is exactly the compositor's working
+//! format, so the frame keeps them as 32-bit floats (values above 1.0 survive into effects and
+//! colour work).
 //!
 //! The display window is the frame; pixels of the data window outside it are cut, and the parts of
 //! it the data window does not cover are transparent. Tiled, deep and multi-part files, chroma
 //! subsampled channels and the PIZ, B44 and DWA compressions are refused with a clear error.
 
+mod channels;
 mod inflate;
+
+use channels::ColorLayout;
 
 use std::sync::Arc;
 
@@ -391,29 +397,27 @@ pub fn decode(name: &str, b: &[u8]) -> Result<Decoded> {
     let (Ok(fw32), Ok(fh32)) = (u32::try_from(fw), u32::try_from(fh)) else {
         return Err(bad("display window size".into()));
     };
-    // channel → frame component
-    let has = |n: &str| h.channels.iter().any(|c| c.name == n);
-    if has("RY") || has("BY") {
+    // channel → frame component: the main picture, else the richest colour layer
+    let names: Vec<&str> = h.channels.iter().map(|c| c.name.as_str()).collect();
+    let (_, picture) =
+        channels::shown_picture([names.iter().copied()]).ok_or_else(|| MediaError::Unsupported(format!("{name}: EXR has no R, G, B or Y channel")))?;
+    let luminance = matches!(picture.layout, ColorLayout::Y | ColorLayout::YA);
+    let prefix = if picture.layer.is_empty() { String::new() } else { format!("{}.", picture.layer) };
+    if luminance && names.iter().any(|n| n.strip_prefix(prefix.as_str()).is_some_and(|c| c == "RY" || c == "BY")) {
         return Err(MediaError::Unsupported(format!("{name}: luminance / chroma OpenEXR is not supported yet")));
     }
-    let rgb = has("R") || has("G") || has("B");
-    let targets: Vec<Target> = h
-        .channels
-        .iter()
-        .map(|c| match c.name.as_str() {
-            "R" => Target::Slot(0),
-            "G" => Target::Slot(1),
-            "B" => Target::Slot(2),
-            "A" => Target::Slot(3),
-            "Y" if !rgb => Target::Grey,
-            _ => Target::Skip,
-        })
-        .collect();
-    let used: Vec<PixelType> = h.channels.iter().zip(&targets).filter(|(_, t)| !matches!(t, Target::Skip)).map(|(c, _)| c.ty).collect();
-    if !targets.iter().any(|t| matches!(t, Target::Slot(0..=2) | Target::Grey)) {
-        return Err(MediaError::Unsupported(format!("{name}: EXR has no R, G, B or Y channel")));
+    let mut targets = vec![Target::Skip; h.channels.len()];
+    let slots: &[Target] = match picture.layout {
+        ColorLayout::Rgba | ColorLayout::Rgb => &[Target::Slot(0), Target::Slot(1), Target::Slot(2), Target::Slot(3)],
+        ColorLayout::Y | ColorLayout::YA => &[Target::Grey, Target::Slot(3)],
+    };
+    for (&index, &slot) in picture.channels.iter().zip(slots) {
+        if let Some(t) = targets.get_mut(index) {
+            *t = slot;
+        }
     }
-    let alpha = has("A");
+    let used: Vec<PixelType> = h.channels.iter().zip(&targets).filter(|(_, t)| !matches!(t, Target::Skip)).map(|(c, _)| c.ty).collect();
+    let alpha = picture.layout.has_alpha();
     // byte offset of each channel within a scan line, and the line size
     let mut line = 0usize;
     let mut offs = Vec::with_capacity(h.channels.len());
@@ -568,12 +572,13 @@ pub fn decode(name: &str, b: &[u8]) -> Result<Decoded> {
         Some(PixelType::Uint) => "32-bit integer",
         _ => "16-bit float",
     };
-    let layout = match (alpha, rgb) {
-        (true, _) => "RGBA",
-        (false, true) => "RGB",
-        (false, false) => "Y",
+    let layout = match picture.layout {
+        ColorLayout::Rgba => "RGBA",
+        ColorLayout::Rgb => "RGB",
+        ColorLayout::YA => "YA",
+        ColorLayout::Y => "Y",
     };
-    let pixel_format = format!("{layout} {depth}");
+    let pixel_format = if picture.layer.is_empty() { format!("{layout} {depth}") } else { format!("{layout} {depth}, layer {}", picture.layer) };
     let mut frame = VideoFrame::rgba_f32(fw32, fh32, px);
     frame.color = LINEAR_709;
     Ok(Decoded { frame, has_alpha, pixel_format })
